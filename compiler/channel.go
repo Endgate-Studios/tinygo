@@ -14,8 +14,10 @@ import (
 )
 
 func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
-	elementSize := b.targetData.TypeAllocSize(b.getLLVMType(expr.Type().Underlying().(*types.Chan).Elem()))
+	elementType := b.getLLVMType(expr.Type().Underlying().(*types.Chan).Elem())
+	elementSize := b.targetData.TypeAllocSize(elementType)
 	elementSizeValue := llvm.ConstInt(b.uintptrType, elementSize, false)
+	elementLayout := b.createObjectLayout(elementType, expr.Pos())
 	bufSize := b.getValue(expr.Size, getPos(expr))
 	b.createChanBoundsCheck(elementSize, bufSize, expr.Size.Type().Underlying().(*types.Basic), expr.Pos())
 	if bufSize.Type().IntTypeWidth() < b.uintptrType.IntTypeWidth() {
@@ -23,7 +25,7 @@ func (b *builder) createMakeChan(expr *ssa.MakeChan) llvm.Value {
 	} else if bufSize.Type().IntTypeWidth() > b.uintptrType.IntTypeWidth() {
 		bufSize = b.CreateTrunc(bufSize, b.uintptrType, "")
 	}
-	return b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize}, "")
+	return b.createRuntimeCall("chanMake", []llvm.Value{elementSizeValue, bufSize, elementLayout}, "")
 }
 
 // createChanSend emits a pseudo chan send operation. It is lowered to the
@@ -80,6 +82,96 @@ func (b *builder) createChanClose(ch llvm.Value) {
 	b.createRuntimeInvoke("chanClose", []llvm.Value{ch}, "")
 }
 
+// createNonBlockingSelect emits IR for a non-blocking select with one channel case.
+func (b *builder) createNonBlockingSelect(expr *ssa.Select) llvm.Value {
+	state := expr.States[0]
+	ch := b.getValue(state.Chan, state.Pos)
+
+	resultType := b.ctx.StructType([]llvm.Type{
+		b.ctx.Int32Type(),
+		b.ctx.Int1Type(),
+	}, false)
+
+	var selected llvm.Value
+	selectOk := llvm.ConstInt(b.ctx.Int1Type(), 1, false)
+
+	switch state.Dir {
+	case types.SendOnly:
+		valueType := b.getLLVMType(state.Send.Type())
+		isZeroSize := b.targetData.TypeAllocSize(valueType) == 0
+
+		valuePtr := llvm.ConstNull(b.dataPtrType)
+		if !isZeroSize {
+			valuePtr = b.getSelectSendStorage(state.Send)
+		}
+
+		selected = b.createRuntimeInvoke(
+			"chanTrySend",
+			[]llvm.Value{ch, valuePtr},
+			"select.sent",
+		)
+
+	case types.RecvOnly:
+		valueType := b.getLLVMType(
+			state.Chan.Type().Underlying().(*types.Chan).Elem(),
+		)
+		isZeroSize := b.targetData.TypeAllocSize(valueType) == 0
+
+		// getChanSelectResult loads the received value later.
+		recvbuf := llvm.Undef(b.dataPtrType)
+		runtimeRecvbuf := llvm.ConstNull(b.dataPtrType)
+
+		if !isZeroSize {
+			recvbuf, _ = b.createTemporaryAlloca(
+				valueType,
+				"select.recvbuf",
+			)
+			runtimeRecvbuf = recvbuf
+		}
+		results := b.createRuntimeCall(
+			"chanTryRecv",
+			[]llvm.Value{ch, runtimeRecvbuf},
+			"select.recv",
+		)
+
+		selected = b.CreateExtractValue(results, 0, "select.received")
+		recvOk := b.CreateExtractValue(results, 1, "select.recv.ok")
+		selectOk = b.CreateSelect(
+			selected,
+			recvOk,
+			llvm.ConstInt(b.ctx.Int1Type(), 1, false),
+			"select.ok",
+		)
+
+		if b.selectRecvBuf == nil {
+			b.selectRecvBuf = make(map[*ssa.Select]llvm.Value)
+		}
+		b.selectRecvBuf[expr] = recvbuf
+
+	default:
+		panic("unreachable")
+	}
+
+	selectedIndex := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
+	defaultIndex := llvm.ConstInt(
+		b.ctx.Int32Type(),
+		math.MaxUint32,
+		false,
+	)
+
+	selectIndex := b.CreateSelect(
+		selected,
+		selectedIndex,
+		defaultIndex,
+		"select.index",
+	)
+
+	result := llvm.Undef(resultType)
+	result = b.CreateInsertValue(result, selectIndex, 0, "")
+	result = b.CreateInsertValue(result, selectOk, 1, "")
+	return result
+}
+
 // createSelect emits all IR necessary for a select statements. That's a
 // non-trivial amount of code because select is very complex to implement.
 func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
@@ -100,6 +192,10 @@ func (b *builder) createSelect(expr *ssa.Select) llvm.Value {
 			retval = b.CreateInsertValue(retval, llvm.ConstInt(b.intType, 0xffffffffffffffff, true), 0, "")
 			return retval // {-1, false}
 		}
+	}
+
+	if !expr.Blocking && len(expr.States) == 1 {
+		return b.createNonBlockingSelect(expr)
 	}
 
 	const maxSelectStates = math.MaxUint32 >> 2

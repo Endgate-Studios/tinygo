@@ -30,7 +30,10 @@ on a different system like Mac.
 
 ## Using GNU Make
 
-The static build of TinyGo is driven by GNUmakefile, which provides a help target for quick reference:
+The static build of TinyGo is driven by GNUmakefile, which includes the topic
+files in the `make/` directory (`config.mk`, `llvm.mk`, `gen-device.mk`,
+`build.mk`, `test.mk`, `smoketest.mk`, `release.mk`, and `tools.mk`).
+It provides a help target for quick reference:
 
     % make help
     clean                           Remove build directory
@@ -42,6 +45,9 @@ The static build of TinyGo is driven by GNUmakefile, which provides a help targe
     tinygo                          Build the TinyGo compiler
     lint                            Lint source tree
     spell                           Spellcheck source tree
+    llvm-image-tag                  Print the tag of the prebuilt LLVM Docker image
+    docker-llvm                     Build the LLVM base image (slow)
+    docker-tinygo                   Build the TinyGo compiler image
 
 ## Download the source
 
@@ -49,6 +55,10 @@ The first step is to download the TinyGo sources (use `--recursive` if you clone
 the git repository). Then, inside the directory, download the LLVM source:
 
     make llvm-source
+
+The LLVM commit to use is pinned in `llvm-version.txt`. A change to that file
+makes CI build LLVM again. The file is part of the LLVM cache key and of the
+Docker image tag. All other changes reuse the cached LLVM build.
 
 You can also store LLVM outside of the TinyGo root directory by setting the
 `LLVM_BUILDDIR`, `CLANG_SRC` and `LLD_SRC` make variables, but that is not
@@ -64,7 +74,7 @@ while producing binaries that are about as fast.
     export CC=clang
     export CXX=clang++
 
-The Makefile includes a default configuration that is good for most users. It
+`make/config.mk` holds a default configuration that is good for most users. It
 builds a release version of LLVM (optimized, no asserts) and includes all
 targets supported by TinyGo:
 
@@ -98,6 +108,29 @@ On macOS, use otool -L:
 
 The result should not contain libclang or libLLVM.
 
+## Build with Docker
+
+The Docker build uses two images. The LLVM image holds the LLVM build, and the
+compiler image holds TinyGo. The LLVM image changes only when
+`llvm-version.txt`, `Dockerfile.llvm`, or the make files change, so the slow
+LLVM build does not run again for each change to TinyGo.
+
+To build both images:
+
+    make docker-llvm
+    make docker-tinygo
+
+The first command takes 1-2 hours. To use the LLVM image that CI published
+instead of a local build:
+
+    docker build -t tinygo-dev \
+        --build-arg LLVM_IMAGE=ghcr.io/tinygo-org/llvm-22:$(sh tools/llvm-image-tag.sh) .
+
+`tools/llvm-image-tag.sh` prints the tag of the LLVM image for the current
+source tree, and `make llvm-image-tag` does the same. CI uses that script, so
+the tag agrees. If the registry does not hold that tag, or you are not able to
+pull it, build the LLVM image with `make docker-llvm`.
+
 ## Make a release tarball
 
 Now that we have a working static build, it's time to make a release tarball:
@@ -116,3 +149,35 @@ the following command (for example in ~/lib):
 TinyGo will get extracted to a `tinygo` directory. You can then call it with:
 
     ./tinygo/bin/tinygo
+
+## Publish a release
+
+The `Release` workflow (`.github/workflows/release.yml`) publishes releases. It
+does not build anything. The Linux, macOS and Windows workflows already build
+every file that a release needs when the `release` branch is pushed, so the
+release workflow collects the artifacts of those runs for the tagged commit.
+What ships is what was tested.
+
+ 1. On the `dev` branch, set `const version` in `goenv/version.go` to the new
+    version (without a `v` prefix), and add the entry to `CHANGELOG.md`.
+ 2. Merge `dev` into the `release` branch.
+ 3. Tag that commit and push the tag:
+
+        git tag v0.42.0
+        git push origin v0.42.0
+
+    The tag must be `v` plus the version in `goenv/version.go`, because the
+    release file names come from that constant.
+ 4. The workflow waits for the Linux, macOS and Windows runs of the tagged
+    commit, collects their nine files, and creates a **draft** release. The
+    release notes come from the `CHANGELOG.md` entry for that version.
+ 5. Review the draft release and publish it.
+ 6. On the `dev` branch, set `goenv/version.go` to the next `-dev` version.
+
+To release again after a failure, delete the draft release and start the
+workflow from the Actions tab with the tag as its input.
+
+GitHub keeps a SHA-256 digest of every published file. The digest is not shown
+on the release page, but it can be printed with:
+
+    gh release view v0.42.0 --json assets --jq '.assets[] | "\(.digest)  \(.name)"'

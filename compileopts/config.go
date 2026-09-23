@@ -23,8 +23,10 @@ import (
 // builder.Library struct but that's hard to do since we want to know the
 // library path in advance in several places).
 var libVersions = map[string]int{
-	"musl":  3,
-	"bdwgc": 2,
+	"musl":         3,
+	"bdwgc":        4,
+	"picolibc":     2,
+	"wasmbuiltins": 1,
 }
 
 // Config keeps all configuration affecting the build in a single struct.
@@ -113,6 +115,7 @@ func (c *Config) BuildTags() []string {
 		"osusergo",                                   // to get os/user to work
 		"math_big_pure_go",                           // to get math/big to work
 		"gc." + c.GC(), "scheduler." + c.Scheduler(), // used inside the runtime package
+		"tinygo.unwind." + c.PanicUnwind(),
 		"serial." + c.Serial()}...) // used inside the machine package
 	switch c.Scheduler() {
 	case "threads", "cores":
@@ -200,6 +203,42 @@ func (c *Config) OptLevel() (level string, speedLevel, sizeLevel int) {
 // instruction).
 func (c *Config) PanicStrategy() string {
 	return c.Options.PanicStrategy
+}
+
+// PanicUnwind returns the mechanism used to unwind panics and Goexit. Asyncify
+// provides unwinding whenever that scheduler is selected. Explicit
+// return-based unwinding must be requested by the command line or target
+// specification.
+func (c *Config) PanicUnwind() string {
+	if c.Scheduler() == "asyncify" {
+		return "asyncify"
+	}
+	requested := c.Target.PanicUnwind
+	if c.Options.PanicUnwind != "" {
+		requested = c.Options.PanicUnwind
+	}
+	if requested == "explicit" {
+		return "explicit"
+	}
+	arch, _, _ := strings.Cut(c.Triple(), "-")
+	switch arch {
+	case "wasm32":
+		return "none"
+	default:
+		return "setjmp"
+	}
+}
+
+// SupportsExplicitUnwind reports whether the target can use return-based
+// panic unwinding.
+func (c *Config) SupportsExplicitUnwind() bool {
+	arch, _, _ := strings.Cut(c.Triple(), "-")
+	switch arch {
+	case "wasm32", "riscv64", "xtensa":
+		return true
+	default:
+		return false
+	}
 }
 
 // AutomaticStackSize returns whether goroutine stack sizes should be determined
@@ -344,6 +383,11 @@ func (c *Config) CFlags(libclang bool) []string {
 		)
 	}
 	cflags = append(cflags, c.LibcCFlags()...)
+	if c.GC() == "boehm" {
+		cflags = append(cflags,
+			"-I"+filepath.Join(goenv.Get("TINYGOROOT"), "lib", "bdwgc", "include"),
+		)
+	}
 	// Always emit debug information. It is optionally stripped at link time.
 	cflags = append(cflags, "-gdwarf-4")
 	// Use the same optimization level as TinyGo.
@@ -383,13 +427,13 @@ func (c *Config) LibcCFlags() []string {
 		}
 	case "picolibc":
 		root := goenv.Get("TINYGOROOT")
-		picolibcDir := filepath.Join(root, "lib", "picolibc", "newlib", "libc")
+		picolibcDir := filepath.Join(root, "lib", "picolibc", "libc")
 		path := c.LibraryPath("picolibc")
 		return []string{
 			"-nostdlibinc",
 			"-isystem", filepath.Join(path, "include"),
 			"-isystem", filepath.Join(picolibcDir, "include"),
-			"-isystem", filepath.Join(picolibcDir, "tinystdio"),
+			"-isystem", filepath.Join(picolibcDir, "stdio"),
 			"-D__PICOLIBC_ERRNO_FUNCTION=__errno_location",
 		}
 	case "musl":
@@ -482,7 +526,11 @@ func (c *Config) LinkerFlavor() string {
 // ExtraFiles returns the list of extra files to be built and linked with the
 // executable. This can include extra C and assembly files.
 func (c *Config) ExtraFiles() []string {
-	return c.Target.ExtraFiles
+	files := c.Target.ExtraFiles
+	if c.GC() == "boehm" && !slices.Contains(files, "src/runtime/gc_boehm.c") {
+		files = append(slices.Clone(files), "src/runtime/gc_boehm.c")
+	}
+	return files
 }
 
 // DumpSSA returns whether to dump Go SSA while compiling (-dumpssa flag). Only
@@ -668,6 +716,7 @@ type TestConfig struct {
 	RunRegexp         string
 	SkipRegexp        string
 	Count             *int
+	Parallel          *int
 	BenchRegexp       string
 	BenchTime         string
 	BenchMem          bool

@@ -23,30 +23,27 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
-// supportsRecover returns whether the compiler supports the recover() builtin
-// for the current architecture.
+// supportsRecover reports whether the selected unwind mode supports recover.
 func (b *builder) supportsRecover() bool {
-	switch b.archFamily() {
-	case "wasm32":
-		// Probably needs to be implemented using the exception handling
-		// proposal of WebAssembly:
-		// https://github.com/WebAssembly/exception-handling
-		return false
-	case "xtensa":
-		// TODO: add support for these architectures
-		return false
-	default:
-		return true
-	}
+	return b.PanicUnwind != "none"
+}
+
+func (b *builder) usesExplicitUnwind() bool {
+	return b.PanicUnwind == "explicit"
+}
+
+func (b *builder) usesAsyncifyUnwind() bool {
+	return b.PanicUnwind == "asyncify"
+}
+
+func (b *builder) usesReturnUnwind() bool {
+	return b.usesExplicitUnwind() || b.usesAsyncifyUnwind()
 }
 
 // hasDeferFrame returns whether the current function needs to catch panics and
 // run defers.
 func (b *builder) hasDeferFrame() bool {
-	if b.fn.Recover == nil {
-		return false
-	}
-	return b.supportsRecover()
+	return b.fn.Recover != nil && b.supportsRecover()
 }
 
 // deferInitFunc sets up this function for future deferred calls. It must be
@@ -94,6 +91,9 @@ func (b *builder) deferInitFunc() {
 // destroyDeferFrame.
 func (b *builder) createLandingPad() {
 	b.SetInsertPointAtEnd(b.landingpad)
+	if b.usesReturnUnwind() {
+		b.createRuntimeCall("clearUnwind", nil, "")
+	}
 
 	// Add debug info, if needed.
 	// The location used is the closing bracket of the function.
@@ -109,11 +109,21 @@ func (b *builder) createLandingPad() {
 	b.CreateBr(b.blockInfo[b.fn.Recover.Index].entry)
 }
 
-// Create a checkpoint (similar to setjmp). This emits inline assembly that
-// stores the current program counter inside the ptr address (actually
-// ptr+sizeof(ptr)) and then returns a boolean indicating whether this is the
-// normal flow (false) or we jumped here from somewhere else (true).
+// Create a checkpoint (similar to setjmp). It returns whether execution is
+// continuing normally instead of resuming after a longjmp.
 func (b *builder) createCheckpoint(ptr llvm.Value) llvm.Value {
+	if b.archFamily() == "xtensa" {
+		fnType := llvm.FunctionType(b.ctx.Int32Type(), []llvm.Type{b.dataPtrType}, false)
+		fn := b.mod.NamedFunction("setjmp")
+		if fn.IsNil() {
+			fn = llvm.AddFunction(b.mod, "setjmp", fnType)
+			fn.AddFunctionAttr(b.ctx.CreateEnumAttribute(llvm.AttributeKindID("returns_twice"), 0))
+		}
+		result := b.CreateCall(fnType, fn, []llvm.Value{ptr}, "setjmp")
+		result.AddCallSiteAttribute(-1, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("returns_twice"), 0))
+		return b.CreateICmp(llvm.IntEQ, result, llvm.ConstInt(b.ctx.Int32Type(), 0, false), "setjmp.result")
+	}
+
 	// Construct inline assembly equivalents of setjmp.
 	// The assembly works as follows:
 	//   * Registers are either clobbered or, on 386, saved for longjmp to
@@ -233,7 +243,6 @@ li a0, 0
 		}
 		constraints = "={a0},{a1},~{a1},~{a2},~{a3},~{a4},~{a5},~{a6},~{a7},~{s0},~{s1},~{s2},~{s3},~{s4},~{s5},~{s6},~{s7},~{s8},~{s9},~{s10},~{s11},~{t0},~{t1},~{t2},~{t3},~{t4},~{t5},~{t6},~{ra},~{f0},~{f1},~{f2},~{f3},~{f4},~{f5},~{f6},~{f7},~{f8},~{f9},~{f10},~{f11},~{f12},~{f13},~{f14},~{f15},~{f16},~{f17},~{f18},~{f19},~{f20},~{f21},~{f22},~{f23},~{f24},~{f25},~{f26},~{f27},~{f28},~{f29},~{f30},~{f31},~{memory}"
 	default:
-		// This case should have been handled by b.supportsRecover().
 		b.addError(b.fn.Pos(), "unknown architecture for defer: "+b.archFamily())
 	}
 	asmType := llvm.FunctionType(resultType, []llvm.Type{b.dataPtrType}, false)
@@ -260,6 +269,9 @@ func (b *builder) createInvokeCheckpoint() {
 // not update currentBlockInfo.exit because the fault block is a dead-end that
 // does not participate in phi node resolution.
 func (b *builder) createFaultCheckpoint() {
+	if b.usesReturnUnwind() {
+		return
+	}
 	isZero := b.createCheckpoint(b.deferFrame)
 	continueBB := b.insertBasicBlock("")
 	b.CreateCondBr(isZero, continueBB, b.landingpad)
@@ -413,9 +425,6 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 	next := b.CreateLoad(b.dataPtrType, b.deferPtr, "defer.next")
 
 	var values llvmValueList
-	lowerArgument := func(value ssa.Value) llvm.Value {
-		return b.getCallArgument(value, false)
-	}
 	if instr.Call.IsInvoke() {
 		// Method call on an interface.
 
@@ -433,7 +442,8 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		typecode := b.CreateExtractValue(itf, 0, "invoke.func.typecode")
 		receiverValue := b.CreateExtractValue(itf, 1, "invoke.func.receiver")
 		values = newLLVMValueList(callback, next, typecode, receiverValue)
-		values.appendSSAValues(instr.Call.Args, lowerArgument)
+		abi := b.getInterfaceFunctionABI(instr.Call.Signature())
+		values.append(b.getCallArguments(instr.Call.Args, abi.params[1:])...)
 
 	} else if callee, ok := instr.Call.Value.(*ssa.Function); ok {
 		// Regular function call.
@@ -447,9 +457,8 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		// runtime._defer fields).
 		values = newLLVMValueList(callback, next)
 		exported := b.getFunctionInfo(callee).exported
-		values.appendSSAValues(instr.Call.Args, func(value ssa.Value) llvm.Value {
-			return b.getCallArgument(value, exported)
-		})
+		abi := b.getFunctionABI(callee.Signature, exported)
+		values.append(b.getCallArguments(instr.Call.Args, abi.params)...)
 
 	} else if makeClosure, ok := instr.Call.Value.(*ssa.MakeClosure); ok {
 		// Immediately applied function literal with free variables.
@@ -473,7 +482,8 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		// runtime._defer fields, followed by all parameters including the
 		// context pointer).
 		values = newLLVMValueList(callback, next)
-		values.appendSSAValues(instr.Call.Args, lowerArgument)
+		abi := b.getFunctionABI(fn.Signature, false)
+		values.append(b.getCallArguments(instr.Call.Args, abi.params)...)
 		values.append(context)
 
 	} else if builtin, ok := instr.Call.Value.(*ssa.Builtin); ok {
@@ -514,7 +524,8 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		// runtime._defer fields, followed by all parameters including the
 		// context pointer).
 		values = newLLVMValueList(callback, next, funcValue)
-		values.appendSSAValues(instr.Call.Args, lowerArgument)
+		abi := b.getFunctionABI(instr.Call.Signature(), false)
+		values.append(b.getCallArguments(instr.Call.Args, abi.params)...)
 	}
 
 	// Make a struct out of the collected values to put in the deferred call
@@ -553,6 +564,7 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 // createRunDefers emits code to run all deferred functions.
 func (b *builder) createRunDefers() {
 	deferType := b.getLLVMRuntimeType("_defer")
+	b.runningDefers = true
 
 	// Add a loop like the following:
 	//     for stack != nil {
@@ -623,7 +635,13 @@ func (b *builder) createRunDefers() {
 				valueTypes = append(valueTypes, b.dataPtrType, b.dataPtrType)
 			}
 
-			valueTypes = b.appendStoredValueTypes(valueTypes, callback.Args, false)
+			var params []functionABIParam
+			if callback.IsInvoke() {
+				params = b.getInterfaceFunctionABI(callback.Signature()).params[1:]
+			} else {
+				params = b.getFunctionABI(callback.Signature(), false).params
+			}
+			valueTypes = b.appendStoredParamTypes(valueTypes, params)
 
 			// Extract the params from the struct (including receiver).
 			deferredCallType := b.ctx.StructType(valueTypes, false)
@@ -658,7 +676,7 @@ func (b *builder) createRunDefers() {
 			}
 			forwardParams = b.prependIndirectResult(callback.Signature(), false, forwardParams, "defer.result")
 
-			b.createCall(fnType, fnPtr, forwardParams, "")
+			b.createInvokeWithAnalysis(fnType, fnPtr, forwardParams, "", true, true)
 
 		case *ssa.Function:
 			// Direct call.
@@ -666,7 +684,8 @@ func (b *builder) createRunDefers() {
 			// Get the real defer struct type and cast to it.
 			valueTypes := []llvm.Type{b.uintptrType, b.dataPtrType}
 			exported := b.getFunctionInfo(callback).exported
-			valueTypes = b.appendStoredParamTypes(valueTypes, getParams(callback.Signature), exported)
+			abi := b.getFunctionABI(callback.Signature, exported)
+			valueTypes = b.appendStoredParamTypes(valueTypes, abi.params)
 			deferredCallType := b.ctx.StructType(valueTypes, false)
 
 			// Extract the params from the struct.
@@ -683,13 +702,14 @@ func (b *builder) createRunDefers() {
 
 			// Call real function.
 			fnType, fn := b.getFunction(callback)
-			b.createInvoke(fnType, fn, forwardParams, "")
+			b.createInvokeWithAnalysis(fnType, fn, forwardParams, "", b.functionMayUnwind(callback), b.functionMaySuspend(callback))
 
 		case *ssa.MakeClosure:
 			// Get the real defer struct type and cast to it.
 			fn := callback.Fn.(*ssa.Function)
 			valueTypes := []llvm.Type{b.uintptrType, b.dataPtrType}
-			valueTypes = b.appendStoredParamTypes(valueTypes, getParams(fn.Signature), false)
+			abi := b.getFunctionABI(fn.Signature, false)
+			valueTypes = b.appendStoredParamTypes(valueTypes, abi.params)
 			valueTypes = append(valueTypes, b.dataPtrType) // closure
 			deferredCallType := b.ctx.StructType(valueTypes, false)
 
@@ -699,7 +719,7 @@ func (b *builder) createRunDefers() {
 			// Call deferred function.
 			fnType, llvmFn := b.getFunction(fn)
 			forwardParams = b.prependIndirectResult(fn.Signature, false, forwardParams, "defer.result")
-			b.createCall(fnType, llvmFn, forwardParams, "")
+			b.createInvokeWithAnalysis(fnType, llvmFn, forwardParams, "", b.functionMayUnwind(fn), b.functionMaySuspend(fn))
 		case *ssa.Builtin:
 			db := b.deferBuiltinFuncs[callback]
 
@@ -725,6 +745,13 @@ func (b *builder) createRunDefers() {
 			panic("unknown deferred function type")
 		}
 
+		if b.usesReturnUnwind() {
+			// A panic in a deferred call has reached its target frame. Keep
+			// running the remaining defers; destroyDeferFrame will propagate
+			// the panic afterwards if it was not recovered.
+			b.createRuntimeCall("clearUnwind", nil, "")
+		}
+
 		// Branch back to the start of the loop.
 		b.CreateBr(loophead)
 	}
@@ -738,4 +765,5 @@ func (b *builder) createRunDefers() {
 
 	// End of loop.
 	b.SetInsertPointAtEnd(end)
+	b.runningDefers = false
 }

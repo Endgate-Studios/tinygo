@@ -7,7 +7,6 @@ package runtime
 // compiler for //go:wasmexport support.
 
 import (
-	"internal/task"
 	"unsafe"
 )
 
@@ -67,9 +66,9 @@ var initializeCalled bool
 func wasmExportCheckRun() {
 	switch {
 	case !initializeCalled:
-		runtimePanic("//go:wasmexport function called before runtime initialization")
+		runtimePanic(errWasmBeforeInit)
 	case mainExited:
-		runtimePanic("//go:wasmexport function called after main.main returned")
+		runtimePanic(errWasmAfterMain)
 	}
 }
 
@@ -82,22 +81,6 @@ func wasmExportCheckRun() {
 func wasmExportRun(done *bool) {
 	scheduler(true)
 	if !*done {
-		runtimePanic("//go:wasmexport function did not finish")
+		runtimePanic(errWasmDidNotFinish)
 	}
-}
-
-// Called from the goroutine wrapper for the //go:wasmexport function. It just
-// signals to the runtime that the //go:wasmexport call has finished, and can
-// switch back to the wasmExportRun function.
-//
-// This function is not called when the scheduler is disabled.
-func wasmExportExit() {
-	// Signal to the scheduler that it should return, since this call to a
-	// //go:wasmexport function has exited.
-	schedulerExit = true
-
-	task.Pause()
-
-	// TODO: we could cache the allocated stack so we don't have to keep
-	// allocating a new stack on every //go:wasmexport call.
 }

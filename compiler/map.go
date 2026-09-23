@@ -13,6 +13,12 @@ import (
 
 const hashArrayUnrollLimit = 4
 
+const (
+	hashmapBucketSlots  = 8
+	hashmapMaxKeySize   = 128
+	hashmapMaxValueSize = 128
+)
+
 // createMakeMap creates a new map object (runtime.hashmap) by allocating and
 // initializing an appropriately sized object.
 func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
@@ -25,6 +31,8 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 	valueSize := b.targetData.TypeAllocSize(llvmValueType)
 	llvmKeySize := llvm.ConstInt(b.uintptrType, keySize, false)
 	llvmValueSize := llvm.ConstInt(b.uintptrType, valueSize, false)
+	mapLayout := b.getHashmapTypeInfo(mapType, expr.Pos())
+
 	sizeHint := llvm.ConstInt(b.uintptrType, 8, false)
 	if expr.Reserve != nil {
 		sizeHint = b.getValue(expr.Reserve, getPos(expr))
@@ -54,9 +62,70 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 
 	hashmap := b.createRuntimeCall("hashmapMakeGeneric", []llvm.Value{
 		llvmKeySize, llvmValueSize, sizeHint,
+		mapLayout,
 		hashFn, equalFn,
 	}, "")
 	return hashmap, nil
+}
+
+func (c *compilerContext) getHashmapTypeInfo(mapType *types.Map, pos token.Pos) llvm.Value {
+	llvmKeyType := c.getLLVMType(mapType.Key().Underlying())
+	llvmValueType := c.getLLVMType(mapType.Elem().Underlying())
+	keySize := c.targetData.TypeAllocSize(llvmKeyType)
+	valueSize := c.targetData.TypeAllocSize(llvmValueType)
+	keyLayout := c.createObjectLayout(llvmKeyType, pos)
+	valueLayout := c.createObjectLayout(llvmValueType, pos)
+
+	llvmKeySlotType := llvmKeyType
+	if keySize > hashmapMaxKeySize {
+		llvmKeySlotType = c.dataPtrType
+	}
+	llvmValueSlotType := llvmValueType
+	if valueSize > hashmapMaxValueSize {
+		llvmValueSlotType = c.dataPtrType
+	}
+
+	// Keep this in sync with runtime.hashmapBucket and
+	// runtime.hashmapBucketHeaderSize.
+	pointerSize := c.targetData.TypeAllocSize(c.dataPtrType)
+	headerSize := (uint64(8) + pointerSize + 7) &^ 7
+	headerPadding := headerSize - uint64(8) - pointerSize
+	bucketFields := []llvm.Type{
+		llvm.ArrayType(c.ctx.Int8Type(), hashmapBucketSlots),
+		c.dataPtrType,
+	}
+	if headerPadding != 0 {
+		bucketFields = append(bucketFields, llvm.ArrayType(c.ctx.Int8Type(), int(headerPadding)))
+	}
+	bucketFields = append(bucketFields,
+		llvm.ArrayType(llvmKeySlotType, hashmapBucketSlots),
+		llvm.ArrayType(llvmValueSlotType, hashmapBucketSlots),
+	)
+	bucketType := c.ctx.StructType(bucketFields, true)
+	bucketSize := headerSize +
+		c.targetData.TypeAllocSize(llvmKeySlotType)*hashmapBucketSlots +
+		c.targetData.TypeAllocSize(llvmValueSlotType)*hashmapBucketSlots
+	if c.targetData.TypeAllocSize(bucketType) != bucketSize {
+		panic("compiler hashmap bucket layout does not match runtime")
+	}
+	bucketLayout := c.createObjectLayout(bucketType, pos)
+	mapLayoutName := "runtime.hashmapType:" +
+		hashmapCanonicalTypeName(mapType.Key()) + ":" +
+		hashmapCanonicalTypeName(mapType.Elem())
+	mapLayout := c.mod.NamedGlobal(mapLayoutName)
+	if mapLayout.IsNil() {
+		initializer := c.ctx.ConstStruct([]llvm.Value{
+			keyLayout,
+			valueLayout,
+			bucketLayout,
+		}, false)
+		mapLayout = llvm.AddGlobal(c.mod, initializer.Type(), mapLayoutName)
+		mapLayout.SetInitializer(initializer)
+		mapLayout.SetGlobalConstant(true)
+		mapLayout.SetUnnamedAddr(true)
+		mapLayout.SetLinkage(llvm.LinkOnceODRLinkage)
+	}
+	return mapLayout
 }
 
 // getRuntimeFunctionValue returns a TinyGo function value (with nil context)
@@ -106,7 +175,11 @@ func (b *builder) createMapLookup(keyType, valueType types.Type, m llvm.Value, k
 		if !hashmapIsBinaryKey(keyType) {
 			fnName = "hashmapGenericGet"
 		}
-		commaOkValue = b.createRuntimeCall(fnName, params, "")
+		if fnName == "hashmapGenericGet" {
+			commaOkValue = b.createRuntimeInvoke(fnName, params, "")
+		} else {
+			commaOkValue = b.createRuntimeCall(fnName, params, "")
+		}
 		b.endValueStorage(mapKey)
 	}
 
@@ -155,7 +228,11 @@ func (b *builder) createMapDelete(keyType types.Type, m, key llvm.Value, pos tok
 			fnName = "hashmapGenericDelete"
 		}
 		params := []llvm.Value{m, keyAlloca}
-		b.createRuntimeCall(fnName, params, "")
+		if fnName == "hashmapGenericDelete" {
+			b.createRuntimeInvoke(fnName, params, "")
+		} else {
+			b.createRuntimeCall(fnName, params, "")
+		}
 		b.emitLifetimeEnd(keyAlloca, keySize)
 		return nil
 	}
@@ -417,6 +494,7 @@ func (b *builder) generateKeyHash(keyType types.Type, llvmKeyType llvm.Type, key
 		return b.createRuntimeCall("hashmapInterfacePtrHash", []llvm.Value{keyPtr, size, seed}, "hash")
 	case *types.Struct:
 		hash := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
+		multiplier := llvm.ConstInt(b.ctx.Int32Type(), 31, false)
 		zero := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
 		for i := 0; i < keyType.NumFields(); i++ {
 			if keyType.Field(i).Name() == "_" {
@@ -430,7 +508,7 @@ func (b *builder) generateKeyHash(keyType types.Type, llvmKeyType llvm.Type, key
 			idx := llvm.ConstInt(b.ctx.Int32Type(), uint64(i), false)
 			fieldPtr := b.CreateInBoundsGEP(llvmKeyType, keyPtr, []llvm.Value{zero, idx}, "")
 			fieldHash := b.generateKeyHash(fieldType, llvmFieldType, fieldPtr, seed)
-			hash = b.CreateXor(hash, fieldHash, "")
+			hash = b.CreateXor(b.CreateMul(hash, multiplier, ""), fieldHash, "")
 		}
 		return hash
 	case *types.Array:
@@ -445,6 +523,7 @@ func (b *builder) generateKeyHash(keyType types.Type, llvmKeyType llvm.Type, key
 		if arrayLen == 0 {
 			return llvm.ConstInt(b.ctx.Int32Type(), 0, false)
 		}
+		multiplier := llvm.ConstInt(b.ctx.Int32Type(), 31, false)
 		if arrayLen <= hashArrayUnrollLimit {
 			hash := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
 			zero := llvm.ConstInt(b.ctx.Int32Type(), 0, false)
@@ -452,7 +531,7 @@ func (b *builder) generateKeyHash(keyType types.Type, llvmKeyType llvm.Type, key
 				idx := llvm.ConstInt(b.uintptrType, uint64(i), false)
 				elemPtr := b.CreateInBoundsGEP(llvmKeyType, keyPtr, []llvm.Value{zero, idx}, "")
 				elemHash := b.generateKeyHash(elemType, llvmElemType, elemPtr, seed)
-				hash = b.CreateXor(hash, elemHash, "")
+				hash = b.CreateXor(b.CreateMul(hash, multiplier, ""), elemHash, "")
 			}
 			return hash
 		}
@@ -471,7 +550,7 @@ func (b *builder) generateKeyHash(keyType types.Type, llvmKeyType llvm.Type, key
 
 		elemPtr := b.CreateInBoundsGEP(llvmKeyType, keyPtr, []llvm.Value{zero, phiI}, "")
 		elemHash := b.generateKeyHash(elemType, llvmElemType, elemPtr, seed)
-		newHash := b.CreateXor(phiHash, elemHash, "")
+		newHash := b.CreateXor(b.CreateMul(phiHash, multiplier, ""), elemHash, "")
 		nextI := b.CreateAdd(phiI, llvm.ConstInt(b.uintptrType, 1, false), "")
 		cond := b.CreateICmp(llvm.IntULT, nextI, llvm.ConstInt(b.uintptrType, uint64(arrayLen), false), "")
 		b.CreateCondBr(cond, loopBody, loopDone)

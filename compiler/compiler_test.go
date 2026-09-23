@@ -2,9 +2,11 @@ package compiler
 
 import (
 	"flag"
+	"go/scanner"
 	"go/types"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/goenv"
 	"github.com/tinygo-org/tinygo/loader"
+	"github.com/tinygo-org/tinygo/transform"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -115,7 +118,7 @@ func TestCompiler(t *testing.T) {
 
 			// Update test if needed. Do not check the result.
 			if *flagUpdate {
-				err := os.WriteFile(outPath, []byte(mod.String()), 0666)
+				err := os.WriteFile(outPath, []byte(normalizeIR(mod.String())), 0666)
 				if err != nil {
 					t.Error("failed to write updated output file:", err)
 				}
@@ -174,9 +177,295 @@ func TestOptimizedLargeAggregateABI(t *testing.T) {
 	}
 }
 
-// normalizeIR canonicalizes LLVM IR so a single golden file keeps matching
-// across LLVM versions. Golden files are written against LLVM <21; newer LLVM
-// prints some attributes differently.
+func TestNonBlockingSelectLargeSend(t *testing.T) {
+	options := &compileopts.Options{Target: "wasm"}
+	mod, errs := testCompilePackage(t, options, "channel-nonblocking-large.go")
+	if len(errs) != 0 {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		return
+	}
+	defer mod.Dispose()
+
+	function := mod.NamedFunction("main.selectNonBlockingLargeSend")
+	if function.IsNil() {
+		t.Fatal("missing function main.selectNonBlockingLargeSend")
+	}
+	ir := function.String()
+	if strings.Contains(ir, "load %main.largeChannelValue") {
+		t.Error("non-blocking select send loads the large channel value")
+	}
+	if strings.Contains(ir, "store %main.largeChannelValue") {
+		t.Error("non-blocking select send copies the large channel value")
+	}
+	if !strings.Contains(ir, "@runtime.chanTrySend") {
+		t.Error("non-blocking select send does not call runtime.chanTrySend")
+	}
+}
+
+func TestAggregateFunctionABI(t *testing.T) {
+	for _, target := range []string{"wasm", "cortex-m-qemu"} {
+		t.Run(target, func(t *testing.T) {
+			options := &compileopts.Options{Target: target}
+			if target != "wasm" {
+				options.Scheduler = "tasks"
+			}
+			mod, errs := testCompilePackage(t, options, "aggregate-abi.go")
+			if len(errs) != 0 {
+				for _, err := range errs {
+					t.Error(err)
+				}
+				return
+			}
+			defer mod.Dispose()
+
+			passOptions := llvm.NewPassBuilderOptions()
+			defer passOptions.Dispose()
+			if err := mod.RunPasses("default<O2>", llvm.TargetMachine{}, passOptions); err != nil {
+				t.Fatal(err)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+
+			checkFunctionParamABI(t, mod, "main.readDirectAggregates", false, false)
+			checkFunctionParamABI(t, mod, "main.readLimitAggregates", false, false)
+			checkFunctionParamABI(t, mod, "main.readBoundaryAggregates", true, false)
+			checkFunctionParamABI(t, mod, "main.readAggregates", true, false)
+			checkFunctionParamABI(t, mod, "main.readSingleAggregate", false)
+			checkFunctionParamABI(t, mod, "main.readThreeAggregates", true, false, false)
+			checkFunctionParamABI(t, mod, "main.readResultBudget", false, true)
+			checkFunctionParamABI(t, mod, "readAggregateExport", false)
+			if target == "wasm" {
+				if err := ValidateWasmFunctionParameters(mod); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func checkFunctionParamABI(t *testing.T, mod llvm.Module, name string, indirect ...bool) {
+	t.Helper()
+	fn := mod.NamedFunction(name)
+	if fn.IsNil() {
+		t.Fatalf("missing function %s", name)
+	}
+	paramTypes := fn.GlobalValueType().ParamTypes()
+	for i, wantIndirect := range indirect {
+		gotIndirect := paramTypes[i].TypeKind() == llvm.PointerTypeKind
+		if gotIndirect != wantIndirect {
+			t.Errorf("%s parameter %d indirect=%t, want %t", name, i, gotIndirect, wantIndirect)
+		}
+	}
+}
+
+func TestAggregateExportedInterfaceABI(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		t.Run("debug="+strconv.FormatBool(debug), func(t *testing.T) {
+			options := &compileopts.Options{Target: "wasm"}
+			mod, errs := testCompilePackageWithDebug(t, options, "aggregate-export-abi.go", debug)
+			defer mod.Dispose()
+
+			for _, err := range errs {
+				t.Error(err)
+			}
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatal(err)
+			}
+
+			var markedWrappers int
+			for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+				if attr := fn.GetStringAttributeAtIndex(-1, "tinygo-interface-abi-error"); !attr.IsNil() {
+					markedWrappers++
+				}
+			}
+			if markedWrappers != 2 {
+				t.Errorf("found %d exported interface ABI markers, want 2", markedWrappers)
+			}
+			if err := ValidateWasmFunctionParameters(mod); err == nil {
+				t.Error("missing oversized WebAssembly signature error")
+			} else if !strings.Contains(err.Error(), "exported functions cannot lower aggregate parameters indirectly") {
+				t.Errorf("unexpected oversized WebAssembly signature error: %v", err)
+			}
+
+			target, err := compileopts.LoadTarget(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = transform.LowerInterfaces(mod, &compileopts.Config{
+				Options: options,
+				Target:  target,
+			})
+			if err == nil {
+				t.Fatal("missing exported interface ABI error")
+			}
+			errList, ok := err.(scanner.ErrorList)
+			if !ok {
+				t.Fatalf("expected scanner.ErrorList, got %T", err)
+			}
+			if len(errList) != 2 {
+				t.Fatalf("got %d exported interface ABI errors, want 2", len(errList))
+			}
+			if debug {
+				for _, err := range errList {
+					if !strings.HasSuffix(err.Pos.Filename, "aggregate-export-abi.go") || err.Pos.Line == 0 {
+						t.Errorf("missing source position in exported interface ABI error: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestValidateWasmFunctionParameters(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		params       int
+		resultFields int
+		declaration  bool
+		used         bool
+		wantError    bool
+	}{
+		{"at limit", 999, 2, false, false, false},
+		{"hidden result over limit", 1000, 2, false, false, true},
+		{"single result at limit", 1000, 1, false, false, false},
+		{"empty result at limit", 1000, 0, false, false, false},
+		{"unused declaration", 1001, 0, true, false, false},
+		{"used declaration", 1001, 0, true, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := llvm.NewContext()
+			defer ctx.Dispose()
+			mod := ctx.NewModule("test")
+			defer mod.Dispose()
+			builder := ctx.NewBuilder()
+			defer builder.Dispose()
+
+			paramTypes := make([]llvm.Type, test.params)
+			for i := range paramTypes {
+				paramTypes[i] = ctx.Int32Type()
+			}
+			resultFields := make([]llvm.Type, test.resultFields)
+			for i := range resultFields {
+				resultFields[i] = ctx.Int32Type()
+			}
+			resultType := ctx.StructType(resultFields, false)
+			fnType := llvm.FunctionType(resultType, paramTypes, false)
+			fn := llvm.AddFunction(mod, "test", fnType)
+			if test.declaration {
+				if test.used {
+					caller := llvm.AddFunction(mod, "caller", llvm.FunctionType(ctx.VoidType(), nil, false))
+					block := ctx.AddBasicBlock(caller, "entry")
+					builder.SetInsertPointAtEnd(block)
+					args := make([]llvm.Value, len(paramTypes))
+					for i, paramType := range paramTypes {
+						args[i] = llvm.Undef(paramType)
+					}
+					builder.CreateCall(fnType, fn, args, "")
+					builder.CreateRetVoid()
+				}
+			} else {
+				block := ctx.AddBasicBlock(fn, "entry")
+				builder.SetInsertPointAtEnd(block)
+				builder.CreateRet(llvm.Undef(resultType))
+			}
+
+			err := ValidateWasmFunctionParameters(mod)
+			if (err != nil) != test.wantError {
+				t.Errorf("ValidateWasmFunctionParameters() error = %v, wantError = %t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestDarwinCgoImportDynamic(t *testing.T) {
+	t.Parallel()
+
+	options := &compileopts.Options{GOOS: "darwin", GOARCH: "arm64"}
+	mod, errs := testCompilePackage(t, options, "cgo-import-dynamic.go")
+	if len(errs) != 0 {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		return
+	}
+	defer mod.Dispose()
+
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatal(err)
+	}
+
+	ir := mod.String()
+	if !strings.Contains(ir, `declare void @"remote$INODE64"()`) {
+		t.Error("missing external declaration for cgo_import_dynamic remote symbol")
+	}
+	if !strings.Contains(ir, `ptrtoint (ptr @"remote$INODE64" to i64)`) {
+		t.Error("trampoline address load was not replaced with the remote symbol address")
+	}
+	if strings.Contains(ir, "load i64, ptr @main.libc_test_trampoline_addr") {
+		t.Error("trampoline address global was loaded instead of using the remote symbol address")
+	}
+	if !strings.Contains(ir, "ptrtoint (ptr @syscall_libc_ioctl to i64)") {
+		t.Error("variadic ioctl import was not routed through its fixed-signature wrapper")
+	}
+	for _, remote := range []string{"open", "openat", "fcntl"} {
+		if !strings.Contains(ir, "ptrtoint (ptr @syscall_libc_"+remote+" to i64)") {
+			t.Errorf("variadic %s import was not routed through its fixed-signature wrapper", remote)
+		}
+		if strings.Contains(ir, "declare void @"+remote+"()") {
+			t.Errorf("variadic %s import was declared directly instead of using its wrapper", remote)
+		}
+	}
+	if !strings.Contains(ir, "ptrtoint (ptr @remote_nolib to i64)") {
+		t.Error("cgo_import_dynamic without a library operand was not honored")
+	}
+	if !strings.Contains(ir, "ptrtoint (ptr @libc_self to i64)") {
+		t.Error("cgo_import_dynamic without a remote symbol did not default to the local symbol")
+	}
+	if !strings.Contains(ir, "load i32, ptr @main.libc_badtype_trampoline_addr") {
+		t.Error("load of a non-uintptr trampoline global was replaced instead of being left alone")
+	}
+	if strings.Contains(ir, "@bad_remote") {
+		t.Error("a declaration was created for the remote symbol of a non-uintptr trampoline global")
+	}
+}
+
+// TestDarwinCgoImportDynamicErrors checks the compile errors for misplaced
+// directives and for a remote symbol that collides with a global variable.
+func TestDarwinCgoImportDynamicErrors(t *testing.T) {
+	t.Parallel()
+
+	// Read the expected errors from the test file.
+	var expected []string
+	data, err := os.ReadFile("testdata/cgo-import-dynamic-errors.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if after, ok := strings.CutPrefix(line, "// ERROR: "); ok {
+			expected = append(expected, after)
+		}
+	}
+
+	options := &compileopts.Options{GOOS: "darwin", GOARCH: "arm64"}
+	mod, errs := testCompilePackage(t, options, "cgo-import-dynamic-errors.go")
+	defer mod.Dispose()
+
+	var actual []string
+	for _, err := range errs {
+		actual = append(actual, err.(types.Error).Msg)
+	}
+	slices.Sort(expected)
+	slices.Sort(actual)
+	if !slices.Equal(expected, actual) {
+		t.Errorf("expected errors %q, got %q", expected, actual)
+	}
+}
+
+// normalizeIR canonicalizes LLVM-version-specific IR spellings for comparison
+// and when regenerating golden files.
 func normalizeIR(s string) string {
 	// Golden files are written using the pre-LLVM21 'nocapture' spelling,
 	// which LLVM printed before any co-occurring attribute such as
@@ -281,6 +570,9 @@ func filterIrrelevantIRLines(lines []string) []string {
 		if strings.HasPrefix(line, "source_filename = ") {
 			continue
 		}
+		if strings.HasPrefix(line, "@tinygo.indirect-abi = ") {
+			continue
+		}
 		if llvmVersion < 15 && strings.HasPrefix(line, "target datalayout = ") {
 			// The datalayout string may vary betewen LLVM versions.
 			// Right now test outputs are for LLVM 15 and higher.
@@ -359,7 +651,7 @@ func TestAggregateValueCount(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			count, exceeded := aggregateValueCount(test.typ, 0)
+			count, exceeded := aggregateValueCountLimit(test.typ, 0, maxDirectAggregateValues)
 			if exceeded != test.exceeded {
 				t.Errorf("expected exceeded=%t, got %t", test.exceeded, exceeded)
 			}
@@ -372,6 +664,10 @@ func TestAggregateValueCount(t *testing.T) {
 
 // Build a package given a number of compiler options and a file.
 func testCompilePackage(t *testing.T, options *compileopts.Options, file string) (llvm.Module, []error) {
+	return testCompilePackageWithDebug(t, options, file, false)
+}
+
+func testCompilePackageWithDebug(t *testing.T, options *compileopts.Options, file string, debug bool) (llvm.Module, []error) {
 	target, err := compileopts.LoadTarget(options)
 	if err != nil {
 		t.Fatal("failed to load target:", err)
@@ -392,6 +688,8 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 		AutomaticStackSize: config.AutomaticStackSize(),
 		DefaultStackSize:   config.StackSize(),
 		NeedsStackObjects:  config.NeedsStackObjects(),
+		PanicUnwind:        config.PanicUnwind(),
+		Debug:              debug,
 	}
 	machine, err := NewTargetMachine(compilerConfig)
 	if err != nil {
@@ -414,5 +712,7 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 	// Compile AST to IR.
 	program := lprogram.LoadSSA()
 	pkg := lprogram.MainPkg()
-	return CompilePackage(file, pkg, program.Package(pkg.Pkg), machine, compilerConfig, false)
+	ssaPkg := program.Package(pkg.Pkg)
+	ssaPkg.Build()
+	return CompilePackage(file, pkg, ssaPkg, machine, compilerConfig, false)
 }

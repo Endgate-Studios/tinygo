@@ -60,6 +60,10 @@ func TestBuild(t *testing.T) {
 		"channel.go",
 		"embed/",
 		"finalizer.go",
+		"finalizerbits.go",
+		"finalizeridle.go",
+		"finalizerinvariants.go",
+		"finalizerlarge.go",
 		"float.go",
 		"gc.go",
 		"generics.go",
@@ -77,6 +81,7 @@ func TestBuild(t *testing.T) {
 		"print.go",
 		"reflect.go",
 		"signal.go",
+		"signalnotify.go",
 		"slice.go",
 		"sort.go",
 		"stdlib.go",
@@ -110,13 +115,41 @@ func TestBuild(t *testing.T) {
 		// This makes it possible to run one specific test (instead of all),
 		// which is especially useful to quickly check whether some changes
 		// affect a particular target architecture.
-		runPlatTests(optionsFromTarget(*testTarget, sema), tests, t)
+		options := optionsFromTarget(*testTarget, sema)
+		runPlatTests(options, tests, t)
+		if *testTarget == "wasip1" {
+			t.Run("cgo-realloc", func(t *testing.T) {
+				runTest("cgo-realloc/", options, t, nil, nil)
+			})
+		}
 		return
 	}
 
 	t.Run("Host", func(t *testing.T) {
 		t.Parallel()
-		runPlatTests(optionsFromTarget("", sema), tests, t)
+		hostOptions := optionsFromTarget("", sema)
+		runPlatTests(hostOptions, tests, t)
+		t.Run("testing.go-verbose", func(t *testing.T) {
+			t.Parallel()
+			runTest("testing-verbose.go", hostOptions, t, nil, nil)
+		})
+
+		// scheduler.threads needs threadID, which exists only on Linux and Darwin.
+		// scheduler.none does not link on Windows.
+		switch runtime.GOOS {
+		case "darwin", "linux":
+			for _, scheduler := range []string{"threads", "none"} {
+				scheduler := scheduler
+				t.Run("finalizerinvariants.go-gc-conservative-scheduler-"+scheduler, func(t *testing.T) {
+					t.Parallel()
+					options := compileopts.Options(hostOptions)
+					options.GC = "conservative"
+					options.Scheduler = scheduler
+					options.Tags = append(append([]string(nil), hostOptions.Tags...), "runtime_asserts")
+					runTest("finalizerinvariants.go", options, t, nil, nil)
+				})
+			}
+		}
 	})
 
 	// Test a few build options.
@@ -138,6 +171,67 @@ func TestBuild(t *testing.T) {
 			opts := optionsFromTarget("", sema)
 			opts.Opt = "0"
 			runTestWithConfig("print.go", t, opts, nil, nil)
+		})
+
+		t.Run("opt=0-gc=boehm", func(t *testing.T) {
+			t.Parallel()
+			opts := optionsFromTarget("", sema)
+			opts.Opt = "0"
+			opts.GC = "boehm"
+			runTestWithConfig("gc-boehm-opt0.go", t, opts, nil, nil)
+		})
+
+		// Regression test: at -opt=0 the compiler does not always remove a
+		// local escaping through a pointer cast, so printitf used to
+		// allocate on the panic path. printitf is //go:noheap, so a
+		// regression here makes the build fail with a linker error.
+		t.Run("opt=0-printitf-cortex-m-qemu", func(t *testing.T) {
+			t.Parallel()
+			opts := optionsFromTarget("cortex-m-qemu", sema)
+			opts.Opt = "0"
+			config, err := builder.NewConfig(&opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = Build("testdata/panic-value.go", t.TempDir()+"/panic-value", config)
+			if err != nil {
+				w := &bytes.Buffer{}
+				diagnostics.CreateDiagnostics(err).WriteTo(w, "")
+				t.Fatal(w.String())
+			}
+		})
+
+		t.Run("gc=none-runtime-panic", func(t *testing.T) {
+			t.Parallel()
+			opts := optionsFromTarget("cortex-m-qemu", sema)
+			opts.GC = "none"
+			opts.Scheduler = "none"
+			config, err := builder.NewConfig(&opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = Build("testdata/trivialpanic.go", t.TempDir()+"/trivialpanic", config)
+			if err != nil {
+				w := &bytes.Buffer{}
+				diagnostics.CreateDiagnostics(err).WriteTo(w, "")
+				t.Fatal(w.String())
+			}
+		})
+
+		t.Run("scheduler=none-uefi", func(t *testing.T) {
+			t.Parallel()
+			opts := optionsFromTarget("uefi-amd64", sema)
+			opts.Scheduler = "none"
+			config, err := builder.NewConfig(&opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = Build("testdata/trivialpanic.go", t.TempDir()+"/trivialpanic", config)
+			if err != nil {
+				w := &bytes.Buffer{}
+				diagnostics.CreateDiagnostics(err).WriteTo(w, "")
+				t.Fatal(w.String())
+			}
 		})
 
 		t.Run("ldflags", func(t *testing.T) {
@@ -197,11 +291,16 @@ func TestBuild(t *testing.T) {
 				optionsBoehm := optionsFromTarget("wasm", sema)
 				optionsBoehm.GC = "boehm"
 				runTest("gc.go", optionsBoehm, t, nil, nil)
+				runTest("gc-boehm.go", optionsBoehm, t, nil, nil)
 			})
 		})
 		t.Run("WASIp1", func(t *testing.T) {
 			t.Parallel()
-			runPlatTests(optionsFromTarget("wasip1", sema), tests, t)
+			options := optionsFromTarget("wasip1", sema)
+			runPlatTests(options, tests, t)
+			t.Run("cgo-realloc", func(t *testing.T) {
+				runTest("cgo-realloc/", options, t, nil, nil)
+			})
 
 			// Test with -gc=boehm.
 			t.Run("gc.go-boehm", func(t *testing.T) {
@@ -209,6 +308,7 @@ func TestBuild(t *testing.T) {
 				optionsBoehm := optionsFromTarget("wasip1", sema)
 				optionsBoehm.GC = "boehm"
 				runTest("gc.go", optionsBoehm, t, nil, nil)
+				runTest("gc-boehm.go", optionsBoehm, t, nil, nil)
 			})
 		})
 		t.Run("WASIp2", func(t *testing.T) {
@@ -259,6 +359,26 @@ func TestTimerStopResetRace(t *testing.T) {
 		t.Skipf("host GOOS %s does not use the threads scheduler", runtime.GOOS)
 	}
 	runTest("timer_stop_reset_race.go", optionsFromTarget("", sema), t, nil, nil)
+}
+
+func TestESP32QEMU(t *testing.T) {
+	t.Parallel()
+
+	options := optionsFromTarget("esp32-qemu", sema)
+	emuCheck(t, options)
+	machines, err := exec.Command("qemu-system-xtensa", "-machine", "help").Output()
+	if err != nil {
+		t.Fatal("failed to list qemu-system-xtensa machines:", err)
+	}
+	if !regexp.MustCompile(`(?m)^esp32\s`).Match(machines) {
+		t.Skip("qemu-system-xtensa does not support the ESP32 machine")
+	}
+	for _, name := range []string{"print.go", "recover.go"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			runTest(name, options, t, nil, nil)
+		})
+	}
 }
 
 func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
@@ -333,10 +453,6 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 				// Too big for AVR. Doesn't fit in flash/RAM.
 				continue
 
-			case "math.go":
-				// Needs newer picolibc version (for sqrt).
-				continue
-
 			case "cgo/":
 				// CGo function pointers don't work on AVR (needs LLVM 16 and
 				// some compiler changes).
@@ -357,29 +473,55 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 				continue
 			}
 		}
-		if isWebAssembly || isBaremetal || options.GOOS == "windows" {
+		if options.GOOS == "windows" {
+			switch name {
+			case "signal.go", "signalnotify.go":
+				// os/signal does not link on Windows.
+				continue
+			}
+		}
+		if isWebAssembly || isBaremetal {
 			switch name {
 			case "signal.go":
 				// Signals only work on POSIX-like systems.
 				continue
 			}
 		}
-		if name == "finalizer.go" && options.Target != "wasm" {
-			// runtime.SetFinalizer is implemented for the block GC, but the
-			// test asserts deterministic collection of a dropped object, which
-			// only holds on the GOOS=js wasm target. The host default GC is
-			// boehm (SetFinalizer is a no-op there); conservative stack scanning
-			// on the emulated targets can pin the object; and the wasip2
-			// component entry lays out the stack differently, so collection is
-			// not deterministic on those. The feature still works on all of
-			// them, it just can't be golden-tested for firing.
-			continue
+		if options.Target != "wasm" {
+			switch name {
+			case "finalizer.go", "finalizerbits.go", "finalizeridle.go", "finalizerlarge.go":
+				// These tests require deterministic finalization on target wasm.
+				// finalizerinvariants.go covers other block GC targets.
+				continue
+			}
 		}
-
+		if options.Target == "" && options.GC == "" {
+			switch name {
+			case "finalizerinvariants.go":
+				// Skip the default host GC because it does not implement finalizers.
+				// Explicit conservative GC variants cover this test.
+				continue
+			}
+		}
+		if options.Target == "simavr" {
+			switch name {
+			case "finalizerinvariants.go":
+				// Skip because runtime.GC does not return. See the gc.go exclusion above.
+				continue
+			}
+		}
 		name := name // redefine to avoid race condition
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			runTest(name, options, t, nil, nil)
+			testOptions := compileopts.Options(options)
+			if name == "finalizerinvariants.go" || name == "finalizerlarge.go" {
+				testOptions.Tags = append(append([]string(nil), options.Tags...), "runtime_asserts")
+			}
+			if testOptions.Target == "simavr" && name == "math.go" {
+				// This test exceeds simavr's default 384-byte goroutine stack.
+				testOptions.StackSize = 512
+			}
+			runTest(name, testOptions, t, nil, nil)
 		})
 	}
 	if !strings.HasPrefix(spec.Emulator, "simavr ") {
@@ -408,11 +550,17 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 			runTest("rand.go", options, t, nil, nil)
 		})
 	}
-	if !isWebAssembly {
-		// The recover() builtin isn't supported yet on WebAssembly and Windows.
-		t.Run("recover.go", func(t *testing.T) {
+	t.Run("recover.go", func(t *testing.T) {
+		t.Parallel()
+		runTest("recover.go", options, t, nil, nil)
+	})
+	if isWebAssembly {
+		t.Run("recover-explicit.go", func(t *testing.T) {
 			t.Parallel()
-			runTest("recover.go", options, t, nil, nil)
+			options := compileopts.Options(options)
+			options.Scheduler = "none"
+			options.PanicUnwind = "explicit"
+			runTest("recover-explicit.go", options, t, nil, nil)
 		})
 	}
 }
@@ -539,7 +687,10 @@ func runTestWithConfig(name string, t *testing.T, options compileopts.Options, c
 	if config.EmulatorName() == "simavr" {
 		actual = cleanSimAVRTestOutput(actual)
 	}
-	if name == "testing.go" {
+	if config.EmulatorName() == "qemu-system-xtensa" {
+		actual = cleanESP32QEMUOutput(actual)
+	}
+	if name == "testing.go" || name == "testing-verbose.go" {
 		// Strip actual time.
 		re := regexp.MustCompile(`\([0-9]\.[0-9][0-9]s\)`)
 		actual = re.ReplaceAllLiteral(actual, []byte{'(', '0', '.', '0', '0', 's', ')'})
@@ -562,6 +713,18 @@ func runTestWithConfig(name string, t *testing.T, options compileopts.Options, c
 		}
 		t.Fail()
 	}
+}
+
+func cleanESP32QEMUOutput(output []byte) []byte {
+	entryLine := bytes.Index(output, []byte("\nentry "))
+	if entryLine < 0 {
+		return output
+	}
+	entryLineEnd := bytes.IndexByte(output[entryLine+1:], '\n')
+	if entryLineEnd < 0 {
+		return output
+	}
+	return output[entryLine+1+entryLineEnd+1:]
 }
 
 func cleanSimAVRTestOutput(output []byte) []byte {
@@ -598,7 +761,7 @@ func TestWebAssembly(t *testing.T) {
 	for _, tc := range []testCase{
 		// Test whether there really are no imports when using -panic=trap. This
 		// tests the bugfix for https://github.com/tinygo-org/tinygo/issues/4161.
-		{name: "panic-default", target: "wasip1", imports: []string{"wasi_snapshot_preview1.fd_write", "wasi_snapshot_preview1.random_get"}},
+		{name: "panic-default", target: "wasip1", imports: []string{"wasi_snapshot_preview1.fd_write", "wasi_snapshot_preview1.proc_exit", "wasi_snapshot_preview1.random_get"}},
 		{name: "panic-trap", target: "wasm-unknown", panicStrategy: "trap", imports: []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -920,6 +1083,30 @@ func TestWasmExportJS(t *testing.T) {
 	}
 }
 
+func TestWasmExportFinalizersJS(t *testing.T) {
+	t.Parallel()
+
+	tmpdir := t.TempDir()
+	options := optionsFromTarget("wasm", sema)
+	options.BuildMode = "c-shared"
+	buildConfig, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := builder.Build("testdata/wasmexport-finalizer.go", ".wasm", tmpdir, buildConfig)
+	if err != nil {
+		t.Fatal("failed to build binary:", err)
+	}
+
+	output := &bytes.Buffer{}
+	cmd := exec.Command("node", "testdata/wasmexport-finalizer.js", result.Binary)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to run node: %v\n%s", err, output)
+	}
+}
+
 // Test whether Go.run() (in wasm_exec.js) normally returns and returns the
 // right exit code.
 func TestWasmExit(t *testing.T) {
@@ -1020,6 +1207,88 @@ func TestGoexitCrash(t *testing.T) {
 			}
 		})
 	}
+
+	for _, tc := range []struct {
+		name          string
+		arg           string
+		panicStrategy string
+		want          string
+	}{
+		{"wasip1-deadlock", "deadlock", "", "fatal error: all goroutines are asleep - deadlock!"},
+		{"wasip1-goexit-panic-trap", "defer", "trap", "defer ran"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := optionsFromTarget("wasip1", sema)
+			options.PanicStrategy = tc.panicStrategy
+			config, err := builder.NewConfig(&options)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := builder.Build("testdata/goexit.go", ".wasm", t.TempDir(), config)
+			if err != nil {
+				t.Fatal("failed to build binary:", err)
+			}
+			data, err := os.ReadFile(result.Binary)
+			if err != nil {
+				t.Fatal("failed to read binary:", err)
+			}
+
+			output := &bytes.Buffer{}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
+			defer r.Close(ctx)
+			wasi_snapshot_preview1.MustInstantiate(ctx, r)
+			moduleConfig := wazero.NewModuleConfig().
+				WithArgs(result.Binary, tc.arg).
+				WithStdout(output).
+				WithStderr(output)
+			_, err = r.InstantiateWithConfig(ctx, data, moduleConfig)
+			if err == nil {
+				t.Fatal("program unexpectedly exited successfully")
+			}
+			if !strings.Contains(output.String(), tc.want) {
+				t.Fatalf("output does not contain %q:\n%s", tc.want, output.String())
+			}
+		})
+	}
+}
+
+func TestWASIPanicTraceback(t *testing.T) {
+	t.Parallel()
+
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	options := optionsFromTarget("wasip1", sema)
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := builder.Build("testdata/panic-traceback.go", ".wasm", t.TempDir(), config)
+	if err != nil {
+		t.Fatal("failed to build binary:", err)
+	}
+	data, err := os.ReadFile(result.Binary)
+	if err != nil {
+		t.Fatal("failed to read binary:", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigInterpreter())
+	defer r.Close(ctx)
+	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+	_, err = r.InstantiateWithConfig(ctx, data, wazero.NewModuleConfig())
+	if err == nil {
+		t.Fatal("program unexpectedly exited successfully")
+	}
+	if !strings.Contains(err.Error(), "main.panicHere") {
+		t.Fatalf("panic traceback does not contain main.panicHere:\n%s", err)
+	}
 }
 
 func TestRuntimeFatal(t *testing.T) {
@@ -1048,6 +1317,27 @@ func TestRuntimeFatal(t *testing.T) {
 	if strings.Contains(output.String(), "recovered:") {
 		t.Fatalf("fatal runtime error was recovered:\n%s", output.String())
 	}
+}
+
+// Test that the program can read stdin when the caller supplies it.
+func TestStdin(t *testing.T) {
+	t.Parallel()
+
+	options := optionsFromTarget("", sema)
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output := &bytes.Buffer{}
+	_, err = buildAndRun(TESTDATA+"/stdin.go", config, output, nil, nil, time.Minute, func(cmd *exec.Cmd, result builder.BuildResult) error {
+		cmd.Stdin = strings.NewReader("hello\nworld\n")
+		return cmd.Run()
+	})
+	if err != nil {
+		t.Error("failed to run:", err)
+	}
+	checkOutput(t, TESTDATA+"/stdin.txt", output.Bytes())
 }
 
 func TestTest(t *testing.T) {

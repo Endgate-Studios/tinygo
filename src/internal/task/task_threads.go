@@ -68,6 +68,13 @@ func Current() *Task {
 	return t
 }
 
+func NumGoroutine() int {
+	activeTaskLock.Lock()
+	count := activeTaskCount
+	activeTaskLock.Unlock()
+	return int(count)
+}
+
 // Pause pauses the current task, until it is resumed by another task.
 // It is possible that another task has called Resume() on the task before it
 // hits Pause(), in which case the task won't be paused but continues
@@ -100,6 +107,7 @@ func (t *Task) Resume() {
 // Start a new OS thread.
 func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	t := &Task{}
+	inheritSynctest(t)
 	t.state.id = atomic.AddUintptr(&goroutineID, 1)
 	if verbose {
 		println("*** start:  ", t.state.id, "from", Current().state.id)
@@ -132,6 +140,8 @@ func taskExited(t *Task) {
 }
 
 func exit(t *Task) bool {
+	exitSynctest(t)
+
 	// Remove from the queue.
 	// TODO: this can be made more efficient by using a doubly linked list.
 	activeTaskLock.Lock()
@@ -161,9 +171,9 @@ func otherTasks(current *Task) uint32 {
 	return activeTaskCount - 1
 }
 
-// Exit exits the current task. If this is the main task and there are no other
+// Goexit exits the current task. If this is the main task and there are no other
 // goroutines, it reports a deadlock.
-func Exit() {
+func Goexit() {
 	t := Current()
 	if t == &mainTask {
 		activeTaskLock.Lock()
@@ -189,18 +199,19 @@ type waitGroup struct {
 	f Futex
 }
 
-func initWaitGroup(n uint32) waitGroup {
-	var wg waitGroup
+//go:noheap
+func (wg *waitGroup) reset(n uint32) {
 	wg.f.Store(n)
-	return wg
 }
 
+//go:noheap
 func (wg *waitGroup) done() {
 	if wg.f.Add(^uint32(0)) == 0 {
 		wg.f.WakeAll()
 	}
 }
 
+//go:noheap
 func (wg *waitGroup) wait() {
 	for {
 		val := wg.f.Load()
@@ -224,6 +235,8 @@ const (
 //
 // After calling this function, GCResumeWorld needs to be called once to resume
 // all threads again.
+//
+//go:noheap
 func GCStopWorldAndScan() {
 	current := Current()
 
@@ -241,7 +254,7 @@ func GCStopWorldAndScan() {
 		gcState.Store(gcStateStopped)
 
 		// Set the number of threads to wait for.
-		scanWaitGroup = initWaitGroup(otherTasks(current))
+		scanWaitGroup.reset(otherTasks(current))
 
 		// Pause all other threads.
 		for t := activeTasks; t != nil; t = t.state.QueueNext {
@@ -269,6 +282,8 @@ func GCStopWorldAndScan() {
 }
 
 // After the GC is done scanning, resume all other threads.
+//
+//go:noheap
 func GCResumeWorld() {
 	// NOTE: This does not need to be atomic.
 	if gcState.Load() == gcStateResumed {
@@ -277,7 +292,7 @@ func GCResumeWorld() {
 	}
 
 	// Set the wait group to track resume progress.
-	scanWaitGroup = initWaitGroup(otherTasks(Current()))
+	scanWaitGroup.reset(otherTasks(Current()))
 
 	// Set the state to resumed.
 	gcState.Store(gcStateResumed)
@@ -336,7 +351,7 @@ func tinygo_task_init(t *Task, thread *threadID, numCPU *int32)
 //go:linkname tinygo_task_start tinygo_task_start
 func tinygo_task_start(fn uintptr, args unsafe.Pointer, t *Task, thread *threadID, stackTop *uintptr, stackSize uintptr) int32
 
-//go:linkname tinygo_task_exit tinygo_task_exit
+//go:linkname tinygo_task_exit tinygo_task_exit_thread
 func tinygo_task_exit()
 
 // Pause the thread by sending it a signal.

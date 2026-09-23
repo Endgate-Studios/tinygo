@@ -49,7 +49,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	heapptr += size
 	if heapptr < addr {
 		// The allocation size overflowed the heap pointer.
-		runtimePanic("out of memory")
+		runtimePanic(errOutOfMemory)
 	}
 	for heapptr > heapEnd {
 		// Try to increase the heap and check again.
@@ -68,20 +68,12 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	return pointer
 }
 
-func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
-	newAlloc := alloc(size, nil)
-	if ptr == nil {
-		return newAlloc
-	}
-	// according to POSIX everything beyond the previous pointer's
-	// size will have indeterminate values so we can just copy garbage
-	memcpy(newAlloc, ptr, size)
-
-	return newAlloc
-}
-
 func free(ptr unsafe.Pointer) {
 	// Memory is never freed.
+}
+
+//go:noinline
+func freeTaskStack(ptr uintptr) {
 }
 
 func markRoots(start, end uintptr) {
@@ -109,6 +101,7 @@ func ReadMemStats(m *MemStats) {
 	m.HeapAlloc = gcTotalAlloc
 	m.HeapObjects = gcMallocs
 	m.Alloc = m.HeapAlloc
+	m.NumGC = 0 // this GC never collects, so no cycle ever completes
 
 	gcLock.Unlock()
 }

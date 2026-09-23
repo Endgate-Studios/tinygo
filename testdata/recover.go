@@ -6,6 +6,7 @@ import (
 )
 
 var wg sync.WaitGroup
+var panicMap = map[interface{}]int{}
 
 func main() {
 	println("# simple recover")
@@ -274,6 +275,21 @@ func recoverRuntimeError() {
 		_ = x.(string)
 	})
 	recoverEmptyInterfaceTypeAssert()
+	recoverMustPanic("interface compare", func() {
+		var x interface{} = []int{}
+		_ = x == x
+	})
+	recoverMustPanic("map key", func() {
+		panicMap[[]int{}] = 1
+	})
+	recoverMustPanic("map lookup key", func() {
+		m := map[interface{}]int{}
+		_ = m[[]int{}]
+	})
+	recoverMustPanic("map delete key", func() {
+		m := map[interface{}]int{}
+		delete(m, []int{})
+	})
 }
 
 //go:noinline
@@ -313,9 +329,26 @@ func recoverMustPanic(name string, f func()) {
 	f()
 }
 
+func recoverRuntimeErrorValue(f func()) {
+	defer func() {
+		r := recover()
+		err, ok := r.(runtime.Error)
+		if ok {
+			println("  recovered runtime error:", err.Error())
+		} else {
+			println("  failed runtime error:", r)
+		}
+	}()
+	f()
+}
+
 // Test recovering from nil map assignment and closed channel send.
 func recoverNilMapAndChan() {
 	recoverMustPanic("nil map", func() {
+		var m map[string]int
+		m["x"] = 1
+	})
+	recoverRuntimeErrorValue(func() {
 		var m map[string]int
 		m["x"] = 1
 	})
@@ -323,6 +356,14 @@ func recoverNilMapAndChan() {
 		ch := make(chan int)
 		close(ch)
 		ch <- 1
+	})
+	recoverMustPanic("closed chan select", func() {
+		ch := make(chan int)
+		close(ch)
+		select {
+		case ch <- 1:
+		default:
+		}
 	})
 	recoverMustPanic("close nil chan", func() {
 		var ch chan int

@@ -30,10 +30,10 @@ var BoehmGC = Library{
 			// Use a minimal environment.
 			"-DNO_MSGBOX_ON_ERROR", // don't call MessageBoxA on Windows
 			"-DDONT_USE_ATEXIT",
-			"-DNO_GETENV",          // smaller binary, more predictable configuration
-			"-DNO_CLOCK",           // don't use system clock
-			"-DNO_DEBUGGING",       // reduce code size
-			"-DGC_NO_FINALIZATION", // finalization is not used at the moment
+			"-DNO_GETENV",               // smaller binary, more predictable configuration
+			"-DNO_CLOCK",                // don't use system clock
+			"-DNO_DEBUGGING",            // reduce code size
+			"-DGC_ATOMIC_UNCOLLECTABLE", // pointer-free storage retained until GC_free
 
 			// Special flag to work around the lack of __data_start in ld.lld.
 			// TODO: try to fix this in LLVM/lld directly so we don't have to
@@ -68,6 +68,7 @@ var BoehmGC = Library{
 			"blacklst.c",
 			"dbg_mlc.c",
 			"dyn_load.c",
+			"finalize.c", // typed arrays use disappearing links
 			"headers.c",
 			"mach_dep.c",
 			"malloc.c",
@@ -77,6 +78,7 @@ var BoehmGC = Library{
 			"new_hblk.c",
 			"os_dep.c",
 			"reclaim.c",
+			"typd_mlc.c", // typed allocation support
 		}
 		if strings.Split(target, "-")[2] == "windows" {
 			// Due to how the linker on Windows works (that doesn't allow

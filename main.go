@@ -252,6 +252,9 @@ func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options
 	if testConfig.Count != nil && *testConfig.Count != 1 {
 		flags = append(flags, "-test.count="+strconv.Itoa(*testConfig.Count))
 	}
+	if testConfig.Parallel != nil {
+		flags = append(flags, "-test.parallel="+strconv.Itoa(*testConfig.Parallel))
+	}
 	if testConfig.Shuffle != "" {
 		flags = append(flags, "-test.shuffle="+testConfig.Shuffle)
 	}
@@ -870,6 +873,9 @@ func Run(pkgName string, options *compileopts.Options, cmdArgs []string) error {
 	}
 
 	_, err = buildAndRun(pkgName, config, os.Stdout, cmdArgs, nil, 0, func(cmd *exec.Cmd, result builder.BuildResult) error {
+		// Give the program our stdin, as `go run` does.
+		// See https://github.com/tinygo-org/tinygo/issues/1287
+		cmd.Stdin = os.Stdin
 		return cmd.Run()
 	})
 	return err
@@ -1021,6 +1027,8 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 
 	// Configure stdout/stderr. The stdout may go to a buffer, not a real
 	// stdout.
+	// Stdin stays unset here, which gives the program /dev/null. The run
+	// callback sets it when the program must read stdin.
 	cmd.Stdout = newOutputWriter(stdout, result.Executable)
 	cmd.Stderr = os.Stderr
 	if config.EmulatorName() == "simavr" {
@@ -1766,6 +1774,7 @@ func main() {
 	opt := flag.String("opt", "z", "optimization level: 0, 1, 2, s, z")
 	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, custom, precise, boehm)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
+	panicUnwind := flag.String("panic-unwind", "", "panic unwind strategy (auto, explicit)")
 	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks, cores, threads, asyncify)")
 	serial := flag.String("serial", "", "which serial output to use (none, uart, usb, rtt)")
 	work := flag.Bool("work", false, "print the name of the temporary build directory and do not delete this directory on exit")
@@ -1837,6 +1846,14 @@ func main() {
 		flag.StringVar(&testConfig.RunRegexp, "run", "", "run: regexp of tests to run")
 		flag.StringVar(&testConfig.SkipRegexp, "skip", "", "skip: regexp of tests to skip")
 		testConfig.Count = flag.Int("count", 1, "count: number of times to run tests/benchmarks `count` times")
+		flag.Func("parallel", "run at most `n` tests in parallel", func(value string) error {
+			parallel, err := strconv.Atoi(value)
+			if err != nil {
+				return err
+			}
+			testConfig.Parallel = &parallel
+			return nil
+		})
 		flag.StringVar(&testConfig.BenchRegexp, "bench", "", "bench: regexp of benchmarks to run")
 		flag.StringVar(&testConfig.BenchTime, "benchtime", "", "run each benchmark for duration `d`")
 		flag.BoolVar(&testConfig.BenchMem, "benchmem", false, "show memory stats for benchmarks")
@@ -1905,6 +1922,7 @@ func main() {
 		Opt:                     *opt,
 		GC:                      *gc,
 		PanicStrategy:           *panicStrategy,
+		PanicUnwind:             *panicUnwind,
 		Scheduler:               *scheduler,
 		Serial:                  *serial,
 		Work:                    *work,

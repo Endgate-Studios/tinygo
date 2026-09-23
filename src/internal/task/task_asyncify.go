@@ -3,6 +3,7 @@
 package task
 
 import (
+	"internal/gclayout"
 	"unsafe"
 )
 
@@ -24,8 +25,19 @@ type state struct {
 	// stackState is the state of the stack while unwound.
 	stackState
 
-	launched bool
+	stackBase uintptr
+	launched  bool
+
+	// finishing marks a goroutine that paused after it completed.
+	// Resume uses this per task flag to clear the stack.
+	finishing      bool
+	panicCapturing bool
+	panicOrigin    stackState
+	panicReplay    uintptr
+	panicTarget    uintptr
 }
+
+const hasReleasableStack = true
 
 // stackState is the saved state of a stack while unwound.
 // The stack is arranged with asyncify at the bottom, C stack at the top, and a gap of available stack space between the two.
@@ -42,12 +54,16 @@ type stackState struct {
 	// overwritten. It can be checked from time to time to see whether a stack
 	// overflow happened in the past.
 	canaryPtr *uintptr
+
+	// top marks the end of the stack buffer so it can be cleared after completion.
+	top unsafe.Pointer
 }
 
 // start creates and starts a new goroutine with the given function and arguments.
 // The new goroutine is immediately started.
 func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	t := &Task{}
+	inheritSynctest(t)
 	addLiveTask(t)
 	t.state.initialize(fn, args, stackSize)
 	scheduleTask(t)
@@ -66,7 +82,8 @@ func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	s.args = args
 
 	// Create a stack.
-	stack := runtime_alloc(stackSize, nil)
+	stack := runtime_alloc(stackSize, gclayout.Conservative.AsPtr())
+	s.stackBase = uintptr(stack)
 
 	// Set up the stack canary, a random number that should be checked when
 	// switching from the task back to the scheduler. The stack canary pointer
@@ -78,10 +95,30 @@ func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	// Calculate stack base addresses.
 	s.asyncifysp = unsafe.Add(stack, unsafe.Sizeof(uintptr(0)))
 	s.csp = unsafe.Add(stack, stackSize)
+	s.top = unsafe.Add(stack, stackSize)
+}
+
+//go:linkname memzero runtime.memzero
+func memzero(ptr unsafe.Pointer, size uintptr)
+
+// MarkFinishing marks the current goroutine for stack cleanup after it returns to the scheduler.
+func MarkFinishing() {
+	currentTask.state.finishing = true
+}
+
+// clearStack removes stale pointers from a finished asyncify stack.
+// The GC can then collect the stack and referenced objects.
+func (t *Task) clearStack() {
+	base := unsafe.Pointer(t.state.canaryPtr)
+	memzero(base, uintptr(t.state.top)-uintptr(base))
 }
 
 // currentTask is the current running task, or nil if currently in the scheduler.
 var currentTask *Task
+
+// Panic unwinding is synchronous: it either reaches a defer frame or aborts
+// without switching tasks. A single transient header is therefore sufficient.
+var panicStackState stackState
 
 // Current returns the current active task.
 func Current() *Task {
@@ -97,6 +134,64 @@ func Pause() {
 
 	currentTask.state.unwind()
 }
+
+// PanicUnwind starts an Asyncify unwind without pausing the task. A defer
+// frame stops the unwind before it reaches the scheduler.
+func PanicUnwind() {
+	currentTask.state.panicCapturing = true
+	panicStackState.asyncifysp = currentTask.state.asyncifysp
+	if currentTask.state.panicReplay != 0 {
+		// Preserve the first unwind segment while later defer frames unwind.
+		panicStackState.asyncifysp = currentTask.state.panicOrigin.asyncifysp
+	}
+	panicStackState.csp = currentTask.state.csp
+	panicStackState.unwind()
+}
+
+func StopPanicUnwind(replay, target uintptr) {
+	if !currentTask.state.panicCapturing {
+		return
+	}
+	currentTask.state.panicCapturing = false
+	if currentTask.state.panicReplay == 0 {
+		currentTask.state.panicOrigin = panicStackState
+		currentTask.state.panicReplay = replay
+		currentTask.state.panicTarget = target
+	}
+	panicStackState = stackState{}
+}
+
+func ClearPanicReplay() {
+	if currentTask == nil {
+		return
+	}
+	// An older continuation may reference stack memory reused while handling a
+	// nested panic, so discard it instead of attempting an unsafe replay.
+	currentTask.state.panicCapturing = false
+	currentTask.state.panicOrigin = stackState{}
+	currentTask.state.panicReplay = 0
+	currentTask.state.panicTarget = 0
+	panicStackState = stackState{}
+}
+
+func PanicRewindData() unsafe.Pointer {
+	return unsafe.Pointer(&currentTask.state.panicOrigin)
+}
+
+func PanicRewindStackPointer() unsafe.Pointer {
+	return currentTask.state.panicOrigin.csp
+}
+
+func RewindPanic() bool {
+	if currentTask.state.panicReplay == 0 {
+		return false
+	}
+	tinygoPanicReplay(currentTask.state.panicReplay, currentTask.state.panicTarget)
+	return true
+}
+
+//go:linkname tinygoPanicReplay tinygo_panic_replay
+func tinygoPanicReplay(replay, target uintptr)
 
 //export tinygo_unwind
 func (*stackState) unwind()
@@ -122,6 +217,17 @@ func (t *Task) Resume() {
 	t.gcData.swap()
 	if uintptr(t.state.asyncifysp) > uintptr(t.state.csp) {
 		runtimeFatal("stack overflow")
+	}
+	if t.Exited {
+		runtime_freeTaskStack(t.state.stackBase)
+		t.state = state{}
+		t.gcData = gcData{}
+		t.DeferFrame = nil
+	} else if t.state.finishing {
+		// The task is complete. Clear stale stack pointers and release its argument bundle.
+		t.state.finishing = false
+		t.clearStack()
+		t.state.args = nil
 	}
 }
 

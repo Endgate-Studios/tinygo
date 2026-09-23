@@ -323,6 +323,9 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		dromSize := 0
 		if len(dromSegs) > 0 {
 			targetImageOffset := int(dromFlashAddr - flashBase)
+			if makeImage {
+				targetImageOffset = int(dromFlashAddr)
+			}
 			if outf.Len() > targetImageOffset {
 				return fmt.Errorf("ESP32: RAM segments too large (%d bytes), overlap DROM at flash 0x%x", outf.Len(), dromFlashAddr)
 			}
@@ -343,6 +346,9 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 			}
 			iromFlashAddr := dromFlashAddr + uint32(dromPages)*pageSize
 			targetImageOffset := int(iromFlashAddr - flashBase)
+			if makeImage {
+				targetImageOffset = int(iromFlashAddr)
+			}
 			if outf.Len() > targetImageOffset {
 				return fmt.Errorf("ESP32: DROM too large, overlaps IROM at flash 0x%x", iromFlashAddr)
 			}

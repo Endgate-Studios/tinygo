@@ -23,7 +23,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.27.0-rc.2'
+          go-version: '1.27.1'
           cache: true
       - name: Run go mod tidy
         run: go mod tidy
@@ -36,7 +36,7 @@ jobs:
     # statically linked binary.
     runs-on: ubuntu-latest
     container:
-      image: golang:1.27rc2-alpine
+      image: golang:1.27-alpine
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache/restore@v5
         id: cache-llvm-source
         with:
-          key: llvm-source-22-linux-alpine-v1
+          key: llvm-source-22-linux-alpine-v1-${{ hashFiles('llvm-version.txt') }}
           path: |
             llvm-project/clang/lib/Headers
             llvm-project/clang/include
@@ -91,7 +91,7 @@ jobs:
         uses: actions/cache/restore@v5
         id: cache-llvm-build
         with:
-          key: llvm-build-22-linux-alpine-v1
+          key: llvm-build-22-linux-alpine-v1-${{ hashFiles('llvm-version.txt') }}
           path: llvm-build
       - name: Build LLVM
         if: steps.cache-llvm-build.outputs.cache-hit != 'true'
@@ -160,7 +160,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.27.0-rc.2'
+          go-version: '1.27.1'
           cache: true
       - name: Install wasmtime
         uses: bytecodealliance/actions/wasmtime/setup@v1
@@ -180,11 +180,47 @@ jobs:
       - run: make tinygo-test-wasip1-fast
       - run: make tinygo-test-wasip2-fast
       - run: make tinygo-test-wasm
-      - run: make smoketest
+  smoketest-linux:
+    # Build a binary for every supported board, using the binaries built in the
+    # build-linux job. This is the only job that runs the full smoke test. The
+    # result does not depend on the host OS, so the other jobs build a
+    # representative board for each architecture with smoketest-quick.
+    runs-on: ubuntu-latest
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        # Balanced with the measured build time of each group, so that the
+        # shards finish at about the same time.
+        group:
+          - smoketest-rp2xxx smoketest-selftest smoketest-wasm-sim smoketest-py32
+          - smoketest-esp smoketest-riscv smoketest-flags
+          - smoketest-examples smoketest-nxp smoketest-pwm-usb smoketest-avr
+          - smoketest-samd smoketest-stm32 smoketest-nrf smoketest-wasm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Download release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: tinygo${{ needs.build-linux.outputs.version }}.linux-amd64.tar.gz
+      - name: Extract release tarball
+        run: |
+          mkdir -p ~/lib
+          tar -C ~/lib -xf tinygo${{ needs.build-linux.outputs.version }}.linux-amd64.tar.gz
+          ln -s ~/lib/tinygo/bin/tinygo ~/go/bin/tinygo
+      - run: make testchdir ${{ matrix.group }}
   assert-test-linux:
     # Run all tests that can run on Linux, with LLVM assertions enabled to catch
     # potential bugs.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -196,15 +232,18 @@ jobs:
           cat /proc/cpuinfo
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
+              libgcrypt20 \
+              libpixman-1-0 \
+              libsdl2-2.0-0 \
+              libslirp0 \
               qemu-system-arm \
               qemu-system-riscv32 \
               qemu-user \
-              simavr \
-              ninja-build
+              simavr
       - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.27.0-rc.2'
+          go-version: '1.27.1'
           cache: true
       - name: Install Node.js
         uses: actions/setup-node@v6
@@ -216,53 +255,15 @@ jobs:
           version: "29.0.1"
       - name: Setup `wasm-tools`
         uses: bytecodealliance/actions/wasm-tools/setup@v1
-      - name: Restore LLVM source cache
-        uses: actions/cache/restore@v5
-        id: cache-llvm-source
-        with:
-          key: llvm-source-22-linux-asserts-v1
-          path: |
-            llvm-project/clang/lib/Headers
-            llvm-project/clang/include
-            llvm-project/compiler-rt
-            llvm-project/lld/include
-            llvm-project/llvm/include
-      - name: Download LLVM source
-        if: steps.cache-llvm-source.outputs.cache-hit != 'true'
-        run: make llvm-source
-      - name: Save LLVM source cache
-        uses: actions/cache/save@v5
-        if: steps.cache-llvm-source.outputs.cache-hit != 'true'
-        with:
-          key: ${{ steps.cache-llvm-source.outputs.cache-primary-key }}
-          path: |
-            llvm-project/clang/lib/Headers
-            llvm-project/clang/include
-            llvm-project/compiler-rt
-            llvm-project/lld/include
-            llvm-project/llvm/include
-      - name: Restore LLVM build cache
-        uses: actions/cache/restore@v5
-        id: cache-llvm-build
-        with:
-          key: llvm-build-22-linux-asserts-v1
-          path: llvm-build
-      - name: Build LLVM
-        if: steps.cache-llvm-build.outputs.cache-hit != 'true'
+      - name: Install Espressif QEMU
         run: |
-          # fetch LLVM source
-          rm -rf llvm-project
-          make llvm-source
-          # build!
-          make llvm-build ASSERT=1
-          # Remove unnecessary object files (to reduce cache size).
-          find llvm-build -name CMakeFiles -prune -exec rm -r '{}' \;
-      - name: Save LLVM build cache
-        uses: actions/cache/save@v5
-        if: steps.cache-llvm-build.outputs.cache-hit != 'true'
-        with:
-          key: ${{ steps.cache-llvm-build.outputs.cache-primary-key }}
-          path: llvm-build
+          release=esp-develop-9.2.2-20260417
+          archive=qemu-xtensa-softmmu-${release//-/_}-x86_64-linux-gnu.tar.xz
+          curl -fL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/espressif/qemu/releases/download/$release/$archive"
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-llvm
       - name: Cache Binaryen
         uses: actions/cache@v5
         id: cache-binaryen
@@ -275,17 +276,125 @@ jobs:
       - run: make gen-device -j4
       - name: Test TinyGo
         run: make ASSERT=1 test
-      - name: Build TinyGo
-        run: |
-          make ASSERT=1
-          echo "$(pwd)/build" >> $GITHUB_PATH
-      - name: Test stdlib packages
-        run: make tinygo-test
-      - run: make smoketest
-      - run: make wasmtest
-      - run: make tinygo-test-baremetal
       - name: Check Go code formatting
         run: make fmt-check lint
+
+  assert-build-linux:
+    # Build TinyGo with LLVM assertions enabled and publish it for the jobs
+    # below, so that they do not have to build it again. The tarball is not a
+    # release file, thus its name does not hold the version.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - uses: ./.github/actions/setup-llvm
+        with:
+          # assert-test-linux saves the cache. This job only reads it, so that
+          # the two jobs do not write the same key.
+          save-cache: "false"
+      - name: Restore Binaryen
+        uses: actions/cache/restore@v5
+        id: cache-binaryen
+        with:
+          key: binaryen-linux-asserts-v1
+          path: build/wasm-opt
+      - name: Build Binaryen
+        if: steps.cache-binaryen.outputs.cache-hit != 'true'
+        run: make binaryen
+      - run: make gen-device -j4
+      - name: Build TinyGo release tarball
+        run: |
+          make release ASSERT=1 -j4
+          cp -p build/release.tar.gz /tmp/tinygo-asserts.linux-amd64.tar.gz
+      - name: Publish TinyGo build
+        uses: actions/upload-artifact@v7
+        with:
+          name: tinygo-asserts.linux-amd64.tar.gz
+          path: /tmp/tinygo-asserts.linux-amd64.tar.gz
+          archive: false
+
+  assert-stdlib-test-linux:
+    # Test the standard library with the assertions build.
+    runs-on: ubuntu-24.04
+    needs: assert-build-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Download TinyGo build
+        uses: actions/download-artifact@v8
+        with:
+          name: tinygo-asserts.linux-amd64.tar.gz
+      - name: Extract TinyGo build
+        run: |
+          mkdir -p ~/lib
+          tar -C ~/lib -xf tinygo-asserts.linux-amd64.tar.gz
+          ln -s ~/lib/tinygo/bin/tinygo ~/go/bin/tinygo
+      - name: Test stdlib packages
+        run: make tinygo-test
+
+  assert-smoketest-linux:
+    # The smoke test, the wasm tests, and the baremetal tests, with the
+    # assertions build.
+    runs-on: ubuntu-24.04
+    needs: assert-build-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install apt dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+              libgcrypt20 \
+              libpixman-1-0 \
+              libsdl2-2.0-0 \
+              libslirp0 \
+              qemu-system-arm \
+              qemu-system-riscv32 \
+              qemu-user \
+              simavr
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "29.0.1"
+      - name: Setup `wasm-tools`
+        uses: bytecodealliance/actions/wasm-tools/setup@v1
+      - name: Download TinyGo build
+        uses: actions/download-artifact@v8
+        with:
+          name: tinygo-asserts.linux-amd64.tar.gz
+      - name: Extract TinyGo build
+        run: |
+          mkdir -p ~/lib
+          tar -C ~/lib -xf tinygo-asserts.linux-amd64.tar.gz
+          ln -s ~/lib/tinygo/bin/tinygo ~/go/bin/tinygo
+      - run: make smoketest-quick
+      - run: make wasmtest
+      - run: make tinygo-test-baremetal
   build-linux-cross:
     # Build ARM Linux binaries, ready for release.
     # This intentionally uses an older Linux image, so that we compile against
@@ -323,13 +432,13 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.27.0-rc.2'
+          go-version: '1.27.1'
           cache: true
       - name: Restore LLVM source cache
         uses: actions/cache/restore@v5
         id: cache-llvm-source
         with:
-          key: llvm-source-22-linux-v1
+          key: llvm-source-22-linux-v1-${{ hashFiles('llvm-version.txt') }}
           path: |
             llvm-project/clang/lib/Headers
             llvm-project/clang/include
@@ -354,7 +463,7 @@ jobs:
         uses: actions/cache/restore@v5
         id: cache-llvm-build
         with:
-          key: llvm-build-22-linux-${{ matrix.goarch }}-v1
+          key: llvm-build-22-linux-${{ matrix.goarch }}-v1-${{ hashFiles('llvm-version.txt') }}
           path: llvm-build
       - name: Build LLVM
         if: steps.cache-llvm-build.outputs.cache-hit != 'true'

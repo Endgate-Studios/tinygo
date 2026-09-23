@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -162,6 +161,7 @@ func (b *B) ReportAllocs() {
 
 // runN runs a single benchmark for the specified number of iterations.
 func (b *B) runN(n int) {
+	defer b.runCleanup()
 	b.N = n
 	runtime.GC()
 	b.ResetTimer()
@@ -474,7 +474,7 @@ func (b *B) processBench(ctx *benchContext) {
 			// Print any benchmark output
 			if b.output.Len() > 0 {
 				fmt.Printf("--- BENCH: %s\n", benchName)
-				b.output.WriteTo(os.Stdout)
+				b.output.writeToStdout()
 			}
 		}
 	}

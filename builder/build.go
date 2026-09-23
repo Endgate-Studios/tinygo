@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gofrs/flock"
 	"github.com/tinygo-org/tinygo/compileopts"
@@ -123,6 +124,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	globalValues := map[string]map[string]string{
 		"runtime": {
 			"buildVersion": goenv.Version(),
+			"goroot":       goenv.Get("GOROOT"),
 		},
 		"testing": {},
 	}
@@ -216,6 +218,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		Debug:              !config.Options.SkipDWARF, // emit DWARF except when -internal-nodwarf is passed
 		Nobounds:           config.Options.Nobounds,
 		PanicStrategy:      config.PanicStrategy(),
+		PanicUnwind:        config.PanicUnwind(),
 	}
 
 	// Load the target machine, which is the LLVM object that contains all
@@ -269,6 +272,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// Create the *ssa.Program. This does not yet build the entire SSA of the
 	// program so it's pretty fast and doesn't need to be parallelized.
 	program := lprogram.LoadSSA()
+	buildProgram := sync.OnceFunc(program.Build)
 
 	// Add jobs to compile each package.
 	// Packages that have a cache hit will not be compiled again.
@@ -398,8 +402,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					return nil
 				}
 
-				// Compile AST to IR. The compiler.CompilePackage function will
-				// build the SSA as needed.
+				// SSA package builds may run concurrently, but the resulting
+				// functions cannot be inspected until all builds have finished:
+				// generic instances and wrappers can be shared across packages.
+				// Build the whole program once before compiling any package.
+				buildProgram()
+
+				// Compile AST to IR.
 				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA())
 				defer mod.Context().Dispose()
 				defer mod.Dispose()
@@ -643,6 +652,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			err := optimizeProgram(mod, config)
 			if err != nil {
 				return err
+			}
+			if strings.HasPrefix(config.Triple(), "wasm") {
+				if err := compiler.ValidateWasmFunctionParameters(mod); err != nil {
+					return err
+				}
 			}
 
 			// Make sure stack sizes are loaded from a separate section so they can be
@@ -1286,6 +1300,9 @@ func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, m
 			global := llvm.AddGlobal(mod, stringType, globalName)
 			global.SetInitializer(initializer)
 			global.SetAlignment(targetData.PrefTypeAlignment(stringType))
+			// Keep external linkage for module resolution. Hidden visibility permits internalization.
+			// See https://llvm.org/docs/LangRef.html#visibility-styles.
+			global.SetVisibility(llvm.HiddenVisibility)
 		}
 	}
 

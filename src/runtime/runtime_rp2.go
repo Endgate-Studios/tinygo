@@ -12,6 +12,12 @@ import (
 	"unsafe"
 )
 
+// Commands sent to the other core through the SIO FIFO. They start at 1.
+const (
+	rp2SIOFIFOCommandGC uint32 = iota + 1
+	rp2SIOFIFOCommandFlashSafe
+)
+
 const numCPU = 2
 const numSpinlocks = 32
 
@@ -159,8 +165,10 @@ var stack1TopSymbol [0]uint32
 //
 //export tinygo_runCore1
 func runCore1() {
-	// Clear sticky bit that seems to have been set while starting this core.
-	rp.SIO.FIFO_ST.Set(rp.SIO_FIFO_ST_ROE)
+	initCore()
+
+	// Clear the sticky bits that were set while starting this core.
+	rp.SIO.FIFO_ST.Set(rp.SIO_FIFO_ST_ROE | rp.SIO_FIFO_ST_WOF)
 
 	// Enable the FIFO interrupt, mainly used for the stop-the-world phase of
 	// the GC.
@@ -250,7 +258,7 @@ func gcInterruptHandler(hartID uint32) {
 
 // Pause the given core by sending it an interrupt.
 func gcPauseCore(core uint32) {
-	rp.SIO.FIFO_WR.Set(1)
+	multicore_fifo_push_blocking(rp2SIOFIFOCommandGC)
 }
 
 // Signal the given core that it can resume one step.
@@ -281,6 +289,9 @@ var (
 	schedulerLock = spinLock{id: 21}
 	atomicsLock   = spinLock{id: 22}
 	futexLock     = spinLock{id: 23}
+
+	// flashSafeLock is used for RP2040-specific XIP operations.
+	flashSafeLock = spinLock{id: 24}
 )
 
 func resetSpinLocks() {
@@ -349,6 +360,8 @@ func init() {
 }
 
 func prerun() {
+	initCore()
+
 	// Reset spinlocks before the full machineInit() so the scheduler doesn't
 	// hang waiting for schedulerLock after a soft reset.
 	resetSpinLocks()

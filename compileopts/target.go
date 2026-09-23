@@ -35,6 +35,7 @@ type TargetSpec struct {
 	BuildTags        []string `json:"build-tags,omitempty"`
 	BuildMode        string   `json:"buildmode,omitempty"` // default build mode (if nothing specified)
 	GC               string   `json:"gc,omitempty"`
+	PanicUnwind      string   `json:"panic-unwind,omitempty"`
 	Scheduler        string   `json:"scheduler,omitempty"`
 	Serial           string   `json:"serial,omitempty"` // which serial output to use (uart, usb, none)
 	Linker           string   `json:"linker,omitempty"`
@@ -223,6 +224,11 @@ func LoadTarget(options *Options) (*TargetSpec, error) {
 	err = spec.resolveInherits()
 	if err != nil {
 		return nil, fmt.Errorf("%s : %w", options.Target, err)
+	}
+	switch spec.PanicUnwind {
+	case "", "auto", "explicit":
+	default:
+		return nil, fmt.Errorf("%s: invalid panic-unwind option %q", options.Target, spec.PanicUnwind)
 	}
 
 	if spec.Scheduler == "asyncify" {
@@ -494,12 +500,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		return nil, fmt.Errorf("GOOS=%s but GOARCH is unset. Please set GOARCH to wasm", options.GOOS)
 	default:
 		return nil, fmt.Errorf("unknown GOOS=%s", options.GOOS)
-	}
-
-	if spec.GC == "boehm" {
-		// Add this file only when needed. This fixes a build failure on
-		// Windows.
-		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/gc_boehm.c")
 	}
 
 	// Target triples (which actually have four components, but are called

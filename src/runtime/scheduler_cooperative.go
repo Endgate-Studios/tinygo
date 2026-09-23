@@ -39,7 +39,12 @@ var (
 	runqueue           task.Queue
 	sleepQueue         *task.Task
 	sleepQueueBaseTime timeUnit
+	deadlockedTasks    task.Queue
 )
+
+// finalizerIdleGC runs pressure GC at safe points and enables asyncify stack cleanup.
+// The first finalizer installs it so unused code can be removed.
+var finalizerIdleGC func() bool
 
 // deadlock is called when a goroutine cannot proceed any more, but is in theory
 // not exited (so deferred calls won't run). This can happen for example in code
@@ -49,17 +54,43 @@ var (
 //
 //go:noinline
 func deadlock() {
-	// call yield without requesting a wakeup
+	// Keep permanently blocked tasks reachable so their suspended stacks remain
+	// GC roots, but never put them back on the runnable queue.
+	current := task.Current()
+	synctestTaskBlock(current)
+	deadlockedTasks.Push(current)
 	task.Pause()
 	runtimeFatal("unreachable")
 }
 
-func goexit() {
+// exitGoroutine ends an asyncify task that returned from its function.
+// Unlike deadlock, this task will not resume.
+func exitGoroutine() {
 	task.Exit()
+	runtimeFatal("unreachable")
+}
+
+// wasmExportExit stops the scheduler after a //go:wasmexport function returns.
+// It is not used when the scheduler is disabled.
+func wasmExportExit() {
+	schedulerExit = true
+	if finalizerIdleGC != nil {
+		task.MarkFinishing()
+	}
+
+	task.Pause()
+
+	// TODO: we could cache the allocated stack so we don't have to keep
+	// allocating a new stack on every //go:wasmexport call.
+}
+
+func goexit() {
+	task.Goexit()
 }
 
 // Add this task to the end of the run queue.
 func scheduleTask(t *task.Task) {
+	synctestTaskWake(t)
 	runqueue.Push(t)
 }
 
@@ -119,11 +150,12 @@ func addTimer(tim *timerNode) {
 	interrupt.Restore(mask)
 }
 
-// reAddTimer advances and re-adds a periodic timer (a ticker) after its
-// callback has run. The cooperative scheduler runs timer callbacks to
-// completion inside the scheduler loop, so a timer can't be stopped or reset
-// while its callback is running and the timer can always be re-added directly.
+// reAddTimer finishes firing a timer. The cooperative scheduler runs timer
+// callbacks to completion, so periodic timers can be re-added directly.
 func reAddTimer(tn *timerNode) {
+	if tn.timer.period == 0 {
+		return
+	}
 	tn.timer.when += tn.timer.period
 	addTimer(tn)
 }
@@ -183,6 +215,11 @@ func scheduler(returnAtDeadlock bool) {
 
 		t := runqueue.Pop()
 		if t == nil {
+			// Run the pressure GC only when the scheduler is idle at the top level.
+			// This batches completed work and avoids collections during allocation.
+			if task.Current() == nil && finalizerIdleGC != nil && finalizerIdleGC() {
+				continue
+			}
 			if sleepQueue == nil && timerQueue == nil {
 				if returnAtDeadlock {
 					return
@@ -236,6 +273,16 @@ func scheduler(returnAtDeadlock bool) {
 		// //go:wasmexport function returned.
 		if GOARCH == "wasm" && schedulerExit {
 			schedulerExit = false // reset the signal
+			if task.Current() == nil {
+				if finalizerIdleGC != nil {
+					finalizerIdleGC()
+				}
+				// Return from an export at the top level before unrelated goroutines run.
+				// A nested export returns to its active outer scheduler.
+				if asyncScheduler && (!runqueue.Empty() || sleepQueue != nil || timerQueue != nil) {
+					sleepTicks(0)
+				}
+			}
 			return
 		}
 	}
@@ -248,10 +295,9 @@ func sleep(duration int64) {
 	if duration <= 0 {
 		return
 	}
-	if schedulerSleepCustom(duration) {
+	if synctestSleep(duration) {
 		return
 	}
-
 	addSleepTask(task.Current(), nanosecondsToTicks(duration))
 	task.Pause()
 }

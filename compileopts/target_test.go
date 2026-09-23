@@ -1,8 +1,10 @@
 package compileopts
 
 import (
+	"encoding/csv"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -51,6 +53,38 @@ func TestLoadTarget_InheritableOnlyTargetStillLoadable(t *testing.T) {
 	_, err := LoadTarget(&Options{Target: "esp32"})
 	if err != nil {
 		t.Errorf("LoadTarget should still load inheritable-only target esp32: %v", err)
+	}
+}
+
+func TestLoadPY32ConcreteTargets(t *testing.T) {
+	file, err := os.Open("../tools/gen-py32-targets/devices.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	records, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records[1:] {
+		part, core := record[0], record[2]
+		t.Run(part, func(t *testing.T) {
+			spec, err := LoadTarget(&Options{Target: part})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.LinkerScript == "" {
+				t.Error("concrete target has no linker script")
+			}
+			wantCPU := "cortex-m0plus"
+			if core == "m4" {
+				wantCPU = "cortex-m4"
+			}
+			if spec.CPU != wantCPU {
+				t.Errorf("CPU is %q, want %q", spec.CPU, wantCPU)
+			}
+		})
 	}
 }
 
@@ -157,6 +191,57 @@ func TestConfigLinkerFlavor(t *testing.T) {
 			}
 			if got := config.LinkerFlavor(); got != tc.want {
 				t.Fatalf("LinkerFlavor() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfigPanicUnwind(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+		target  TargetSpec
+		want    string
+	}{
+		{
+			name:   "native defaults to setjmp",
+			target: TargetSpec{Triple: "x86_64-unknown-linux"},
+			want:   "setjmp",
+		},
+		{
+			name:   "riscv64 defaults to setjmp",
+			target: TargetSpec{Triple: "riscv64-unknown-unknown"},
+			want:   "setjmp",
+		},
+		{
+			name:   "xtensa defaults to setjmp",
+			target: TargetSpec{Triple: "xtensa-unknown-unknown"},
+			want:   "setjmp",
+		},
+		{
+			name:    "explicit command line opt in",
+			options: Options{PanicUnwind: "explicit"},
+			target:  TargetSpec{Triple: "riscv64-unknown-unknown"},
+			want:    "explicit",
+		},
+		{
+			name:    "auto overrides target opt in",
+			options: Options{PanicUnwind: "auto"},
+			target:  TargetSpec{Triple: "riscv64-unknown-unknown", PanicUnwind: "explicit"},
+			want:    "setjmp",
+		},
+		{
+			name:    "asyncify enables unwinding",
+			options: Options{Scheduler: "asyncify"},
+			target:  TargetSpec{Triple: "wasm32-unknown-unknown", PanicUnwind: "auto"},
+			want:    "asyncify",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			config := Config{Options: &tc.options, Target: &tc.target}
+			if got := config.PanicUnwind(); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

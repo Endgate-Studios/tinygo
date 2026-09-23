@@ -26,6 +26,12 @@ import (
 
 const needsStaticHeap = false
 
+const boehmLayoutSizeBits = 4 + unsafe.Sizeof(uintptr(0))/4
+const (
+	boehmPtrFreeKind = 0
+	boehmNormalKind  = 1
+)
+
 var gcLock task.PMutex
 
 func initHeap() {
@@ -70,20 +76,48 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	gcLock.Lock()
 	var ptr unsafe.Pointer
 	var needsZero bool
-	if layout == gclayout.NoPtrs.AsPtr() {
+	switch layout {
+	case gclayout.NoPtrs.AsPtr():
 		// This object is entirely pointer free, for example make([]int, ...).
 		// Make sure the GC knows this so it doesn't scan the object
 		// unnecessarily to improve performance.
-		ptr = libgc_malloc_atomic(size)
-		// Memory returned from libgc_malloc_atomic has not been zeroed so we
-		// have to do that manually.
+		ptr = libgc_malloc_kind(size, boehmPtrFreeKind)
 		needsZero = true
-	} else {
-		// TODO: bdwgc supports typed allocations, which could be useful to
-		// implement a mostly-precise GC.
-		ptr = libgc_malloc(size)
-		// Memory returned from libgc_malloc has already been zeroed, so nothing
-		// to do here.
+	case gclayout.Conservative.AsPtr():
+		// Stack storage does not have an ordinary repeating Go object layout.
+		ptr = libgc_malloc_kind(size, boehmNormalKind)
+	case gclayout.Pointer.AsPtr(), gclayout.PointerPair.AsPtr():
+		// Conservative scanning is exact when every word is a pointer.
+		ptr = libgc_malloc_kind(size, boehmNormalKind)
+	default:
+		elementWords := boehmLayoutElementWords(layout)
+		pointerAlign := unsafe.Alignof(uintptr(0))
+		if elementWords == 0 || elementWords > size/pointerAlign {
+			// This should not happen for compiler-generated Go allocations.
+			ptr = libgc_malloc_kind(size, boehmNormalKind)
+			break
+		}
+		elementSize := elementWords * pointerAlign
+		if size%elementSize != 0 {
+			ptr = libgc_malloc_kind(size, boehmNormalKind)
+			break
+		}
+
+		descriptor := libgc_make_descriptor(uintptr(layout))
+		if descriptor == 0 {
+			// The bridge returns zero if its cache or bitmap allocation fails.
+			// It also rejects the no-pointer descriptor, which is handled above.
+			ptr = libgc_malloc_kind(size, boehmNormalKind)
+			break
+		}
+		elementCount := size / elementSize
+		if elementCount == 1 {
+			ptr = libgc_malloc_explicitly_typed(size, descriptor)
+		} else {
+			ptr = libgc_calloc_explicitly_typed(
+				elementCount, elementSize, descriptor,
+			)
+		}
 	}
 	gcResumeWorld()
 	gcLock.Unlock()
@@ -94,12 +128,44 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	if needsZero {
 		memzero(ptr, size)
 	}
+	return ptr
+}
 
+func boehmLayoutElementWords(layout unsafe.Pointer) uintptr {
+	value := uintptr(layout)
+	if value&1 != 0 {
+		return (value >> 1) & (1<<boehmLayoutSizeBits - 1)
+	}
+	return *(*uintptr)(layout)
+}
+
+func allocManual(size uintptr) unsafe.Pointer {
+	if size == 0 {
+		return alloc_zero(size, gclayout.NoPtrs.AsPtr())
+	}
+
+	gcLock.Lock()
+	ptr := libgc_malloc_atomic_uncollectable(size)
+	gcResumeWorld()
+	gcLock.Unlock()
+	if ptr == nil {
+		runtimeFatal("gc: out of memory")
+		return nil
+	}
+	memzero(ptr, size)
 	return ptr
 }
 
 func free(ptr unsafe.Pointer) {
+	gcLock.Lock()
 	libgc_free(ptr)
+	gcResumeWorld()
+	gcLock.Unlock()
+}
+
+//go:noinline
+func freeTaskStack(ptr uintptr) {
+	free(unsafe.Pointer(ptr))
 }
 
 func GC() {
@@ -129,6 +195,7 @@ func ReadMemStats(m *MemStats) {
 	m.Mallocs = 0 // not provided by bdwgc
 	m.Frees = 0   // not provided by bdwgc
 	m.Sys = uint64(gcMemStats.obtained_from_os_bytes)
+	m.NumGC = uint32(gcMemStats.gc_no)
 
 	gcLock.Unlock()
 }
@@ -146,11 +213,20 @@ func SetFinalizer(obj interface{}, finalizer interface{}) {
 //export GC_init
 func libgc_init()
 
-//export GC_malloc
-func libgc_malloc(uintptr) unsafe.Pointer
+//export GC_malloc_kind
+func libgc_malloc_kind(uintptr, int32) unsafe.Pointer
 
-//export GC_malloc_atomic
-func libgc_malloc_atomic(uintptr) unsafe.Pointer
+//export GC_malloc_atomic_uncollectable
+func libgc_malloc_atomic_uncollectable(uintptr) unsafe.Pointer
+
+//export tinygo_runtime_bdwgc_make_descriptor
+func libgc_make_descriptor(uintptr) uintptr
+
+//export GC_calloc_explicitly_typed
+func libgc_calloc_explicitly_typed(uintptr, uintptr, uintptr) unsafe.Pointer
+
+//export GC_malloc_explicitly_typed
+func libgc_malloc_explicitly_typed(uintptr, uintptr) unsafe.Pointer
 
 //export GC_free
 func libgc_free(unsafe.Pointer)
@@ -163,6 +239,9 @@ func libgc_size(ptr uintptr) uintptr
 
 //export GC_push_all
 func libgc_push_all(bottom, top uintptr)
+
+//export GC_push_all_eager
+func libgc_push_all_eager(bottom, top uintptr)
 
 //export GC_push_all_stack
 func libgc_push_all_stack(bottom, top uintptr)
