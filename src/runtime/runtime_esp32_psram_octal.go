@@ -3,7 +3,7 @@
 // Octal SPI (OPI) PSRAM support for ESP32-S3 (e.g. ESP32-S3-WROOM-1U-N16R8,
 // combo modules with in-package Octal PSRAM). Octal PSRAM uses 8 data
 // lines and a DTR (double transfer rate / DDR) protocol, unlike the 4-line
-// single-rate Quad PSRAM handled by runtime_esp32_psram_qspi.go; the two
+// single-rate Quad PSRAM, which is not supported here; the two
 // are not interchangeable and use different GPIOs (Octal adds D4-D7+DQS
 // on GPIO33-37, on top of the CS1/D0-D3 pins shared with flash). Shared
 // linker symbols, MMU/ROM-call helpers, and the address map are
@@ -136,10 +136,9 @@ func initPSRAM() {
 	// IO_MUX reset default; function 1 switches the pin to plain GPIO,
 	// disconnecting it from SPI1 (soc/io_mux_reg.h: FUNC_SPICS1_SPICS1 = 0).
 	// FUN_DRV(3) sets max drive strength (3 = 40 mA) for the CS1 and
-	// SPICLK pads; Octal OPI at 80 MHz DTR needs stronger drive than the
-	// Quad SPI driver's FUN_WPU pull-up approach (the Quad driver operates
-	// at single-data-rate 40 MHz and the pull-up ensures CS1 isn't
-	// floating when deasserted).
+	// SPICLK pads; Octal OPI at 80 MHz DTR needs stronger drive than a
+	// single-data-rate 40 MHz Quad part would, where a FUN_WPU pull-up is
+	// enough to keep CS1 from floating when deasserted.
 	esp.IO_MUX.SetGPIO26_MCU_SEL(0)
 	esp.IO_MUX.SetGPIO26_FUN_DRV(3)
 	esp.SPI0.SetDATE_SPI_SMEM_SPICLK_FUN_DRV(3)
@@ -173,14 +172,16 @@ func initPSRAM() {
 	writePSRAMModeReg(0x0, mr0)
 
 	if !checkPSRAMConnected() {
-		panic("PSRAM init failed: sync read/write mismatch, chip not detected")
+		failPSRAMInit("PSRAM init failed: sync read/write mismatch, chip not detected")
+		return
 	}
 
 	mr1 := readPSRAMModeReg(0x1) // vendor id
 	mr2 := readPSRAMModeReg(0x2) // density / dev id / gb
 	vendorID := mr1 & 0x1f
 	if vendorID != opiVendorIDAP && vendorID != opiVendorIDUnilc {
-		panic("PSRAM init failed: unrecognized vendor id")
+		failPSRAMInit("PSRAM init failed: unrecognized vendor id")
+		return
 	}
 
 	// Density encoding (esp_psram_impl_octal.c:372-376): 0x1=4MB, 0x3=8MB,
@@ -258,15 +259,25 @@ func initPSRAM() {
 
 	// Map PSRAM into the MMU: PSRAM physical page 0 at _psram_start, 64KB
 	// pages, fixed=0 (physical pages grow linearly with virtual pages).
-	if romCacheDbusMMUSet(mmuAccessSpiram, uint32(psramStart), 0, 64, uint32(mmuPages), 0) != 0 {
-		panic("PSRAM init failed: Cache_Dbus_MMU_Set error")
-	}
+	mapErr := romCacheDbusMMUSet(mmuAccessSpiram, uint32(psramStart), 0, 64, uint32(mmuPages), 0)
 
 	// Re-enable DCache. Cache_Disable_DCache above already invalidated all
 	// tag memory.
 	romCacheEnableDCache(0)
 
-	zeroInitPSRAM()
+	// Panic only once the cache is back.
+	//
+	// The panic string is a constant in .rodata, and .rodata is reached through
+	// the very data cache disabled above - so panicking before this point reads
+	// its own message through a cache that is off, and the board stops with no
+	// output at all rather than printing a diagnosis. The message is the whole
+	// value of the panic, so it has to wait for the cache.
+	if mapErr != 0 {
+		failPSRAMInit("PSRAM init failed: Cache_Dbus_MMU_Set error")
+		return
+	}
+
+	zeroInitPSRAM(uintptr(mmuPages) * 65536)
 }
 
 //export rom_spi_flash_disable_cache

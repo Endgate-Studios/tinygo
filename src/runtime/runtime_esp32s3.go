@@ -96,6 +96,10 @@ func main() {
 func init() {
 	// Initialize UART.
 	machine.InitSerial()
+
+	// Report a PSRAM bring-up failure now that there is somewhere to report it.
+	// initPSRAM runs long before this and cannot print anything.
+	checkPSRAMInit()
 }
 
 func abort() {

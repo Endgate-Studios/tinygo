@@ -1,7 +1,8 @@
 package main
 
-// This example demonstrates how to use external PSRAM (Octal or Quad SPI) on
-// supported targets (e.g., -target=esp32s3-psram-qspi).
+// This example demonstrates how to use external PSRAM on supported targets:
+//
+//	tinygo flash -target=esp32s3-psram-octal ./src/examples/psram
 //
 // Variables placed in the `.psram` section via the `//go:section .psram`
 // pragma are stored in external PSRAM rather than internal SRAM.

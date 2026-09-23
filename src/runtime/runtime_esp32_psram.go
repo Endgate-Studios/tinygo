@@ -1,11 +1,14 @@
 //go:build esp32s3 && numa_psram_octal
 
 // Shared PSRAM support for ESP32-S3: linker symbols, MMU/ROM-call helpers,
-// and address-map documentation common to both the Quad SPI driver
-// (runtime_esp32_psram_qspi.go, build tag numa_psram_qspi) and the Octal
-// SPI driver (runtime_esp32_psram_octal.go, build tag numa_psram_octal).
-// Everything protocol-specific (SPI1 command sequencing, chip ID/mode
-// register parsing, SPI0 cache-phase configuration) lives in those files.
+// and address-map documentation used by the Octal SPI driver
+// (runtime_esp32_psram_octal.go, build tag numa_psram_octal). Everything
+// protocol-specific - SPI1 command sequencing, chip ID and mode register
+// parsing, SPI0 cache-phase configuration - lives there.
+//
+// Only Octal is supported. Every ESP32-S3 module carrying 8MB of PSRAM uses
+// Octal SPI, so a Quad driver had no hardware to verify against and was
+// dropped rather than shipped untested.
 //
 // Address map (esp-idf soc/ext_mem_defs.h; verified on hardware while
 // bringing up the Octal driver):
@@ -72,6 +75,35 @@ func romCacheEnableDCache(autoload uint32)
 
 const mmuAccessSpiram = 0x8000 // SOC_MMU_TYPE / SOC_MMU_ACCESS_SPIRAM: routes entry to PSRAM instead of flash.
 
+// psramInitError holds why initPSRAM gave up, to be reported once there is
+// somewhere to report it.
+//
+// initPSRAM runs from the boot path, before machine.InitSerial - so a panic
+// raised inside it formats its message into a serial port that does not exist
+// yet and the board stops silently. Moving InitSerial earlier is not an option
+// either: on the USB-serial targets it needs the interrupt table, which is set
+// up after this. So the failure is recorded and reported by checkPSRAMInit,
+// which runs immediately after serial comes up.
+var psramInitError string
+
+// failPSRAMInit records the first failure and returns.
+//
+// First only: later register writes against a chip that never answered produce
+// further failures that are consequences, not causes, and the first one is the
+// diagnosis.
+func failPSRAMInit(reason string) {
+	if psramInitError == "" {
+		psramInitError = reason
+	}
+}
+
+// checkPSRAMInit panics if the bring-up failed. Called once serial is up.
+func checkPSRAMInit() {
+	if psramInitError != "" {
+		panic(psramInitError)
+	}
+}
+
 // psramWindow returns the linker-provided PSRAM vaddr window
 // (targets/esp32s3.ld) and its capacity in 64KB MMU pages.
 func psramWindow() (start, end uintptr, pageCap int) {
@@ -85,20 +117,37 @@ func psramWindow() (start, end uintptr, pageCap int) {
 // into the MMU, verifying with a known pattern first that writes actually
 // reach the chip (a hardware or timing issue could otherwise silently
 // drop them).
-func zeroInitPSRAM() {
+//
+// mappedBytes is how much of the window the MMU actually backs, which is the
+// detected chip density capped by the window size - not the size of .psram.
+// The linker sizes .psram from what the program declares, and a program that
+// declares more than the chip holds would otherwise be zeroed past the end of
+// the mapping. Those addresses do not fault: they alias back over pages that
+// are mapped, so the clear silently destroys the start of the region it just
+// finished clearing. Stopping at the mapping keeps the damage to an honest
+// out-of-memory condition instead.
+func zeroInitPSRAM(mappedBytes uintptr) {
 	spsram := uintptr(unsafe.Pointer(&_spsram))
 	epsram := uintptr(unsafe.Pointer(&_epsram))
+	if epsram <= spsram {
+		return
+	}
+	if limit := spsram + mappedBytes; epsram > limit {
+		epsram = limit
+	}
 	if epsram <= spsram {
 		return
 	}
 
 	*(*uint32)(unsafe.Pointer(spsram)) = 0x5A5A5A5A
 	if *(*uint32)(unsafe.Pointer(spsram)) != 0x5A5A5A5A {
-		panic("PSRAM readback test failed")
+		failPSRAMInit("PSRAM readback test failed: wrote 0x5A5A5A5A, read back something else")
+		return
 	}
 	*(*uint32)(unsafe.Pointer(spsram)) = 0
 	if *(*uint32)(unsafe.Pointer(spsram)) != 0 {
-		panic("PSRAM readback test failed")
+		failPSRAMInit("PSRAM readback test failed: wrote 0, read back something else")
+		return
 	}
 
 	for addr := spsram + 4; addr < epsram; addr += 4 {
