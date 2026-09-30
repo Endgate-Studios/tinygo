@@ -141,8 +141,9 @@ call_start_cpu0:
     wsr.ps a2
     rsync
 
-    // Enable FPU (coprocessor 0).
-    movi a2, 1
+    // Enable the FPU (CP0) and PIE (CP3), see XCHAL_CP_MASK in ESP-IDF
+    // components/xtensa/esp32s3/include/xtensa/config/tie.h.
+    movi a2, 9
     wsr.cpenable a2
     rsync
 
@@ -387,6 +388,75 @@ call_start_cpu0:
 
     // If main returns, loop forever.
 1:  j 1b
+
+// Core 1 entry for the cores scheduler. Core 0 has already set up the
+// shared cache and MMU, see runtime.startSecondaryCores.
+.section .text.call_start_cpu1,"ax"
+    .literal_position
+    .align 4
+.Lstack1_top_addr:
+    .long _stack1_top
+.LrunCore1_addr:
+    .long tinygo_runCore1
+.Lvector_table_addr1:
+    .long _vector_table
+
+.global call_start_cpu1
+call_start_cpu1:
+    // Same register file setup as call_start_cpu0.
+    rsr.ps a2
+    movi a3, 1
+    slli a3, a3, 18         // a3 = PS_WOE (0x40000)
+    and  a3, a2, a3
+    xor  a2, a2, a3
+    wsr.ps a2
+    rsync
+
+    rsr.windowbase  a2
+    ssl  a2
+    movi a2, 1
+    sll  a2, a2
+    wsr.windowstart a2
+    rsync
+
+    l32r a1, .Lstack1_top_addr
+
+    rsr.ps a2
+    movi a3, 1
+    slli a3, a3, 18
+    or a2, a2, a3
+    wsr.ps a2
+    rsync
+
+    // Enable the FPU and PIE, as on core 0.
+    movi a2, 9
+    wsr.cpenable a2
+    rsync
+
+    l32r a8, .Lvector_table_addr1
+    wsr.vecbase a8
+    rsync
+
+    rsr.ps a2
+    movi a3, ~0x1F
+    and a2, a2, a3
+    movi a3, 0x20
+    or a2, a2, a3
+    wsr.ps a2
+    rsync
+
+    mov  a5, a1
+    l32r a4, .LrunCore1_addr
+    callx4 a4
+
+1:  j 1b
+
+// System stack of core 1. Same size as _stack_size in targets/esp32s3.ld.
+.section .stack1,"aw",@nobits
+    .balign 16
+    .space 4096
+    .global _stack1_top
+_stack1_top:
 
 // -----------------------------------------------------------------------
 // tinygo_scanCurrentStack — Spill all Xtensa register windows to the

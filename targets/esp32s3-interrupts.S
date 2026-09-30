@@ -317,8 +317,9 @@ _handle_level1:
     //  24: a6  28: a7  32: a8  36: a9  40: a10 44: a11
     //  48: a12 52: a13 56: a14 60: a15
     //  64: SAR 68: EPC1  72: PS  76: WINDOWBASE  80: WINDOWSTART
+    //  84: SCOMPARE1 88: LBEG 92: LEND 96: LCOUNT
     //
-    // 128, not the 84 the layout needs: the low 16 bytes are the interruptee's
+    // 128, not the 100 the layout needs: the low 16 bytes are the interruptee's
     // windowed-ABI base save area, as in ESP-IDF's XT_STK_FRMSZ (+0x20).
     // https://github.com/espressif/esp-idf/blob/master/components/xtensa/include/xtensa_context.h
     addi    a0, a1, -128        // a0 = new frame pointer
@@ -347,6 +348,18 @@ _handle_level1:
     // Save special registers.
     rsr     a2, SAR
     s32i    a2, a1, 64
+    // Go code in the handler uses S32C1I. See XT_STK_SCOMPARE1 in ESP-IDF xtensa_context.h.
+    rsr     a2, SCOMPARE1
+    s32i    a2, a1, 84
+    // PIE kernels use zero overhead loops. See XT_STK_LBEG in ESP-IDF xtensa_context.h.
+    rsr     a2, LBEG
+    s32i    a2, a1, 88
+    rsr     a2, LEND
+    s32i    a2, a1, 92
+    rsr     a2, LCOUNT
+    s32i    a2, a1, 96
+    movi    a2, 0
+    wsr     a2, LCOUNT
     rsr     a2, EPC1
     s32i    a2, a1, 68
 
@@ -362,6 +375,26 @@ _handle_level1:
     s32i    a3, a1, 76
     rsr     a3, WINDOWSTART
     s32i    a3, a1, 80
+
+    // Spill the live windows with the interrupted SP and a4 to a15 unchanged.
+    // Same as _xt_context_save and SPILL_ALL_WINDOWS in ESP-IDF components/xtensa.
+    movi    a3, ~0x1F
+    and     a3, a2, a3
+    addi    a3, a3, 3           // EXCM = 0, INTLEVEL = XCHAL_EXCM_LEVEL
+    wsr     a3, PS
+    rsync
+    addi    a1, a1, 128
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    4
+    addi    a1, a1, -128
 
     movi    a3, ~0x1F           // mask: clear INTLEVEL (bits 0-3) + EXCM (bit 4)
     and     a2, a2, a3
@@ -411,6 +444,14 @@ _handle_level1:
     // Restore special registers.
     l32i    a2, a1, 64
     wsr     a2, SAR
+    l32i    a2, a1, 84
+    wsr     a2, SCOMPARE1
+    l32i    a2, a1, 88
+    wsr     a2, LBEG
+    l32i    a2, a1, 92
+    wsr     a2, LEND
+    l32i    a2, a1, 96
+    wsr     a2, LCOUNT
     l32i    a2, a1, 68
     wsr     a2, EPC1
 

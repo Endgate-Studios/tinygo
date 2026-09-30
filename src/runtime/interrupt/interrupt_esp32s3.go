@@ -56,6 +56,10 @@ const (
 	lastCPUInt  = 30
 )
 
+// Peripheral lines with priority level 1. Other levels go to stub vectors.
+// See ESP-IDF components/esp_hw_support/port/esp32s3/esp_cpu_intr.c.
+const level1CPUInts = 1<<8 | 1<<9 | 1<<10 | 1<<12 | 1<<13 | 1<<17 | 1<<18
+
 // cpuIntUsed tracks which CPU interrupt lines have been allocated.
 var cpuIntUsed [32]bool
 
@@ -64,8 +68,13 @@ var cpuIntUsed [32]bool
 var cpuIntToPeripheral [32]int
 
 // inInterrupt is set while we're inside the interrupt handler so that
-// interrupt.In() returns the correct value.
-var inInterrupt bool
+// interrupt.In() returns the correct value. There is one entry per core.
+var inInterrupt [2]bool
+
+// coreID returns 0 on core 0 and 1 on core 1, see ESP-IDF xt_utils_get_core_id.
+func coreID() uint32 {
+	return uint32(device.AsmFull("rsr {}, PRID", nil)) >> 13 & 1
+}
 
 // Enable enables a CPU interrupt for the ESP32-S3.  The caller must first
 // map the peripheral to a CPU interrupt line using the interrupt matrix,
@@ -74,7 +83,7 @@ var inInterrupt bool
 //	esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInt)
 //	interrupt.New(cpuInt, handler).Enable()
 func (i Interrupt) Enable() error {
-	if i.num < firstCPUInt || i.num > lastCPUInt {
+	if i.num < firstCPUInt || i.num > lastCPUInt || level1CPUInts&(1<<uint(i.num)) == 0 {
 		return errInterruptRange
 	}
 
@@ -91,7 +100,7 @@ func (i Interrupt) Enable() error {
 
 // In returns whether the CPU is currently inside an interrupt handler.
 func In() bool {
-	return inInterrupt
+	return inInterrupt[coreID()]
 }
 
 // handleInterrupt is called from the assembly vector code in esp32s3.S.
@@ -100,7 +109,8 @@ func In() bool {
 //
 //export handleInterrupt
 func handleInterrupt() {
-	inInterrupt = true
+	core := coreID()
+	inInterrupt[core] = true
 
 	// INTERRUPT register shows pending + enabled CPU interrupts.
 	pending := readINTERRUPT()
@@ -124,7 +134,7 @@ func handleInterrupt() {
 	// Signal to sleepTicks that an interrupt has occurred.
 	signalInterrupt()
 
-	inInterrupt = false
+	inInterrupt[core] = false
 }
 
 //go:inline
@@ -192,7 +202,7 @@ func callHandlers(num int)
 //go:linkname signalInterrupt runtime.signalInterrupt
 func signalInterrupt()
 
-var errInterruptRange = constError("interrupt for ESP32-S3 must be in range 6 through 30")
+var errInterruptRange = constError("interrupt for ESP32-S3 must be level 1: 8, 9, 10, 12, 13, 17 or 18")
 
 type constError string
 

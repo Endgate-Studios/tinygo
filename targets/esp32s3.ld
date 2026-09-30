@@ -69,6 +69,13 @@ SECTIONS
         _stack_top = .;
     } >DRAM
 
+    /* System stack of core 1, only present with the cores scheduler. */
+    .stack1 (NOLOAD) :
+    {
+        . = ALIGN(16);
+        *(.stack1)
+    } >DRAM
+
     /* Global variables that are mutable and zero-initialized. */
     .bss (NOLOAD) : ALIGN(4)
     {
@@ -103,6 +110,7 @@ SECTIONS
     .iram_dummy (NOLOAD): ALIGN(4)
     {
         . += SIZEOF(.stack);
+        . += SIZEOF(.stack1);
         . += SIZEOF(.bss);
         . += SIZEOF(.data);
     } > IRAM
@@ -115,6 +123,8 @@ SECTIONS
         /* Boot entry point and its literals */
         *(.literal.call_start_cpu0)
         *(.text.call_start_cpu0)
+        *(.literal.call_start_cpu1)
+        *(.text.call_start_cpu1)
 
         /* Xtensa exception/interrupt vector table — must be 0x400-aligned */
         . = ALIGN(0x400);
@@ -201,7 +211,10 @@ _psram_end = ORIGIN(PSRAM) + LENGTH(PSRAM);
  */
 _globals_start = _sbss;
 _globals_end = _edata;
-_heap_start = _iram_end - 0x6F0000 - (__init_end - __init_start);
+/* Goroutine stacks come from the heap and the windowed ABI needs a 16 byte
+ * aligned stack pointer, see the Xtensa ISA Reference Manual section 8.1.
+ */
+_heap_start = ALIGN(_iram_end - 0x6F0000 - (__init_end - __init_start), 16);
 /* Stop the heap before the ROM BSS/data region.
  * ESP-IDF defines SOC_ROM_STACK_START = 0x3fceb710 as the top of the ROM boot
  * stack.  Everything from 0x3fceb710 up to SOC_DIRAM_DRAM_HIGH (0x3fcf0000)
@@ -218,6 +231,9 @@ _heap_start = _iram_end - 0x6F0000 - (__init_end - __init_start);
 _heap_end = 0x3fceb710;
 
 PROVIDE( g_rom_spiflash_dummy_len_plus = 0x3fcefffd );
+
+/* From ESP-IDF components/esp_rom/esp32s3/ld/esp32s3.rom.ld */
+PROVIDE( ets_set_appcpu_boot_addr = 0x40000720 );
 
 _stack_size = 4K;
 

@@ -3,6 +3,7 @@
 package machine
 
 import (
+	"device"
 	"device/esp"
 	"errors"
 	"runtime/interrupt"
@@ -330,6 +331,7 @@ const (
 // the change parameter is ignored and can be set to any value (such as 0).
 // If the pin is already configured with a callback, you must first unset
 // this pins interrupt before you can set a new callback.
+// The callbacks run on the core that sets the first pin interrupt.
 func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) (err error) {
 	if p >= maxPin {
 		return ErrInvalidInputPin
@@ -373,7 +375,13 @@ var (
 )
 
 func setupPinInterrupt() error {
-	esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
+	// Route the source to the core that calls this, as ESP-IDF gpio_isr_register does.
+	// PRID is 0xCDCD on core 0 and 0xABAB on core 1, see ESP-IDF xt_utils_get_core_id.
+	if device.AsmFull("rsr {}, PRID", nil)>>13&1 == 0 {
+		esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
+	} else {
+		esp.INTERRUPT_CORE1.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
+	}
 	return interrupt.New(cpuInterruptFromPin, func(interrupt.Interrupt) {
 		// Read and immediately clear interrupt status bits.
 		// Clearing before processing is critical for edge-triggered CPU

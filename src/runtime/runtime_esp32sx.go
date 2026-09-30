@@ -56,6 +56,10 @@ func initTimer() {
 }
 
 func ticks() timeUnit {
+	// Both cores share the latch, so an update from the other core can tear
+	// the LO and HI read.
+	mask := lockAtomics()
+
 	// First, update the LO and HI register pair by writing any value to the
 	// register. This allows reading the pair atomically.
 	esp.TIMG0.T0UPDATE.Set(1)
@@ -63,7 +67,10 @@ func ticks() timeUnit {
 		// Register is cleared when the update is complete.
 	}
 	// Then read the two 32-bit parts of the timer.
-	return timeUnit(uint64(esp.TIMG0.T0LO.Get()) | uint64(esp.TIMG0.T0HI.Get())<<32)
+	t := timeUnit(uint64(esp.TIMG0.T0LO.Get()) | uint64(esp.TIMG0.T0HI.Get())<<32)
+
+	unlockAtomics(mask)
+	return t
 }
 
 func nanosecondsToTicks(ns int64) timeUnit {
@@ -110,24 +117,27 @@ func initTimerInterrupt() {
 	timerAlarmInterrupt.Enable()
 }
 
+// setTimerAlarm arms the TIMG0 alarm interrupt for the given tick count.
+func setTimerAlarm(target timeUnit) {
+	esp.TIMG0.T0ALARMLO.Set(uint32(target))
+	esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
+
+	// Enable the alarm (auto-clears when alarm fires).
+	esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_TCONFIG_ALARM_EN)
+
+	// Re-enable the timer interrupt (handler disables INT_ENA).
+	esp.TIMG0.INT_CLR_TIMERS.Set(1)
+	esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
+}
+
 // sleepTicks spins until the given number of ticks have elapsed, using the
 // TIMG0 alarm interrupt to avoid busy-waiting for the entire duration.
 func sleepTicks(d timeUnit) {
 	machine.FlushSerial()
 	target := ticks() + d
 	for ticks() < target {
-		// Set the alarm to fire at the target tick count.
 		interruptPending.Set(0)
-
-		esp.TIMG0.T0ALARMLO.Set(uint32(target))
-		esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
-
-		// Enable the alarm (auto-clears when alarm fires).
-		esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_TCONFIG_ALARM_EN)
-
-		// Re-enable the timer interrupt (handler disables INT_ENA).
-		esp.TIMG0.INT_CLR_TIMERS.Set(1)
-		esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
+		setTimerAlarm(target)
 
 		// Wait for any interrupt (timer alarm or other) or timeout.
 		for interruptPending.Get() == 0 {

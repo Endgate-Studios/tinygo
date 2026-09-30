@@ -1,4 +1,4 @@
-//go:build scheduler.tasks && (esp32 || esp32s3)
+//go:build (scheduler.tasks && (esp32 || esp32s3)) || (scheduler.cores && esp32s3)
 
 package task
 
@@ -14,8 +14,6 @@ package task
 import (
 	"unsafe"
 )
-
-var systemStack uintptr
 
 // calleeSavedRegs is the list of registers that must be saved and restored when
 // switching between tasks. Also see task_stack_esp8266.S that relies on the
@@ -57,22 +55,6 @@ func (s *state) archInit(r *calleeSavedRegs, fn uintptr, args unsafe.Pointer) {
 	// pseudo-return to tinygo_startTask using the register window mechanism.
 	r.a3 = fn
 	r.a2 = uintptr(args)
-}
-
-func (s *state) resume() {
-	swapTask(s.sp, &systemStack)
-}
-
-func (s *state) pause() {
-	newStack := systemStack
-	systemStack = 0
-	swapTask(newStack, &s.sp)
-}
-
-// SystemStack returns the system stack pointer when called from a task stack.
-// When called from the system stack, it returns 0.
-func SystemStack() uintptr {
-	return systemStack
 }
 
 //export tinygo_task_current
