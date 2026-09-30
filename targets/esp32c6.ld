@@ -99,8 +99,10 @@ SECTIONS
         . = ALIGN(4);
     } > SRAM
 
-    /* Heap starts after IRAM. */
-    . = ALIGN(4);
+    /* Heap starts after IRAM. Goroutine stacks come from the heap, and the
+     * RISC-V psABI needs a 16 byte aligned stack pointer.
+     */
+    . = ALIGN(16);
     _heap_start = ABSOLUTE(.);
     _heap_end = ORIGIN(SRAM) + LENGTH(SRAM);
 

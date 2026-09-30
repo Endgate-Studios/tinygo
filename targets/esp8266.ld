@@ -59,7 +59,7 @@ SECTIONS
 
 _globals_start = _sdata;
 _globals_end = _ebss;
-_heap_start = _ebss;
+_heap_start = ALIGN(_ebss, 16);
 _heap_end = ORIGIN(DRAM) + LENGTH(DRAM);
 
 /* It appears that the stack is set to 0x3ffffff0 when main is called.
