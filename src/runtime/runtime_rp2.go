@@ -113,6 +113,11 @@ func schedulerWake() {
 	}
 }
 
+// The sev instruction wakes both cores, also from sleepTicksMulticore.
+func schedulerWakeCore(core uint32) {
+	arm.Asm("sev")
+}
+
 // Return the current core number: 0 or 1.
 func currentCPU() uint32 {
 	return rp.SIO.CPUID.Get()

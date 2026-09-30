@@ -484,6 +484,17 @@ func schedulerWake() {
 	}
 }
 
+// Wake the given hart. Must be called with the scheduler lock held.
+func schedulerWakeCore(core uint32) {
+	if sleepingHarts&(1<<core) != 0 {
+		sleepingHarts &^= 1 << core
+		schedulerWakePending[core].Store(1)
+		signalHart(core)
+	} else if uint32(sleepingCore) == core {
+		interruptSleepTicksMulticore(0)
+	}
+}
+
 // Pause the given core by sending it an interrupt.
 func gcPauseCore(core uint32) {
 	gcPauseRequest[core].Store(1)

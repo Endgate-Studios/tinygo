@@ -27,19 +27,19 @@ func getCurrentStackPointer() uintptr {
 }
 
 // Disable interrupts for procPin/procUnpin using the Xtensa RSIL/WSR PS
-// instructions.  A global variable is safe here because accesses happen
-// with interrupts disabled.
-var procPinnedMask uintptr
+// instructions. There is one slot per core, because each core has its own PS.
+var procPinnedMask [procPinSlots]uintptr
 
 //go:linkname procPin sync/atomic.runtime_procPin
 func procPin() {
 	// rsil sets PS.INTLEVEL=15 (mask all) and returns the old PS.
-	procPinnedMask = uintptr(device.AsmFull("rsil {}, 15", nil))
+	mask := uintptr(device.AsmFull("rsil {}, 15", nil))
+	procPinnedMask[procPinSlot()] = mask
 }
 
 //go:linkname procUnpin sync/atomic.runtime_procUnpin
 func procUnpin() {
 	device.AsmFull("wsr {state}, PS", map[string]interface{}{
-		"state": procPinnedMask,
+		"state": procPinnedMask[procPinSlot()],
 	})
 }

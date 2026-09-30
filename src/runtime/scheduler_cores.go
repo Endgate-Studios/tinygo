@@ -49,7 +49,7 @@ func scheduleTask(t *task.Task) {
 		runqueue.Push(t)
 		// ...and wake up a sleeping core, if there is one.
 		// (If all cores are already busy, this is a no-op).
-		schedulerWake()
+		schedulerWakeFor(t)
 	case task.RunStateRunning:
 		// Not yet paused (probably going to pause very soon), so let the
 		// Pause() function know it can resume immediately.
@@ -92,8 +92,61 @@ func addSleepTask(t *task.Task, wakeup timeUnit) {
 
 func Gosched() {
 	schedulerLock.Lock()
-	runqueue.Push(task.Current())
+	t := task.Current()
+	runqueue.Push(t)
+	if core, pinned := t.PinnedCore(); pinned && core != currentCPU() {
+		schedulerWakeCore(core)
+	}
 	task.PauseLocked()
+}
+
+// Wake a core that can run t. Must be called with the scheduler lock held.
+func schedulerWakeFor(t *task.Task) {
+	if core, pinned := t.PinnedCore(); pinned {
+		schedulerWakeCore(core)
+	} else {
+		schedulerWake()
+	}
+}
+
+// Implementation of machine.LockCore. It returns false for an invalid core.
+func machineLockCore(core int) bool {
+	if core < 0 || core >= numCPU {
+		return false
+	}
+	schedulerLock.Lock()
+	task.Current().SetPin(uint32(core))
+	schedulerLock.Unlock()
+	if uint32(core) != currentCPU() {
+		Gosched()
+	}
+	return true
+}
+
+// Implementation of machine.UnlockCore.
+func machineUnlockCore() {
+	schedulerLock.Lock()
+	task.Current().ClearPin()
+	schedulerLock.Unlock()
+}
+
+// procPin saves one interrupt state per core.
+const procPinSlots = numCPU
+
+func procPinSlot() uint32 {
+	return currentCPU()
+}
+
+func lockOSThread() {
+	schedulerLock.Lock()
+	task.Current().LockOSThread(currentCPU())
+	schedulerLock.Unlock()
+}
+
+func unlockOSThread() {
+	schedulerLock.Lock()
+	task.Current().UnlockOSThread()
+	schedulerLock.Unlock()
 }
 
 // NumCPU returns the number of CPU cores on this system.
@@ -202,6 +255,7 @@ func run() {
 }
 
 func scheduler(_ bool) {
+	core := currentCPU()
 	for mainExited.Load() == 0 {
 		var now timeUnit
 		if sleepQueue != nil || timerQueue != nil {
@@ -212,6 +266,12 @@ func scheduler(_ bool) {
 				// It is, pop it from the queue.
 				sleepQueue = sleepQueue.Next
 				sleepingTask.Next = nil
+
+				if !sleepingTask.RunsOn(core) {
+					runqueue.Push(sleepingTask)
+					schedulerWakeFor(sleepingTask)
+					continue
+				}
 
 				// Run it now.
 				setCurrentTask(sleepingTask)
@@ -244,7 +304,7 @@ func scheduler(_ bool) {
 		}
 
 		// Check for ready-to-run tasks.
-		if runnable := runqueue.Pop(); runnable != nil {
+		if runnable := runqueue.PopFor(core); runnable != nil {
 			// Resume it now.
 			setCurrentTask(runnable)
 			runnable.RunState = task.RunStateRunning

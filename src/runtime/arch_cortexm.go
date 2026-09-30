@@ -27,17 +27,18 @@ func getCurrentStackPointer() uintptr {
 }
 
 // The safest thing to do here would just be to disable interrupts for
-// procPin/procUnpin. Note that a global variable is safe in this case, as any
-// access to procPinnedMask will happen with interrupts disabled.
+// procPin/procUnpin. There is one slot per core, because interrupts are
+// disabled only on the current core.
 
-var procPinnedMask uintptr
+var procPinnedMask [procPinSlots]uintptr
 
 //go:linkname procPin sync/atomic.runtime_procPin
 func procPin() {
-	procPinnedMask = arm.DisableInterrupts()
+	mask := arm.DisableInterrupts()
+	procPinnedMask[procPinSlot()] = mask
 }
 
 //go:linkname procUnpin sync/atomic.runtime_procUnpin
 func procUnpin() {
-	arm.EnableInterrupts(procPinnedMask)
+	arm.EnableInterrupts(procPinnedMask[procPinSlot()])
 }
