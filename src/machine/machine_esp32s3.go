@@ -51,18 +51,25 @@ func SetCPUFrequency(frequency uint32) error {
 	case 80_000000:
 		esp.SYSTEM.SetCPU_PER_CONF_CPUPERIOD_SEL(0)
 		esp.SYSTEM.SetCPU_PER_CONF_PLL_FREQ_SEL(0) // Reduce PLL freq when possible
-		return nil
 	case 160_000000:
 		esp.SYSTEM.SetCPU_PER_CONF_CPUPERIOD_SEL(1)
 		esp.SYSTEM.SetCPU_PER_CONF_PLL_FREQ_SEL(0)
-		return nil
 	case 240_000000:
 		esp.SYSTEM.SetCPU_PER_CONF_PLL_FREQ_SEL(1) // Increase PLL freq when needed
 		esp.SYSTEM.SetCPU_PER_CONF_CPUPERIOD_SEL(2)
-		return nil
+	default:
+		return errors.New("machine: Unsupported CPU frequency selected. Supported: 80, 160, 240 MHz")
 	}
-	return errors.New("machine: Unsupported CPU frequency selected. Supported: 80, 160, 240 MHz")
+	// ROM ets_delay_us counts CPU cycles with this value, as ESP-IDF
+	// esp_rom_set_cpu_ticks_per_us does after a clock change.
+	romUpdateCPUFrequency(frequency / 1_000_000)
+	return nil
 }
+
+// See ESP-IDF components/esp_rom/esp32s3/ld/esp32s3.rom.ld.
+//
+//export ets_update_cpu_frequency
+func romUpdateCPUFrequency(mhz uint32)
 
 var (
 	ErrInvalidSPIBus = errors.New("machine: invalid SPI bus")
