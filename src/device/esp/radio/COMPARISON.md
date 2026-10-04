@@ -1,0 +1,214 @@
+# device/esp/radio compared with espradio
+
+This document compares the `device/esp/radio` package with the
+`tinygo.org/x/espradio` module on the ESP32-S3. It gives features, memory,
+throughput and power. It also tells which values are measured and which are
+not.
+
+## Summary
+
+| Item | device/esp/radio | espradio |
+|---|---|---|
+| Dual core (`-scheduler=cores`) | Yes. Tested for 2 hours with Wi-Fi and BLE | No multicore code. Not tested with `-scheduler=cores` |
+| Wi-Fi and BLE at the same time | Yes. Tested | BLE stops at start with `BLE assert emi.c 164` on our board |
+| Static RAM of the radio | 11.2 KB less (Wi-Fi), 13.8 KB less (Wi-Fi and BLE) | Reference |
+| Blob memory, Wi-Fi connected | 27,976 bytes | 31,296 bytes |
+| AMPDU (frame aggregation) | On | Off |
+| Wi-Fi power save | `PowerSaveMinModem` (ESP-IDF default). `SetPowerSave` can change it | `WIFI_PS_NONE`, fixed |
+| PSRAM | Optional, for the TX cache and the frame pool | Not used |
+| Memory statistics | In use, peak, failures, largest free block | In use and capacity |
+| Station mode | Yes | Yes |
+| Access point mode | Mode value only. No AP configuration and no DHCP server yet | Yes, with a DHCP server |
+| ESP-NOW | No | Yes |
+| TCP/IP stack | Separate (`tinygo/net/ip`) | Included (lneto), and a `netdev` driver |
+
+## Test setup
+
+- Board: ESP32-S3 with 8 MB octal PSRAM, target `esp32s3-psram-octal`.
+- The same TinyGo tree and linker script for the two packages.
+- espradio version: `v0.3.1-0.20260918065743-8e5c9e19bca5`.
+- device/esp/radio: ESP-IDF v5.3.2 blobs.
+- espradio test programs call `Enable`, `Start` and `Connect` directly. The
+  `http-hello` example of espradio built without radio code, so we did not
+  use it.
+- The espradio BLE build needs 41 old BT ROM symbols that our linker script
+  does not have. We added them only for the test build.
+
+## Features
+
+### Dual core
+
+device/esp/radio runs with `-scheduler=cores`:
+
+- Goroutines that use the radio can run on the two cores. `Send` works from
+  each core.
+- The blob tasks and the service goroutine stay on core 0, as the Wi-Fi task
+  and the BT controller task do in ESP-IDF.
+- The radio interrupts go to core 0. Interrupt line changes from core 1 go
+  through the service goroutine.
+- Test: 205,583 HTTP requests and 36,547 BLE reports in 1 hour 55 minutes,
+  with 0 failures.
+
+espradio has no multicore code. Its README tells only that the chip has two
+cores. The Wi-Fi interrupt work runs on the scheduler goroutine, the tasks are
+not pinned to a core, and there is no relay for the interrupt lines of core 0.
+
+### Examples
+
+Each example has a comment at the top with the flash command. Give the Wi-Fi
+SSID and password with `-ldflags`:
+
+| Example | What it does |
+|---|---|
+| `src/examples/wifi` | Connects with WPA2, gets an address with DHCP, gets a page, answers ping, and runs UDP and TCP echo on port 7 |
+| `src/examples/wifi-http` | HTTP client and server with `tinygo/net/web`, with no allocation for each request |
+| `src/examples/wifi-ble` | HTTP server on Wi-Fi and BLE passive scan at the same time |
+| `src/examples/ble-scan` | BLE scan with raw HCI commands |
+
+```
+tinygo flash -target esp32s3-psram-octal -scheduler=cores \
+    -ldflags='-X "main.ssid=..." -X "main.password=..."' ./src/examples/wifi-ble
+```
+
+## Memory
+
+### Static RAM
+
+All values are in bytes, with `-scheduler=tasks`. With `-scheduler=cores`,
+the heap is 4,096 bytes smaller in all builds, for the stack of the second
+core.
+
+| | radio, Wi-Fi | espradio, Wi-Fi | radio, Wi-Fi and BLE | espradio, Wi-Fi and BLE |
+|---|---|---|---|---|
+| IRAM code | 38,800 | 39,780 | 54,608 | 58,148 |
+| .data | 8,920 | 9,332 | 9,660 | 9,824 |
+| .bss | 28,974 | 20,394 | 37,166 | 21,162 |
+| Example buffers in .bss | 18,440 | 0 | 25,612 | 0 |
+| GC heap left | 325,504 | 332,704 | 301,504 | 313,312 |
+| GC heap left without example buffers | 343,944 | 332,704 | 327,116 | 313,312 |
+
+The example buffers are the socket memory and the server buffers of our
+examples. The espradio test programs have no such buffers. Without them, the
+radio of device/esp/radio leaves more GC heap.
+
+On the ESP32-S3, IRAM and DRAM are the same SRAM. Each byte of IRAM code is
+one byte less for the GC heap. The two packages use the same linker script,
+which puts the Wi-Fi IRAM sections of the blobs (about 35 KB) and the BT
+`.iram1` code (about 16 KB) in IRAM. If these sections go to flash, the two
+packages get this memory back. The Wi-Fi throughput can then be lower.
+
+### Blob heap
+
+The blobs allocate memory at run time from an arena in the GC heap.
+
+| | device/esp/radio | espradio |
+|---|---|---|
+| Arena | One share for each radio: Wi-Fi 48 KB, BLE 32 KB | One arena of 48 KB for Wi-Fi and BLE |
+| RX frame buffers | 8 × 1,536 = 12,288 bytes in the arena, or in PSRAM | 6 × 1,602 = 9,612 bytes in a static C ring |
+| Wi-Fi buffers | 10 static RX, 32 dynamic RX, 32 dynamic TX, 5 management | The same |
+| AMPDU RX and TX | On | Off |
+| BLE activities | 6, from 1 to 10 with `WithBLEActivities` | 6 |
+| Blob task stacks | 8 KB goroutine stack for each task | The same |
+
+### Measured arena use
+
+| State | device/esp/radio | espradio |
+|---|---|---|
+| Wi-Fi connected, no traffic | 40,264 bytes: 27,976 blobs and 12,288 frame pool | 31,296 bytes, plus 9,612 bytes in the static ring |
+| Wi-Fi peak during the connection | 45,400 bytes | No peak counter |
+| Wi-Fi under load | Peak 47,192 bytes at 57 requests/s | Not measured |
+| Wi-Fi and BLE scan, no traffic | 67,040 bytes | Could not run |
+| Wi-Fi and BLE under load | Peak 74,000 to 79,800 bytes | Could not run |
+
+The RX path of the two packages uses almost the same memory when Wi-Fi is
+connected: 40,264 bytes against 40,908 bytes. device/esp/radio has AMPDU on.
+
+BLE adds about 26.8 KB in device/esp/radio. If BLE needs a similar quantity in
+espradio, Wi-Fi and BLE need about 58 KB, which is more than its arena of
+48 KB. This is an estimate. We could not measure it.
+
+## Throughput
+
+device/esp/radio, one HTTP client, `PowerSaveNone`, measured:
+
+| Test | Result |
+|---|---|
+| `wifi-http`, small pages, `-scheduler=cores` | About 45 requests/s |
+| `wifi-ble`, small pages, BLE scan on | About 30 requests/s |
+| `wifi-ble`, 16 KB pages, 1 client | 91.3 KB/s out |
+| `wifi-ble`, 16 KB pages, 4 clients | 109.4 KB/s out |
+
+We did not measure the throughput of espradio. Thus this document does not
+tell which package is faster. AMPDU and the second core can give
+device/esp/radio more throughput, but this is not measured against espradio.
+
+## Power
+
+We did not measure current. The values below are from the ESP32-S3 Series
+Datasheet v2.2, section 5.6. Espressif measured them at 3.3 V and 25 °C.
+
+### Supply
+
+The recommended supply voltage is 3.0 V to 3.6 V, typical 3.3 V. With one
+power supply, the recommended output current is 500 mA or more. See table 5-2
+of the datasheet.
+
+### Radio current (peak)
+
+| Mode | Current |
+|---|---|
+| Wi-Fi TX, 802.11b, 1 Mbps, 21 dBm | 340 mA |
+| Wi-Fi TX, 802.11g, 54 Mbps, 19 dBm | 291 mA |
+| Wi-Fi TX, 802.11n HT20, MCS7, 18.5 dBm | 283 mA |
+| Wi-Fi RX, 802.11b/g/n HT20 | 88 mA |
+| BLE TX, 9 dBm | 193 mA |
+| BLE TX, 0 dBm | 176 mA |
+| BLE RX | 93 mA |
+
+TX values are for a 100% duty cycle. See tables 5-7 and 5-8 of the datasheet.
+
+### CPU current at 240 MHz, radio clock gated
+
+| CPU state | Peripheral clocks off | Peripheral clocks on |
+|---|---|---|
+| Two cores in `waiti` | 32.9 mA | 47.6 mA |
+| One core runs, one core in `waiti` | 51.2 mA | 65.9 mA |
+| Two cores run | 66.2 mA | 81.3 mA |
+
+These values are for 32-bit data access instructions. See table 5-9 of the
+datasheet. The datasheet tells that chips with PSRAM can use more current.
+
+### What the software changes
+
+- **Core voltage:** before the switch to 240 MHz, the runtime sets the digital
+  and RTC LDO values from the eFuse, as ESP-IDF does. On our board, the values
+  are digital 31 and RTC 28, about 1.235 V for the digital supply. Without this
+  step, core 0 gets errors when the radio transmits. This is in the runtime,
+  so it applies to the two packages.
+- **Second core:** with `-scheduler=cores`, an idle core runs `waiti`. The
+  second core uses more current only when it has work.
+- **Wi-Fi power save:**
+  - device/esp/radio uses `PowerSaveMinModem`, the ESP-IDF default. The
+    receiver sleeps between DTIM beacons. Tests with this mode had no lost
+    frames (see README.md). `SetPowerSave(PowerSaveNone)` keeps the receiver
+    on.
+  - espradio sets `WIFI_PS_NONE`, fixed (`radio.go:640` and `radio.go:918`),
+    because the power save callbacks crashed with its scheduler. The receiver
+    stays on, and the Wi-Fi RX current is 88 mA.
+  - ESP-IDF tells that `WIFI_PS_NONE` "increases power consumption, but
+    minimizes the delay in receiving Wi-Fi data". See ESP-IDF v5.3.2
+    `docs/en/api-guides/wifi.rst`. With BLE coexistence, Wi-Fi sleeps outside
+    its time slice also with `WIFI_PS_NONE`.
+
+To measure the current of a board, put a USB power meter or a shunt resistor
+in the 3.3 V supply. Compare the average current with Wi-Fi connected and no
+traffic, and the peak current during a transfer.
+
+## Limits of this comparison
+
+- One board and one access point.
+- The espradio BLE build used 41 extra ROM symbols, and its BLE stopped with
+  an assert. So there are no run-time values for espradio with BLE.
+- The espradio Wi-Fi test program has no TCP stack, so there are no values
+  for espradio under load.
+- No current measurements. The power values are from the datasheet.
