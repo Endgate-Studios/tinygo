@@ -1,0 +1,190 @@
+//go:build gc.custom && (tinygo.wasm || (baremetal && (esp32 || esp32s3 || esp32c3 || scheduler.cores)))
+
+package gcshim
+
+import (
+	"runtime"
+	"unsafe"
+
+	"runtime/memory/collector"
+)
+
+// shim holds all mutable gcshim state. markRoots skips it, because it has no GC pointers
+// and its counters look like heap addresses (NOTES.md, Bugs found while testing).
+var shim struct {
+	spans      heapSpans // collectors of a multi-span heap, empty in other builds
+	heap       gcHeap
+	pauses     pauseStats
+	allocCount uintptr
+	lock       heapLock // locks the heap across cores, does nothing on one core
+}
+
+type pauseStats struct {
+	last, max, total uint64
+}
+
+//go:linkname runtimePanic runtime.runtimePanic
+func runtimePanic(msg string)
+
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
+
+//go:linkname initHeap runtime.initHeap
+func initHeap() {
+	if err := initArena(); err != nil {
+		runtimePanic("gcshim: heap init failed")
+	}
+}
+
+//go:linkname alloc runtime.alloc
+func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+	checkAllocContext()
+	shim.lock.Lock()
+	if stressEvery != 0 {
+		shim.allocCount++
+		if shim.allocCount >= stressEvery {
+			shim.allocCount = 0
+			collect()
+		}
+	}
+	p := shim.heap.Alloc(size)
+	if p == nil {
+		collect()
+		for p = shim.heap.Alloc(size); p == nil; p = shim.heap.Alloc(size) {
+			if !growArena(size) {
+				shim.lock.Unlock()
+				runtimePanic("out of memory")
+			}
+		}
+	}
+	shim.lock.Unlock()
+	return p
+}
+
+//go:linkname free runtime.free
+func free(ptr unsafe.Pointer) {
+	if ptr == nil {
+		return
+	}
+	shim.lock.Lock()
+	ok := shim.heap.Free(ptr)
+	inHeap := shim.heap.Contains(ptr)
+	shim.lock.Unlock()
+	if !ok && strictFree && inHeap {
+		runtimePanic("free: invalid or double free")
+	}
+}
+
+//go:linkname markRoots runtime.markRoots
+func markRoots(start, end uintptr) {
+	// The runtime gives stacks and globals here. Only the globals can contain shim, so skip it.
+	lo := uintptr(unsafe.Pointer(&shim))
+	hi := lo + unsafe.Sizeof(shim)
+	if lo >= start && hi <= end {
+		shim.heap.MarkRange(start, lo)
+		shim.heap.MarkRange(hi, end)
+		return
+	}
+	shim.heap.MarkRange(start, end)
+}
+
+//go:linkname GC runtime.GC
+func GC() {
+	shim.lock.Lock()
+	collect()
+	shim.lock.Unlock()
+}
+
+// collect runs one cycle while the caller holds shim.lock. Other cores resume after the mark,
+// because the sweep changes only heap metadata and they cannot allocate without the lock.
+func collect() {
+	t0 := nanotime()
+	shim.heap.BeginCycle()
+	markAllRoots()
+	shim.heap.FinishMark()
+	resumeWorld()
+	shim.heap.Sweep()
+	recordPause(uint64(nanotime() - t0))
+
+	// Grow the heap if live data is more than half of it after a collection, as Go does with
+	// GOGC=100 (https://go.dev/doc/gc-guide#GOGC). If not, the next collection comes too soon.
+	if s := shim.heap.Stats(); s.HeapInuse*2 > s.HeapSys {
+		growArena(0)
+	}
+}
+
+//go:linkname SetFinalizer runtime.SetFinalizer
+func SetFinalizer(obj interface{}, finalizer interface{}) {
+	// Finalizers are not supported. The contract in src/runtime/gc_custom.go permits a no-op.
+}
+
+//go:linkname ReadMemStats runtime.ReadMemStats
+func ReadMemStats(ms *runtime.MemStats) {
+	shim.lock.Lock()
+	s := shim.heap.Stats()
+	shim.lock.Unlock()
+	// Clear all fields so that fields gcshim does not know read 0 (tinygo-org/tinygo#5785).
+	clear(unsafe.Slice((*byte)(unsafe.Pointer(ms)), unsafe.Sizeof(*ms)))
+	ms.HeapSys = s.HeapSys
+	ms.HeapAlloc = s.HeapInuse
+	ms.HeapInuse = s.HeapInuse + s.HeapReserved
+	ms.HeapIdle = s.HeapIdle
+	ms.HeapReleased = 0
+	ms.HeapObjects = s.Mallocs - s.Frees
+	ms.Alloc = s.HeapInuse
+	ms.TotalAlloc = s.TotalAlloc
+	ms.Mallocs = s.Mallocs
+	ms.Frees = s.Frees
+	ms.NumGC = s.NumGC
+	ms.GCSys = s.MetaSys
+	ms.Sys = s.HeapSys + s.MetaSys
+}
+
+func recordPause(ns uint64) {
+	shim.pauses.last = ns
+	shim.pauses.total += ns
+	if ns > shim.pauses.max {
+		shim.pauses.max = ns
+	}
+}
+
+func collectorConfig() collector.Config {
+	return collector.Config{PageSize: pageSize, WorklistLen: worklistLen, Poison: poison}
+}
+
+// Installed reports whether gcshim is this program's garbage collector.
+func Installed() bool { return true }
+
+// Reserve takes n bytes of unscanned pages from the GC heap, or returns nil if no run is free.
+// Do not keep the only reference to a GC heap object in this memory.
+func Reserve(n uintptr) []byte {
+	shim.lock.Lock()
+	defer shim.lock.Unlock()
+	mem := shim.heap.Reserve(n)
+	if mem == nil {
+		collect()
+		mem = shim.heap.Reserve(n)
+	}
+	return mem
+}
+
+// Release gives back memory from Reserve.
+func Release(mem []byte) {
+	if len(mem) != 0 {
+		shim.lock.Lock()
+		shim.heap.Release(unsafe.Pointer(unsafe.SliceData(mem)))
+		shim.lock.Unlock()
+	}
+}
+
+// ReadStats returns the collector counters and the pause times.
+func ReadStats() Stats {
+	shim.lock.Lock()
+	defer shim.lock.Unlock()
+	return Stats{
+		Stats:        shim.heap.Stats(),
+		LastPauseNs:  shim.pauses.last,
+		MaxPauseNs:   shim.pauses.max,
+		TotalPauseNs: shim.pauses.total,
+	}
+}
