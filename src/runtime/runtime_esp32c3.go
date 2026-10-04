@@ -148,29 +148,21 @@ func initTimerInterrupt() {
 	riscv.EnableInterrupts(mie)
 }
 
-// sleepTicks spins until the given number of ticks have elapsed, using the
-// TIMG0 alarm interrupt to avoid busy-waiting for the entire duration.
+// sleepTicks waits until the given number of ticks have elapsed, or until an
+// interrupt comes, because it can wake a goroutine. An interrupt since the
+// last sleep also ends the sleep, so no wakeup is lost.
 func sleepTicks(d timeUnit) {
 	machine.FlushSerial()
 	target := ticks() + d
-	for ticks() < target {
-		// Set the alarm to fire at the target tick count (or as close
-		// as the 54-bit counter allows).
-		interruptPending.Set(0)
+	esp.TIMG0.T0ALARMLO.Set(uint32(target))
+	esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
 
-		esp.TIMG0.T0ALARMLO.Set(uint32(target))
-		esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
+	// Enable the alarm (auto-clears when alarm fires).
+	esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_T0CONFIG_ALARM_EN)
 
-		// Enable the alarm (auto-clears when alarm fires).
-		esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_T0CONFIG_ALARM_EN)
-
-		// Wait for any interrupt (timer alarm or other) or a timeout.
-		for interruptPending.Get() == 0 {
-			if ticks() >= target {
-				return
-			}
-		}
+	for interruptPending.Get() == 0 && ticks() < target {
 	}
+	interruptPending.Set(0)
 }
 
 //go:extern _vector_table

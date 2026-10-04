@@ -130,22 +130,16 @@ func setTimerAlarm(target timeUnit) {
 	esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
 }
 
-// sleepTicks spins until the given number of ticks have elapsed, using the
-// TIMG0 alarm interrupt to avoid busy-waiting for the entire duration.
+// sleepTicks waits until the given number of ticks have elapsed, or until an
+// interrupt comes, because it can wake a goroutine. An interrupt since the
+// last sleep also ends the sleep, so no wakeup is lost.
 func sleepTicks(d timeUnit) {
 	machine.FlushSerial()
 	target := ticks() + d
-	for ticks() < target {
-		interruptPending.Set(0)
-		setTimerAlarm(target)
-
-		// Wait for any interrupt (timer alarm or other) or timeout.
-		for interruptPending.Get() == 0 {
-			if ticks() >= target {
-				return
-			}
-		}
+	setTimerAlarm(target)
+	for interruptPending.Get() == 0 && ticks() < target {
 	}
+	interruptPending.Set(0)
 }
 
 func exit(code int) {
