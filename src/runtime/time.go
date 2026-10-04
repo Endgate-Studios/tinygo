@@ -17,6 +17,10 @@ type timer struct {
 	arg any
 
 	synctest *synctestBubble
+
+	// spare is a node that is not in the timer queue, from a stop or a one-shot
+	// timer that fired. resetTimer uses it, so a reset does not allocate.
+	spare *timerNode
 }
 
 func (tim *timer) callCallback(delta int64) {
@@ -68,8 +72,9 @@ func stopTimer(tim *timeTimer) bool {
 	var removed bool
 	if tim.timer.synctest != nil {
 		removed = tim.timer.synctest.removeTimer(&tim.timer) != nil
-	} else {
-		removed = removeTimer(&tim.timer) != nil
+	} else if n := removeTimer(&tim.timer); n != nil {
+		removed = true
+		tim.timer.spare = n
 	}
 	tim.timer.lock.Unlock()
 	return removed
@@ -88,6 +93,9 @@ func resetTimer(t *timeTimer, when, period int64) bool {
 		n = removeTimer(&t.timer)
 	}
 	removed := n != nil
+	if n == nil && t.timer.spare != nil {
+		n, t.timer.spare = t.timer.spare, nil
+	}
 	if n == nil {
 		// Allocation can start GC, so do not hold the cores spin lock.
 		t.timer.lock.Unlock()
@@ -179,12 +187,13 @@ func timerCallback(tn *timerNode, delta int64) {
 	// package so is left zero.
 	tn.timer.callCallback(delta)
 
-	// Finish firing the timer and re-add it if it is periodic.
+	// Finish firing the timer and re-add it if it is periodic. A node that is
+	// not re-added becomes the spare of the timer.
 	tn.timer.lock.Lock()
 	if tn.timer.synctest != nil {
 		tn.timer.synctest.finishTimer(tn)
-	} else {
-		reAddTimer(tn)
+	} else if !reAddTimer(tn) {
+		tn.timer.spare = tn
 	}
 	tn.timer.lock.Unlock()
 }

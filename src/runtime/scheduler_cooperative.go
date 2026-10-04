@@ -151,13 +151,15 @@ func addTimer(tim *timerNode) {
 }
 
 // reAddTimer finishes firing a timer. The cooperative scheduler runs timer
-// callbacks to completion, so periodic timers can be re-added directly.
-func reAddTimer(tn *timerNode) {
+// callbacks to completion, so periodic timers can be re-added directly. It
+// reports whether the node is in the queue again.
+func reAddTimer(tn *timerNode) bool {
 	if tn.timer.period == 0 {
-		return
+		return false
 	}
 	tn.timer.when += tn.timer.period
 	addTimer(tn)
+	return true
 }
 
 // removeTimer is the implementation of time.stopTimer. It removes a timer from

@@ -125,10 +125,11 @@ func sleepTicksMulticore(d timeUnit) {
 	routeTimerAlarm(core)
 	target := ticks() + d
 
-	// waiti enables interrupts and waits in one step, so no wakeup is lost.
+	// waiti enables interrupts and waits in one step, so no wakeup is lost. An
+	// interrupt can wake a task before the sleep starts, so check the list.
 	mask := interrupt.Disable()
 	schedulerLock.Unlock()
-	for sleepInterrupted.Load() == 0 {
+	for sleepInterrupted.Load() == 0 && interruptWakes[core] == nil {
 		setTimerAlarm(target)
 		if ticks() >= target {
 			break
@@ -161,6 +162,12 @@ func interruptSleep() {
 	signalCore(uint32(sleepingCore))
 }
 
+// interruptSleepFromInterrupt stops sleepTicksMulticore after an interrupt
+// woke a task, so that the scheduler takes it.
+func interruptSleepFromInterrupt() {
+	sleepInterrupted.Store(1)
+}
+
 func interruptSleepTicksMulticore(wakeup timeUnit) {
 	if sleepingCore != 0xff {
 		interruptSleep()
@@ -175,10 +182,12 @@ func schedulerUnlockAndWait() {
 	waitingCores |= 1 << core
 
 	// waiti enables interrupts and waits in one step, so a wakeup that comes
-	// after the unlock is not lost.
+	// after the unlock is not lost. An interrupt can wake a task before that.
 	mask := interrupt.Disable()
 	schedulerLock.Unlock()
-	device.Asm("waiti 0")
+	if interruptWakes[core] == nil {
+		device.Asm("waiti 0")
+	}
 	interrupt.Restore(mask)
 
 	schedulerLock.Lock()

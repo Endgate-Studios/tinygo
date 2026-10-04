@@ -306,6 +306,10 @@ func sleepTicksMulticore(d timeUnit) {
 
 // Interrupt an ongoing call to sleepTicksMulticore on another core.
 // This may only be called with the scheduler lock held.
+// interruptSleepFromInterrupt does nothing: the interrupt itself ends the
+// wait of sleepTicksMulticore.
+func interruptSleepFromInterrupt() {}
+
 func interruptSleepTicksMulticore(wakeup timeUnit) {
 	if sleepingCore != 0xff {
 		// Immediately exit the sleep.

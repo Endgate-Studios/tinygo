@@ -85,6 +85,10 @@ func sleepTicksMulticore(d timeUnit) {
 }
 
 // Interrupt an ongoing call to sleepTicksMulticore on another core.
+// interruptSleepFromInterrupt does nothing: the interrupt itself ends the
+// wait of sleepTicksMulticore.
+func interruptSleepFromInterrupt() {}
+
 func interruptSleepTicksMulticore(wakeup timeUnit) {
 	arm.Asm("sev")
 }

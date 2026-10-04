@@ -63,8 +63,9 @@ func addTimer(tim *timerNode) {
 	runtimePanic(errTimersUnsupported)
 }
 
-func reAddTimer(tn *timerNode) {
+func reAddTimer(tn *timerNode) bool {
 	runtimePanic(errTimersUnsupported)
+	return false
 }
 
 func removeTimer(tim *timer) *timerNode {
