@@ -21,7 +21,7 @@ not.
 | HTTP requests in 2 min, 1 client | 4,326 to 4,796 | 3,143 to 3,169 |
 | Access point mode | WPA2-PSK or open, up to 4 stations, DHCP server in `tinygo/net/ip`. Not tested with a station yet | Yes, with a DHCP server |
 | Stop and restart | `Stop`, `Deinit`, `BLEDisable`. 20 cycles tested, no memory growth | Not compared |
-| ESP-NOW | No | Yes |
+| ESP-NOW | Yes. Tested with one board, reception not tested yet | Yes |
 | TCP/IP stack | Separate (`tinygo/net/ip`) | Included (lneto), and a `netdev` driver |
 
 ## Test setup

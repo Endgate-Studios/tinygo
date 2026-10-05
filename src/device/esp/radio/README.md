@@ -161,6 +161,28 @@ The `wifi-ap` example makes the network `tinygo-ap` and serves HTTP on
 192.168.4.1. The board sends beacons and the unit tests do the handshake and
 DHCP, but a test with a station is not done yet.
 
+## ESP-NOW
+
+ESP-NOW sends messages of up to 250 bytes between Espressif chips, in Wi-Fi
+vendor action frames. It needs no access point and no IP. A PC or a phone
+cannot receive it. The protocol is in `libespnow.a` of the blobs.
+
+- `ESPNowInit` after `Start`. Without a connection, `SetChannel` sets the
+  channel. All devices must use the same channel.
+- `ESPNowAddPeer` before a send. `ESPNowBroadcast` sends to all devices on
+  the channel. A peer with a `Key` of 16 bytes uses encryption, up to 6
+  peers. Broadcast messages are not encrypted.
+- `ESPNowSend` waits for the send status. A unicast message gives
+  `ErrESPNowNoAck` when the peer did not acknowledge it.
+- `HandleESPNow` gets the received messages, with the source MAC and the
+  RSSI.
+
+The `espnow` example sends a broadcast each second and answers each new
+board with a unicast message. Tested with one board: the broadcasts are
+sent, a unicast message to a MAC that does not exist gives
+`ErrESPNowNoAck`, and 5 cycles with `Deinit` left no memory in the blob
+heap. Reception and encryption need a test with two boards.
+
 ## Stop and restart
 
 - `Stop` stops Wi-Fi, as `esp_wifi_stop`. `Start` starts it again.
@@ -209,6 +231,7 @@ The items are in order of priority.
    with `PowerSaveNone`, with a USB power meter or a shunt resistor.
 2. **Access point with a station.** Connect a phone to the `wifi-ap` example
    and check the 4-way handshake, DHCP and HTTP.
-3. **ESP-NOW.** Add it if a user needs it.
+3. **ESP-NOW with two boards.** Test reception, the unicast ACK and
+   encryption with the `espnow` example on two boards.
 4. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
    is not tested on these chips.
