@@ -82,6 +82,24 @@ func (c *Cipher) Encrypt(dst, src *[BlockSize]byte) error {
 	if c.rk == nil {
 		return ErrClosed
 	}
+	c.encrypt(dst, src)
+	return nil
+}
+
+// Decrypt decrypts src into dst. dst and src can be the same block.
+func (c *Cipher) Decrypt(dst, src *[BlockSize]byte) error {
+	if c.rk == nil {
+		return ErrClosed
+	}
+	c.decrypt(dst, src)
+	return nil
+}
+
+// key gives the cipher key, which is the start of the round keys (FIPS 197
+// section 5.2).
+func (c *Cipher) key() []byte { return c.rk[:4*(c.rounds-6)] }
+
+func (c *Cipher) encryptSoft(dst, src *[BlockSize]byte) {
 	s := *src
 	addRoundKey(&s, c.rk[0:])
 	for r := 1; r < c.rounds; r++ {
@@ -95,14 +113,9 @@ func (c *Cipher) Encrypt(dst, src *[BlockSize]byte) error {
 	addRoundKey(&s, c.rk[BlockSize*c.rounds:])
 	*dst = s
 	clear(s[:])
-	return nil
 }
 
-// Decrypt decrypts src into dst. dst and src can be the same block.
-func (c *Cipher) Decrypt(dst, src *[BlockSize]byte) error {
-	if c.rk == nil {
-		return ErrClosed
-	}
+func (c *Cipher) decryptSoft(dst, src *[BlockSize]byte) {
 	s := *src
 	addRoundKey(&s, c.rk[BlockSize*c.rounds:])
 	for r := c.rounds - 1; r > 0; r-- {
@@ -116,7 +129,6 @@ func (c *Cipher) Decrypt(dst, src *[BlockSize]byte) error {
 	addRoundKey(&s, c.rk[0:])
 	*dst = s
 	clear(s[:])
-	return nil
 }
 
 // Closed reports whether the Cipher has no round keys, before Init or after Close.
