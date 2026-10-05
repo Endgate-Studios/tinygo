@@ -1,7 +1,8 @@
 // Package ip is a small IPv4 stack over an Ethernet link: ARP, IPv4, ICMP echo,
-// UDP and a DHCP client. It does not allocate for each packet. Received frames
-// are parsed in place, replies use one transmit buffer, and each UDP socket has
-// a ring buffer from an injected allocator.
+// UDP with broadcast and link-local multicast, TCP, a DHCP client and server,
+// a DNS client and an mDNS responder. It does not allocate for each packet.
+// Received frames are parsed in place, replies use one transmit buffer, and
+// each socket has ring buffers from an injected allocator.
 package ip
 
 import (
@@ -79,6 +80,7 @@ const (
 	protoICMP  = 1
 	protoUDP   = 17
 	defaultTTL = 64
+	maxGroups  = 4
 )
 
 // Stack is an IPv4 host on one link. Its methods are safe for concurrent use.
@@ -89,6 +91,7 @@ type Stack struct {
 
 	mu       sync.Mutex
 	cfg      Config
+	groups   [maxGroups]Addr // joined multicast groups
 	arp      arpCache
 	tx       [maxFrame]byte
 	ipID     uint16
@@ -146,8 +149,8 @@ func (s *Stack) Input(frame []byte) {
 		return
 	}
 	dst := [6]byte(frame[0:6])
-	if dst != s.mac && dst != broadcastMAC {
-		return // multicast and frames for other hosts
+	if dst != s.mac && dst != broadcastMAC && !s.joinedMAC(dst) {
+		return // frames for other hosts and other groups
 	}
 	switch be16(frame[12:]) {
 	case etherARP:
@@ -197,12 +200,82 @@ func (s *Stack) isBroadcast(dst Addr) bool {
 	return true
 }
 
+// JoinMulticast receives the UDP datagrams to group, a multicast address. It
+// sends no IGMP report, so use it for the link-local groups 224.0.0.0/24,
+// which switches send to all ports (RFC 4541 section 2.1.2).
+func (s *Stack) JoinMulticast(group Addr) error {
+	if !isMulticast(group) {
+		return ErrNotMulticast
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	free := -1
+	for i, g := range s.groups {
+		if g == group {
+			return nil
+		}
+		if g.IsZero() && free < 0 {
+			free = i
+		}
+	}
+	if free < 0 {
+		return ErrGroups
+	}
+	s.groups[free] = group
+	return nil
+}
+
+// LeaveMulticast stops the reception of group.
+func (s *Stack) LeaveMulticast(group Addr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, g := range s.groups {
+		if g == group {
+			s.groups[i] = Addr{}
+		}
+	}
+}
+
+func isMulticast(a Addr) bool { return a[0]&0xf0 == 0xe0 }
+
+// multicastMAC maps a group to its Ethernet address (RFC 1112 section 6.4).
+func multicastMAC(a Addr) [6]byte {
+	return [6]byte{0x01, 0x00, 0x5e, a[1] & 0x7f, a[2], a[3]}
+}
+
+// joined reports whether the stack receives group. The caller holds s.mu.
+func (s *Stack) joined(group Addr) bool {
+	for _, g := range s.groups {
+		if g == group && !g.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+// joinedMAC reports whether mac is the address of a joined group. The caller
+// holds s.mu.
+func (s *Stack) joinedMAC(mac [6]byte) bool {
+	if mac[0]&1 == 0 {
+		return false
+	}
+	for _, g := range s.groups {
+		if !g.IsZero() && multicastMAC(g) == mac {
+			return true
+		}
+	}
+	return false
+}
+
 // resolve gives the MAC of dst. It sends ARP requests and waits for a reply.
 // The caller holds s.mu, and resolve releases it while it waits. So resolve
 // before you write a packet into s.tx, and never call it from Input.
 func (s *Stack) resolve(dst Addr) ([6]byte, error) {
 	if s.isBroadcast(dst) {
 		return broadcastMAC, nil
+	}
+	if isMulticast(dst) {
+		return multicastMAC(dst), nil
 	}
 	hop := s.nextHop(dst)
 	if hop.IsZero() {
@@ -235,16 +308,18 @@ type Error string
 func (e Error) Error() string { return string(e) }
 
 const (
-	ErrNoRoute    Error = "ip: no route to the address"
-	ErrNoARP      Error = "ip: no ARP reply"
-	ErrTooLarge   Error = "ip: datagram too large"
-	ErrPortInUse  Error = "ip: port in use"
-	ErrNoSockets  Error = "ip: no free socket"
-	ErrClosed     Error = "ip: socket closed"
-	ErrNoMemory   Error = "ip: no memory for the socket buffer"
-	ErrNoAddress  Error = "ip: no address configured"
-	ErrDHCPFailed Error = "ip: no DHCP lease"
-	ErrDeadline   Error = "ip: deadline exceeded"
+	ErrNoRoute      Error = "ip: no route to the address"
+	ErrNoARP        Error = "ip: no ARP reply"
+	ErrTooLarge     Error = "ip: datagram too large"
+	ErrPortInUse    Error = "ip: port in use"
+	ErrNoSockets    Error = "ip: no free socket"
+	ErrClosed       Error = "ip: socket closed"
+	ErrNoMemory     Error = "ip: no memory for the socket buffer"
+	ErrNoAddress    Error = "ip: no address configured"
+	ErrDHCPFailed   Error = "ip: no DHCP lease"
+	ErrDeadline     Error = "ip: deadline exceeded"
+	ErrNotMulticast Error = "ip: not a multicast address"
+	ErrGroups       Error = "ip: too many multicast groups"
 )
 
 // deadlinePoll is the step of a wait with a deadline. time.Sleep allocates

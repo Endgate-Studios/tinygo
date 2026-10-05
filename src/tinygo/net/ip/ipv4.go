@@ -26,7 +26,11 @@ func (s *Stack) inputIPv4(srcMAC [6]byte, p []byte) {
 	}
 	src, dst := Addr(p[12:16]), Addr(p[16:20])
 	me := s.cfg.Addr
-	if dst != me && !s.isBroadcast(dst) && !(me.IsZero() && p[9] == protoUDP) {
+	if isMulticast(dst) {
+		if !s.joined(dst) || p[9] != protoUDP {
+			return
+		}
+	} else if dst != me && !s.isBroadcast(dst) && !(me.IsZero() && p[9] == protoUDP) {
 		return // the DHCP client accepts UDP before it has an address
 	}
 	payload := p[hl:total]
@@ -69,6 +73,9 @@ func (s *Stack) putIPv4Header(src, dst Addr, proto byte, n int) {
 	put16(h[4:], s.ipID)
 	put16(h[6:], 0)
 	h[8], h[9] = defaultTTL, proto
+	if dst[0] == 224 && dst[1] == 0 && dst[2] == 0 {
+		h[8] = 255 // link-local groups, as mDNS needs (RFC 6762 section 11)
+	}
 	h[10], h[11] = 0, 0
 	copy(h[12:16], src[:])
 	copy(h[16:20], dst[:])
