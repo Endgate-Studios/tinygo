@@ -311,6 +311,9 @@ void tinygo_espnow_sent(uint8_t *mac, bool ok);
 
 // Seam functions in seam.c.
 int seam_wifi_init(bool psram, int dynamic_rx_buf_num);
+void esp_wifi_set_sleep_min_active_time(uint32_t min_active_time);
+void esp_wifi_set_keep_alive_time(uint32_t keep_alive_time);
+void esp_wifi_set_sleep_wait_broadcast_data_time(uint32_t time);
 bool seam_env_is_chip(void);
 void seam_log_write(unsigned int level, const char *tag, const char *format, ...);
 void seam_log_writev(unsigned int level, const char *tag, const char *format, va_list args);

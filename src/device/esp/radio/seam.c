@@ -38,6 +38,11 @@ int seam_wifi_init(bool psram, int dynamic_rx_buf_num) {
 		.dump_hesigb_enable = false,
 		.magic = 0x1F2F3F4F, // WIFI_INIT_CONFIG_MAGIC
 	};
+	// esp_wifi_init sets these before the init, with the defaults of the
+	// ESP_WIFI_SLP_DEFAULT_* options of esp_wifi/Kconfig, in microseconds.
+	esp_wifi_set_sleep_min_active_time(50 * 1000);
+	esp_wifi_set_keep_alive_time(10 * 1000 * 1000);
+	esp_wifi_set_sleep_wait_broadcast_data_time(15 * 1000);
 	config.wpa_crypto_funcs = seam_crypto_funcs;
 	config.dynamic_rx_buf_num = dynamic_rx_buf_num;
 	if (psram) {

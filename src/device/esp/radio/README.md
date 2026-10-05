@@ -134,8 +134,16 @@ Group frames (broadcast and multicast) are less reliable with
 `PowerSaveMinModem`. The access point keeps them until a DTIM beacon. In a
 test of 60 s with mDNS queries to the `udp-nodes` example, the board answered
 90% of the queries with `PowerSaveMinModem`, with gaps of 1 to 5 s, and 100%
-with `PowerSaveNone`. It is not known yet whether ESP-IDF has the same gaps.
-For a protocol that depends on group frames, use `PowerSaveNone`.
+with `PowerSaveNone`.
+
+ESP-IDF loses group frames in modem sleep too. In a test that sent 10 UDP
+broadcasts per second, an ESP-IDF v5.3.2 program on the same board received
+from 0% to 87% of them, at different times of the day with the same access
+point. `seam_wifi_init` sets the sleep times of `esp_wifi_init` (minimum
+active time, keep alive time and the wait for broadcast data). Without them,
+the board received 2.5 to 3 times fewer broadcasts in each round of an
+interleaved test. For a protocol that depends on group frames, use
+`PowerSaveNone`.
 
 ## Cores
 
@@ -190,6 +198,8 @@ cannot receive it. The protocol is in `libespnow.a` of the blobs.
 - `ESPNowSetWakeWindow` is for power save. As in ESP-IDF, it works only
   when the station is connected.
 - `crypto.go` gives the blobs the AES block functions for encrypted peers.
+  `tinygo/crypto/aes` uses the AES accelerator for 128 and 256 bit keys:
+  3 µs for each block, against 43 µs in software.
 
 The `espnow` example sends a broadcast each second and answers each new
 board with a unicast message.
