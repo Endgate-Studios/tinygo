@@ -125,6 +125,16 @@ var timers struct {
 	armed []*osiTimer
 }
 
+// disarmTimers stops all timers when no radio runs. The blobs set the function
+// of a static timer once, so each timer keeps it for the next start.
+func disarmTimers() {
+	timers.Lock()
+	for len(timers.armed) > 0 {
+		disarmLocked(timers.armed[0])
+	}
+	timers.Unlock()
+}
+
 func timerOf(p unsafe.Pointer) *osiTimer {
 	if timers.m == nil {
 		timers.m = map[unsafe.Pointer]*osiTimer{}
@@ -227,7 +237,9 @@ func runTimers() {
 		if !ok {
 			continue
 		}
-		C.seam_call(fn, arg)
+		if fn != nil {
+			C.seam_call(fn, arg)
+		}
 	}
 }
 

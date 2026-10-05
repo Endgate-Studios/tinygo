@@ -41,6 +41,9 @@ extern int btdm_osi_funcs_register(void *osi_funcs);
 extern int btdm_controller_rom_data_init(void);
 extern int btdm_controller_init(void *config_opts);
 extern int btdm_controller_enable(int mode);
+extern void btdm_controller_disable(void);
+extern void btdm_controller_deinit(void);
+extern void coex_disable(void);
 extern bool btdm_lpclk_select_src(uint32_t sel);
 extern bool btdm_lpclk_set_div(uint32_t div);
 extern void sdk_config_extend_set_pll_track(bool enable);
@@ -380,6 +383,19 @@ int seam_bt_enable(void) {
 	}
 	coex_pti_v2();
 	return 0;
+}
+
+// seam_bt_disable is esp_bt_controller_disable of bt.c:1655-1676 without the
+// sleep and power management parts. The caller turns off the PHY.
+void seam_bt_disable(void) {
+	btdm_controller_disable();
+	coex_disable();
+}
+
+// seam_bt_deinit is esp_bt_controller_deinit of bt.c:1468-1478. The controller
+// task deletes itself. The caller does bt_controller_deinit_internal.
+void seam_bt_deinit(void) {
+	btdm_controller_deinit();
 }
 
 static int vhci_recv(uint8_t *data, uint16_t len) { return tinygo_bt_recv(data, len); }

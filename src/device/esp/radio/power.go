@@ -38,3 +38,14 @@ func powerDomainOn() {
 	esp.RTC_CNTL.DIG_ISO.ClearBits(rtcWifiForceISO)
 	esp.APB_CTRL.WIFI_CLK_EN.ClearBits(wifiBTCommonClock)
 }
+
+// powerDomainOff switches the domain off when no radio uses it, as ESP-IDF
+// esp_wifi_bt_power_domain_off (components/esp_phy/src/phy_init.c).
+func powerDomainOff() {
+	if !powerOn {
+		return
+	}
+	powerOn = false
+	esp.RTC_CNTL.DIG_ISO.SetBits(rtcWifiForceISO)
+	esp.RTC_CNTL.DIG_PWC.SetBits(rtcWifiForcePD)
+}

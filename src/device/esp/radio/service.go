@@ -45,7 +45,11 @@ func startService() {
 			runISR()
 			runTimers()
 			runPLLTrack()
-			d := nextTimer(servicePoll)
+			poll := servicePoll
+			if !wifiOn && !ble.enabled.Load() {
+				poll = time.Hour // no radio runs, so only a wake brings work
+			}
+			d := nextTimer(poll)
 			if d <= 0 {
 				continue
 			}

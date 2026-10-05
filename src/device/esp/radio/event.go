@@ -18,6 +18,10 @@ const (
 	EventStaConnected      EventID = 4
 	EventStaDisconnected   EventID = 5
 	EventStaAuthModeChange EventID = 6
+	EventAPStart           EventID = 12
+	EventAPStop            EventID = 13
+	EventAPStaConnected    EventID = 14
+	EventAPStaDisconnected EventID = 15
 	EventHomeChannelChange EventID = 43
 )
 

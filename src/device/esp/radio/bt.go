@@ -49,7 +49,7 @@ func BLEEnable(recv func(packet []byte), opts ...Option) error {
 		return nil
 	}
 	o := applyOptions(DefaultBLEArenaSize, opts)
-	if err := initMemory(o); err != nil {
+	if err := initMemory(o, &bleShare); err != nil {
 		return err
 	}
 	startService()
@@ -77,6 +77,26 @@ func BLEEnable(recv func(packet []byte), opts ...Option) error {
 		return ErrBLE(r)
 	}
 	ble.enabled.Store(true)
+	wakeService()
+	return nil
+}
+
+// BLEDisable stops the Bluetooth LE controller, as esp_bt_controller_disable
+// and esp_bt_controller_deinit. BLEEnable starts it again. When Wi-Fi is off
+// too, the GC heap gets the blob heap back.
+func BLEDisable() error {
+	if !ble.enabled.Load() {
+		return nil
+	}
+	ble.enabled.Store(false)
+	C.seam_bt_disable()
+	phyDisable(modemBT)
+	C.seam_bt_deinit()
+	// periph_module_disable(PERIPH_BT_MODULE) of bt_controller_deinit_internal.
+	esp.APB_CTRL.WIFI_CLK_EN.ClearBits(btClock)
+	esp.APB_CTRL.WIFI_RST_EN.SetBits(btReset)
+	ble.recv = nil
+	radioStopped()
 	return nil
 }
 

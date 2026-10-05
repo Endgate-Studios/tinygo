@@ -105,10 +105,33 @@ typedef struct {
 	uint8_t sae_h2e_identifier[32];
 } wifi_sta_config_t;
 
+// wifi_ap_config_t of ESP-IDF v5.3.2 esp_wifi_types_generic.h. The enums are
+// int.
+typedef struct {
+	uint8_t ssid[32];
+	uint8_t password[64];
+	uint8_t ssid_len;
+	uint8_t channel;
+	int authmode;
+	uint8_t ssid_hidden;
+	uint8_t max_connection;
+	uint16_t beacon_interval;
+	uint8_t csa_count;
+	uint8_t dtim_period;
+	int pairwise_cipher;
+	bool ftm_responder;
+	struct {
+		bool capable;
+		bool required;
+	} pmf_cfg;
+	int sae_pwe_h2e;
+} wifi_ap_config_t;
+
 // wifi_config_t is a union. The blobs copy all of it, so the size is larger
 // than each member.
 typedef union {
 	wifi_sta_config_t sta;
+	wifi_ap_config_t ap;
 	uint8_t size[256];
 } wifi_config_t;
 
@@ -116,6 +139,7 @@ typedef union {
 int esp_wifi_init_internal(const wifi_init_config_t *config);
 int esp_wifi_set_mode(int mode);
 int esp_wifi_start(void);
+int esp_wifi_stop(void);
 int esp_wifi_set_config(int interface, wifi_config_t *conf);
 // esp_wifi_connect and esp_wifi_disconnect of esp_wifi/src/wifi_init.c call
 // these without the roaming app.
@@ -180,11 +204,11 @@ typedef struct {
 	bool (*wpa_sta_in_4way_handshake)(void);
 	void *(*wpa_ap_init)(void);
 	bool (*wpa_ap_deinit)(void *data);
-	void *wpa_ap_join;
+	bool (*wpa_ap_join)(void **sm, uint8_t *bssid, uint8_t *wpa_ie, uint8_t wpa_ie_len, uint8_t *rsnxe, uint8_t rsnxe_len, bool *pmf_enable, int subtype, uint8_t *pairwise_cipher);
 	bool (*wpa_ap_remove)(uint8_t *bssid);
 	uint8_t *(*wpa_ap_get_wpa_ie)(uint8_t *len);
-	void *wpa_ap_rx_eapol;
-	void *wpa_ap_get_peer_spp_msg;
+	bool (*wpa_ap_rx_eapol)(void *hapd_data, void *sm, uint8_t *data, size_t data_len);
+	void (*wpa_ap_get_peer_spp_msg)(void *sm, bool *spp_cap, bool *spp_req);
 	char *(*wpa_config_parse_string)(const char *value, size_t *len);
 	int (*wpa_parse_wpa_ie)(const uint8_t *wpa_ie, size_t wpa_ie_len, wifi_wpa_ie_t *data);
 	int (*wpa_config_bss)(uint8_t *bssid);
@@ -221,6 +245,25 @@ int esp_wifi_internal_tx(int wifi_if, void *buffer, uint16_t len);
 int esp_wifi_register_eapol_txdonecb_internal(void (*fn)(uint8_t *payload, size_t len, bool tx_failure));
 int esp_wifi_set_sta_key_internal(int alg, uint8_t *addr, int key_idx, int set_tx, uint8_t *seq, size_t seq_len, uint8_t *key, size_t key_len, int key_flag);
 bool esp_wifi_auth_done_internal(void);
+
+// The soft-AP functions of esp_supplicant/src/esp_wifi_driver.h.
+int esp_wifi_set_ap_key_internal(int alg, const uint8_t *addr, int idx, uint8_t *key, size_t key_len);
+uint8_t *esp_wifi_ap_get_prof_pmk_internal(void);
+bool esp_wifi_wpa_ptk_init_done_internal(uint8_t *mac);
+int esp_wifi_ap_deauth_internal(uint8_t *mac, uint32_t reason);
+int esp_wifi_unset_appie_internal(uint8_t type);
+
+// The AP part of the seam (wpa_cb.c and seam.c).
+extern const uint8_t seam_ap_rsn[22];
+int seam_wifi_set_ap(const uint8_t *ssid, uint8_t ssid_len, const uint8_t *password, uint8_t password_len, uint8_t channel, uint8_t max_connection);
+int seam_ap_send_assoc_resp(uint8_t *da, uint16_t status, int subtype);
+bool tinygo_wifi_wpa_ap_init(void);
+void tinygo_wifi_wpa_ap_deinit(void);
+bool tinygo_wifi_wpa_ap_join(uint8_t *bssid, uint8_t *ie, uint8_t ie_len, int subtype, int32_t *slot);
+bool tinygo_wifi_wpa_ap_remove(uint8_t *bssid);
+void tinygo_wifi_wpa_ap_rx_eapol(int32_t slot, uint8_t *data, size_t len);
+int tinygo_wifi_rx_ap(void *buffer, uint16_t len, void *eb);
+int seam_wifi_reg_rxcb_ap(void);
 void esp_wifi_deauthenticate_internal(uint8_t reason_code);
 
 // Go functions of the supplicant in supplicant.go.
@@ -241,13 +284,17 @@ int seam_wifi_reg_rxcb(void);
 int seam_coex_pre_init(void);
 int seam_bt_init(uint8_t max_act);
 int seam_coex_init(void);
+void seam_coex_reset(void);
 int seam_bt_enable(void);
+void seam_bt_disable(void);
+void seam_bt_deinit(void);
+int seam_wifi_deinit(void);
 int seam_bt_register_vhci(void);
 bool seam_bt_can_send(void);
 void seam_bt_send(uint8_t *data, uint16_t len);
 
 // Seam functions in seam.c.
-int seam_wifi_init(bool psram);
+int seam_wifi_init(bool psram, int dynamic_rx_buf_num);
 bool seam_env_is_chip(void);
 void seam_log_write(unsigned int level, const char *tag, const char *format, ...);
 void seam_log_writev(unsigned int level, const char *tag, const char *format, va_list args);
@@ -256,6 +303,7 @@ void *seam_wifi_zalloc(size_t size);
 void *seam_wifi_create_queue(int n, int size);
 void seam_wifi_delete_queue(void *queue);
 void seam_unimplemented(const char *name);
+int32_t tinygo_crypto_pbkdf2_sha1(const uint8_t *passphrase, const uint8_t *ssid, uint32_t ssid_len, int32_t iterations, uint8_t *buf, uint32_t buflen);
 void seam_call(void *fn, void *arg);
 void seam_intenable_set(uint32_t mask);
 void seam_intenable_clear(uint32_t mask);

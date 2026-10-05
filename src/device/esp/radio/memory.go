@@ -10,11 +10,11 @@ import (
 )
 
 // The share of each radio in the blob heap without an arena option. The
-// first radio makes the heap and the second one adds its share. Wi-Fi with a
-// scan, a connection and the frame pool uses about 47 KB. BLE with 6
-// activities uses about 29 KB, and about 25 KB with 2.
+// first radio makes the heap and the second one adds its share. Wi-Fi with 4
+// HTTP clients had a peak of 56 KB, and with 48 KB it lost many RX frames.
+// BLE with 6 activities uses about 29 KB, and about 25 KB with 2.
 const (
-	DefaultArenaSize    = 48 * 1024
+	DefaultArenaSize    = 64 * 1024
 	DefaultBLEArenaSize = 32 * 1024
 )
 
@@ -47,6 +47,7 @@ type options struct {
 	mem           []byte
 	psram         []byte
 	bleActivities int
+	rxBuffers     int
 }
 
 // WithArenaSize sets the share of the radio in the blob heap, which comes
@@ -61,15 +62,38 @@ func WithArenaMemory(mem []byte) Option {
 	return func(o *options) { o.mem, o.size = mem, 0 }
 }
 
+// Limits of the dynamic RX buffers of ESP-IDF v5.3.2 esp_wifi/Kconfig
+// (ESP_WIFI_DYNAMIC_RX_BUFFER_NUM). The minimum is the static RX buffer count.
+const (
+	DefaultRXBuffers = 32
+	minRXBuffers     = 10
+	maxRXBuffers     = 128
+)
+
+// WithRXBuffers sets the largest number of dynamic RX buffers of Wi-Fi, from
+// 10 to 128. The default is DefaultRXBuffers. Each buffer takes up to 1.7 KB of
+// the blob heap. A smaller number keeps memory free for the other users of the
+// heap. A larger number helps with bursts of small frames, with a larger share.
+func WithRXBuffers(n int) Option {
+	return func(o *options) { o.rxBuffers = n }
+}
+
 // WithPSRAMArena gives PSRAM for the Wi-Fi buffers that need no DMA, for
 // example a //go:section .psram array. Without it, all memory is internal.
 func WithPSRAMArena(mem []byte) Option {
 	return func(o *options) { o.psram = mem }
 }
 
-// initMemory adds the share of one radio to the blob heap. size is the share
-// without an arena option.
-func initMemory(o options) error {
+// wifiShare and bleShare tell whether the share of a radio is in the blob
+// heap. A restarted radio uses its share again.
+var wifiShare, bleShare bool
+
+// initMemory adds the share of one radio to the blob heap once. size is the
+// share without an arena option.
+func initMemory(o options, share *bool) error {
+	if *share {
+		return nil
+	}
 	mem := o.mem
 	if mem == nil {
 		mem = make([]byte, o.size)
@@ -99,11 +123,25 @@ func initMemory(o options) error {
 		}
 		psramHeap = ph
 	}
+	*share = true
 	return nil
 }
 
+// radioStopped stops the timers and the power domain when no radio runs. The
+// blob heap stays: the deinit of the blobs frees their blocks, but blob
+// variables keep pointers into the heap, as in ESP-IDF, where the heap does
+// not go away. A restart uses the same heap.
+func radioStopped() {
+	if wifiOn || ble.enabled.Load() {
+		return
+	}
+	disarmTimers()
+	coexReset()
+	powerDomainOff()
+}
+
 func applyOptions(size int, opts []Option) options {
-	o := options{size: size}
+	o := options{size: size, rxBuffers: DefaultRXBuffers}
 	for _, opt := range opts {
 		opt(&o)
 	}

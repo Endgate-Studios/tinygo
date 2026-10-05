@@ -71,17 +71,24 @@ static struct {
 
 // seam_coex_pre_init is the coexistence part of the ESP-IDF startup
 // (esp_system/startup_funcs.c). It runs once.
+static bool coex_ready;
+
 int seam_coex_pre_init(void) {
-	static bool done;
-	if (done) {
+	if (coex_ready) {
 		return 0;
 	}
-	done = true;
+	coex_ready = true;
 	int err = esp_coex_adapter_register(&coex_adapter);
 	if (err != 0) {
 		return err;
 	}
 	return coex_pre_init();
+}
+
+// seam_coex_reset makes the next start run seam_coex_pre_init again. The deinit
+// of Wi-Fi calls coex_deinit, which clears the ROM function table of coexist.
+void seam_coex_reset(void) {
+	coex_ready = false;
 }
 
 extern int coex_init(void);

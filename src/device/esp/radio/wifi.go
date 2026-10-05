@@ -58,7 +58,14 @@ func check(r C.int) error {
 // heap, see WithArenaSize and WithArenaMemory.
 func Init(opts ...Option) error {
 	defer releaseThreadSemaphore()
-	if err := initMemory(applyOptions(DefaultArenaSize, opts)); err != nil {
+	if wifiOn {
+		return nil
+	}
+	o := applyOptions(DefaultArenaSize, opts)
+	if o.rxBuffers < minRXBuffers || o.rxBuffers > maxRXBuffers {
+		return ErrInvalidArg
+	}
+	if err := initMemory(o, &wifiShare); err != nil {
 		return err
 	}
 	startService()
@@ -66,7 +73,41 @@ func Init(opts ...Option) error {
 	if err := check(C.seam_coex_init()); err != nil {
 		return err
 	}
-	return check(C.seam_wifi_init(psramHeap != nil))
+	if err := check(C.seam_wifi_init(psramHeap != nil, C.int(o.rxBuffers))); err != nil {
+		return err
+	}
+	wifiOn = true
+	wakeService()
+	return nil
+}
+
+// coexReset makes the next start set up coexistence again, see seam_coex_reset.
+func coexReset() { C.seam_coex_reset() }
+
+// wifiOn tells whether the Wi-Fi driver runs, from Init to Deinit.
+var wifiOn bool
+
+// Stop stops Wi-Fi, as esp_wifi_stop. Start starts it again.
+func Stop() error {
+	defer releaseThreadSemaphore()
+	return check(C.esp_wifi_stop())
+}
+
+// Deinit stops the Wi-Fi driver after Stop, as esp_wifi_deinit, and frees the
+// frame pool. Init starts it again. When BLE is off too, the GC heap gets the
+// blob heap back.
+func Deinit() error {
+	defer releaseThreadSemaphore()
+	if !wifiOn {
+		return nil
+	}
+	if err := check(C.seam_wifi_deinit()); err != nil {
+		return err
+	}
+	wifiOn = false
+	stopRX()
+	radioStopped()
+	return nil
 }
 
 // Mode is the Wi-Fi mode, as wifi_mode_t.
@@ -82,8 +123,15 @@ const (
 // SetMode sets the Wi-Fi mode, as esp_wifi_set_mode.
 func SetMode(m Mode) error {
 	defer releaseThreadSemaphore()
-	return check(C.esp_wifi_set_mode(C.int(m)))
+	if err := check(C.esp_wifi_set_mode(C.int(m))); err != nil {
+		return err
+	}
+	mode = m
+	return nil
 }
+
+// mode is the last mode of SetMode.
+var mode Mode
 
 // Start starts Wi-Fi in the current mode, as esp_wifi_start.
 func Start() error {
