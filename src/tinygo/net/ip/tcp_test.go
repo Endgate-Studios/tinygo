@@ -220,6 +220,20 @@ func TestTCPResetClosedPort(t *testing.T) {
 	}
 }
 
+// TestTCPListenerFull drops a SYN when no connection has memory, so that the
+// peer sends it again, and does not refuse it.
+func TestTCPListenerFull(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	s.arp.update(peerIP, peerMAC)
+	s.ListenTCP(83, 6<<10) // the rings of one connection fill the heap
+	s.Input(tcpFrame(peerIP, myIP, seg{7100, 83, 100, 0, tcpSYN, 1000, nil}))
+	if r := readSeg(t, l); r.flags != tcpSYN|tcpACK {
+		t.Fatalf("first SYN: %+v, want a SYN-ACK", r)
+	}
+	s.Input(tcpFrame(peerIP, myIP, seg{7101, 83, 200, 0, tcpSYN, 1000, nil}))
+	noSeg(t, l)
+}
+
 func TestTCPTimeWaitSlotReuse(t *testing.T) {
 	s, l, h := newTestStack(t)
 	s.arp.update(peerIP, peerMAC)

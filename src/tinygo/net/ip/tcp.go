@@ -801,7 +801,9 @@ func (s *Stack) tcpNoConn(mac [6]byte, src Addr, sport, dport uint16, seq, ack u
 			}
 			c, err := s.newTCPConn(dport, src, sport, mac, l.bufSize)
 			if err != nil {
-				break // no slot or no memory: refuse it
+				// No slot or no memory: drop the SYN, so the peer sends it
+				// again later, as tcp_listen_input of lwIP 2.1 tcp_in.c.
+				return
 			}
 			c.lis = l
 			c.state = tcpSynRcvd
