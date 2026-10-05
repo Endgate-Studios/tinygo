@@ -134,15 +134,11 @@ SECTIONS
         *(.literal._handle_level1)
         *(.text._handle_level1)
 
-        /* WiFi/BLE blob IRAM sections */
+        /* The blob sections that ESP-IDF v5.3.2 keeps in IRAM by default:
+         * CONFIG_ESP_WIFI_IRAM_OPT and CONFIG_ESP_WIFI_RX_IRAM_OPT. */
         *(.iram*)
-        *(.wifislprxiram*)
-        *(.wifiextrairam*)
         *(.wifi0iram*)
-        *(.wifislpiram*)
         *(.wifirxiram*)
-        *(.wifiorslpiram*)
-        *(.iram1*)
         *(.coexiram*)
 
         /* Init code — reclaimed for heap after startup */
@@ -157,6 +153,9 @@ SECTIONS
     .text : ALIGN(4)
     {
         _irom_start = .;
+        /* The sleep and extra blob sections, in IRAM in ESP-IDF only with
+         * CONFIG_ESP_WIFI_SLP_IRAM_OPT and CONFIG_ESP_WIFI_EXTRA_IRAM_OPT. */
+        *(.wifislprxiram* .wifiextrairam* .wifislpiram* .wifiorslpiram*)
         *(.literal .text)
         *(.literal.* .text.*)
         _irom_end = .;
