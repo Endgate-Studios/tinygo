@@ -1,8 +1,9 @@
 // Command udp-nodes finds the other nodes on the Wi-Fi network with UDP
 // broadcast. Each node sends a message to the subnet broadcast address on port
 // 4210 each 2 seconds, and keeps a table of the nodes that it hears. Any
-// device can join, for example a PC with a few lines of Python. The SSID and
-// the password come from the link:
+// device can join, for example a PC with a few lines of Python. Each node also
+// answers mDNS for tinygo-XXXXXX.local, with the end of its MAC address. The
+// SSID and the password come from the link:
 //
 //	tinygo flash -target esp32s3-psram-octal -ldflags='-X "main.ssid=..." -X "main.password=..."' ./src/examples/udp-nodes
 package main
@@ -55,6 +56,11 @@ func main() {
 	must("dhcp", stack.DHCP(30*time.Second))
 	cfg := stack.Config()
 	println("address", cfg.Addr.String())
+
+	mac := radio.MAC()
+	name := string(appendHex([]byte("tinygo-"), mac[3:]))
+	go func() { must("mdns", stack.ServeMDNS(name)) }()
+	println("mdns name", name+".local")
 
 	c, err := stack.ListenUDP(port, 1024)
 	must("listen", err)

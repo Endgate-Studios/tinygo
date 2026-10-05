@@ -67,7 +67,7 @@ SSID and password with `-ldflags`:
 | `src/examples/wifi-ble` | HTTP server on Wi-Fi and BLE passive scan at the same time |
 | `src/examples/wifi-ap` | WPA2 access point with a DHCP server and an HTTP server on 192.168.4.1 |
 | `src/examples/espnow` | ESP-NOW broadcast and unicast messages between boards, with no access point |
-| `src/examples/udp-nodes` | Finds the other nodes on the Wi-Fi network with UDP broadcast on port 4210 |
+| `src/examples/udp-nodes` | Finds the other nodes on the Wi-Fi network with UDP broadcast on port 4210, and answers mDNS for `tinygo-XXXXXX.local` |
 | `src/examples/ble-scan` | BLE scan with raw HCI commands |
 
 ```
