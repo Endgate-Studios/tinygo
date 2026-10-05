@@ -22,7 +22,7 @@ import (
 var ssid, password string
 
 var (
-	socketMem [16 << 10]byte
+	socketMem [32 << 10]byte
 	ringMem   [8 << 10]byte
 	serverBuf [1024]byte
 )

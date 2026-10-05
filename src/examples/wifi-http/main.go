@@ -25,7 +25,7 @@ var psram string
 var arenaKB string
 
 // socketMem holds the socket rings of the stack.
-var socketMem [16 << 10]byte
+var socketMem [32 << 10]byte
 
 // Buffers for the request and response heads.
 var (
