@@ -130,6 +130,13 @@ on. Measured with one HTTP client, `-scheduler=cores`:
 With `PowerSaveMinModem`, 10 requests after 10 s of idle time each got an
 answer. With BLE coexistence, `PowerSaveNone` gives more Wi-Fi throughput.
 
+Group frames (broadcast and multicast) are less reliable with
+`PowerSaveMinModem`. The access point keeps them until a DTIM beacon. In a
+test of 60 s with mDNS queries to the `udp-nodes` example, the board answered
+90% of the queries with `PowerSaveMinModem`, with gaps of 1 to 5 s, and 100%
+with `PowerSaveNone`. It is not known yet whether ESP-IDF has the same gaps.
+For a protocol that depends on group frames, use `PowerSaveNone`.
+
 ## Cores
 
 With `-scheduler=cores`, goroutines that use the radio can run on the two

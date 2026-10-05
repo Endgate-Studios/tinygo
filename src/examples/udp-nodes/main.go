@@ -46,6 +46,9 @@ func main() {
 	must("init", radio.Init())
 	must("mode", radio.SetMode(radio.ModeStation))
 	must("start", radio.Start())
+	// With modem sleep the board missed 10% of the mDNS queries, in gaps of
+	// 1 to 5 s. Node discovery needs the group frames.
+	must("power save", radio.SetPowerSave(radio.PowerSaveNone))
 	go keepConnected()
 	must("connect", radio.Connect(ssid, password))
 	<-connected
