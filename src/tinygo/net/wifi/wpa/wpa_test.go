@@ -70,12 +70,11 @@ func TestHMACSHA1(t *testing.T) {
 		{name: "RFC 2202 case 1", key: bytes.Repeat([]byte{0x0b}, 20), data: "Hi There", want: "b617318655057264e28bc0b6fb378c8ef146be00"},
 		{name: "RFC 2202 case 2", key: []byte("Jefe"), data: "what do ya want for nothing?", want: "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"},
 	}
-	scratch := make([]byte, scratchLen)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var m mac
 			m.init(tt.key)
-			got := m.sum(scratch, []byte(tt.data), nil, nil, nil)
+			got := m.sum([]byte(tt.data), nil, nil, nil)
 			if hex.EncodeToString(got[:]) != tt.want {
 				t.Errorf("HMAC = %x, want %s", got, tt.want)
 			}
@@ -92,10 +91,9 @@ func TestPBKDF2(t *testing.T) {
 		{iterations: 2, want: "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957"},
 		{iterations: 4096, want: "4b007901b765489abead49d926f721d065a429c1"},
 	}
-	scratch := make([]byte, scratchLen)
 	for _, tt := range tests {
 		out := make([]byte, 20)
-		pbkdf2SHA1(scratch, []byte("password"), []byte("salt"), tt.iterations, out)
+		pbkdf2SHA1([]byte("password"), []byte("salt"), tt.iterations, out)
 		if hex.EncodeToString(out) != tt.want {
 			t.Errorf("RFC 6070 c=%d: %x, want %s", tt.iterations, out, tt.want)
 		}
@@ -245,11 +243,19 @@ func TestOutOfMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Fill the heap, so that the PMK does not fit.
+	var blocks []unsafe.Pointer
+	for p := h.Alloc(16, 0); p != nil; p = h.Alloc(16, 0) {
+		blocks = append(blocks, p)
+	}
 	k, _ := New(h)
 	if err := k.SetPassphrase([]byte("password"), []byte("IEEE")); err != ErrNoMemory {
-		t.Errorf("SetPassphrase in a tiny heap error = %v, want ErrNoMemory", err)
+		t.Errorf("SetPassphrase in a full heap error = %v, want ErrNoMemory", err)
 	}
 	k.Close()
+	for _, p := range blocks {
+		h.Free(p)
+	}
 	if h.Stats().InUse != 0 {
 		t.Errorf("memory in use after Close = %d, want 0", h.Stats().InUse)
 	}

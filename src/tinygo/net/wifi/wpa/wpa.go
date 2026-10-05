@@ -1,18 +1,11 @@
 // Package wpa derives WPA2-Personal keys (IEEE 802.11-2020 clause 12.7).
-// All key material and scratch memory come from an injected allocator and are zeroed before they are freed.
-//
-// Not used over the air yet: espradio exports no raw 802.11, so the Espressif library does this work
-// (espradio/DESIGN.md, Wi-Fi radio). It stays for a radio link that gives raw 802.11 frames.
+// The key material comes from an injected allocator and is zeroed before it is freed. The
+// HMAC states and buffers are on the stack and are cleared after use.
 package wpa
 
-import (
-	"crypto/sha1"
-	"unsafe"
+import "runtime/memory"
 
-	"runtime/memory"
-)
-
-// Memory is where Keys allocates key material and scratch buffers.
+// Memory is where Keys allocates key material.
 type Memory interface {
 	memory.Allocator
 	memory.Freer
@@ -46,7 +39,6 @@ const (
 	MICLen = 16
 
 	pbkdf2Iterations = 4096
-	scratchLen       = sha1.BlockSize + 128
 )
 
 // Keys holds the PMK and PTK of one association.
@@ -86,12 +78,7 @@ func (k *Keys) SetPassphrase(passphrase, ssid []byte) error {
 	if err := k.hold(&k.pmk, PMKLen); err != nil {
 		return err
 	}
-	scratch, err := k.scratch()
-	if err != nil {
-		return err
-	}
-	pbkdf2SHA1(scratch, passphrase, ssid, pbkdf2Iterations, k.pmk)
-	k.drop(scratch)
+	pbkdf2SHA1(passphrase, ssid, pbkdf2Iterations, k.pmk)
 	return nil
 }
 
@@ -123,16 +110,11 @@ func (k *Keys) DerivePTK(aa, spa [6]byte, anonce, snonce [32]byte) error {
 	if err := k.hold(&k.ptk, PTKLen); err != nil {
 		return err
 	}
-	scratch, err := k.scratch()
-	if err != nil {
-		return err
-	}
 	var data [2*6 + 2*32]byte
 	sortedPair(data[0:12], aa[:], spa[:])
 	sortedPair(data[12:], anonce[:], snonce[:])
-	prf(scratch, k.pmk, "Pairwise key expansion", data[:], k.ptk)
+	prf(k.pmk, "Pairwise key expansion", data[:], k.ptk)
 	clear(data[:])
-	k.drop(scratch)
 	return nil
 }
 
@@ -158,17 +140,12 @@ func (k *Keys) MIC(frame []byte, out *[MICLen]byte) error {
 	if k.ptk == nil {
 		return ErrNoPTK
 	}
-	scratch, err := k.scratchFor(len(frame))
-	if err != nil {
-		return err
-	}
 	var m mac
 	m.init(k.KCK())
-	sum := m.sum(scratch, frame, nil, nil, nil)
+	sum := m.sum(frame, nil, nil, nil)
 	copy(out[:], sum[:MICLen])
 	m.wipe()
 	clear(sum[:])
-	k.drop(scratch)
 	return nil
 }
 
@@ -199,28 +176,6 @@ func (k *Keys) release(buf *[]byte) {
 	clear(*buf)
 	memory.FreeSlice(k.mem, *buf)
 	*buf = nil
-}
-
-func (k *Keys) scratch() ([]byte, error) {
-	return k.scratchFor(0)
-}
-
-// scratchFor allocates one HMAC buffer for a message of up to msgLen bytes.
-func (k *Keys) scratchFor(msgLen int) ([]byte, error) {
-	n := scratchLen
-	if need := sha1.BlockSize + msgLen; need > n {
-		n = need
-	}
-	b := memory.MakeSlice[byte](k.mem, n)
-	if b == nil {
-		return nil, ErrNoMemory
-	}
-	return b, nil
-}
-
-func (k *Keys) drop(b []byte) {
-	clear(b)
-	k.mem.Free(unsafe.Pointer(unsafe.SliceData(b)))
 }
 
 // sortedPair writes the smaller of a and b, then the larger, into dst.

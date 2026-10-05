@@ -154,8 +154,9 @@ as hostapd does in ESP-IDF.
 - `Stack.ServeDHCP` of `tinygo/net/ip` gives addresses to the stations.
 - `EventAPStaConnected` and `EventAPStaDisconnected` tell when a station joins
   or leaves.
-- The blobs derive the PMK in `ConfigureAP` with `crypto.go`. This takes about
-  760 ms at 240 MHz.
+- The blobs derive the PMK in `ConfigureAP` with `crypto.go`. PBKDF2 uses the
+  SHA accelerator through `tinygo/crypto/sha1` and takes about 100 ms at
+  240 MHz. With software SHA-1 it took 754 ms.
 
 The `wifi-ap` example makes the network `tinygo-ap` and serves HTTP on
 192.168.4.1. The board sends beacons and the unit tests do the handshake and
