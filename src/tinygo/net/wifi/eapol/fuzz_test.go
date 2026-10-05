@@ -23,7 +23,8 @@ func FuzzKeyFrame(f *testing.F) {
 	a := &authenticator{aa: apAddr, spa: staAddr}
 	f.Add(a.frame(infoVersionAES|infoPairwise|infoAck, make([]byte, 32), nil))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		parseKeyFrame(b)
+		parseKeyFrame(b, infoVersionAES)
+		parseKeyFrame(b, infoVersionAKM)
 	})
 }
 

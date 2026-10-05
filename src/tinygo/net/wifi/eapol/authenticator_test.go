@@ -112,7 +112,7 @@ func TestAuthenticatorResend(t *testing.T) {
 		if err != nil || n == 0 {
 			t.Fatalf("resend %d: %v", i, err)
 		}
-		f, _ := parseKeyFrame(toSta[:n])
+		f, _ := parseKeyFrame(toSta[:n], infoVersionAES)
 		if f.replay != uint64(i+2) {
 			t.Errorf("resend %d replay counter %d, want %d", i, f.replay, i+2)
 		}

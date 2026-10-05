@@ -34,6 +34,7 @@ const (
 const (
 	infoVersionMask = 0x0007
 	infoVersionAES  = 2 // HMAC-SHA1-128 MIC, AES key wrap
+	infoVersionAKM  = 0 // the MIC and the key wrap of the AKM, for SAE AES-128-CMAC
 	infoPairwise    = 0x0008
 	infoInstall     = 0x0040
 	infoAck         = 0x0080
@@ -55,7 +56,7 @@ const (
 	ErrNoMemory    Error = "eapol: out of memory"
 	ErrShort       Error = "eapol: frame is too short"
 	ErrNotKey      Error = "eapol: frame is not an RSN EAPOL-Key frame"
-	ErrVersion     Error = "eapol: only key descriptor version 2 is supported"
+	ErrVersion     Error = "eapol: wrong key descriptor version"
 	ErrBuffer      Error = "eapol: reply buffer is too small"
 	ErrReplay      Error = "eapol: replay counter did not increase"
 	ErrMIC         Error = "eapol: MIC check failed"
@@ -80,7 +81,7 @@ type keyFrame struct {
 	data    []byte
 }
 
-func parseKeyFrame(b []byte) (keyFrame, error) {
+func parseKeyFrame(b []byte, version uint16) (keyFrame, error) {
 	var f keyFrame
 	if len(b) < MinFrameLen {
 		return f, ErrShort
@@ -104,7 +105,7 @@ func parseKeyFrame(b []byte) (keyFrame, error) {
 	f.nonce = b[offNonce : offNonce+nonceLen]
 	f.rsc = b[offRSC : offRSC+rscLen]
 	f.data = b[offData : offData+dataLen]
-	if f.info&infoVersionMask != infoVersionAES {
+	if f.info&infoVersionMask != version {
 		return f, ErrVersion
 	}
 	return f, nil

@@ -176,7 +176,7 @@ func (h *Handshake) Waiting() bool { return h.stage == hsSentM1 || h.stage == hs
 // Handle processes one EAPOL frame of the station, from the EAPOL header.
 // When n > 0, send reply[:n] to the station. done is true after message 4.
 func (h *Handshake) Handle(frame, reply []byte) (n int, done bool, err error) {
-	f, err := parseKeyFrame(frame)
+	f, err := parseKeyFrame(frame, infoVersionAES)
 	if err != nil {
 		return 0, false, err
 	}

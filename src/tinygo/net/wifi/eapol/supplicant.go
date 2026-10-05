@@ -44,6 +44,9 @@ type Supplicant struct {
 	gtkLen    int
 	gtkID     uint8
 	gtkRSC    [rscLen]byte
+	igtk      [2 + ipnLen + igtkLen]byte // key ID, IPN and IGTK
+	hasIGTK   bool
+	sae       bool
 	anonce    [nonceLen]byte
 	snonce    [nonceLen]byte
 	replay    uint64
@@ -92,6 +95,26 @@ func NewPSK(mem Memory, rng io.Reader, psk []byte) (*Supplicant, error) {
 	return &Supplicant{mem: mem, rng: rng, keys: keys}, nil
 }
 
+// NewSAE is NewPSK with the PMK of SAE (WPA3-Personal). The 4-way handshake then uses
+// key descriptor version 0: KDF-SHA256 for the PTK and AES-128-CMAC for the MIC.
+func NewSAE(mem Memory, rng io.Reader, pmk []byte) (*Supplicant, error) {
+	s, err := NewPSK(mem, rng, pmk)
+	if err != nil {
+		return nil, err
+	}
+	s.sae = true
+	s.keys.UseSAE()
+	return s, nil
+}
+
+// version gives the key descriptor version of the AKM.
+func (s *Supplicant) version() uint16 {
+	if s.sae {
+		return infoVersionAKM
+	}
+	return infoVersionAES
+}
+
 // Start prepares a new association with access point aa from station address spa.
 // ownRSN is the full RSN element of the association request. apRSN is the full RSN element
 // of the beacon, or nil to skip the downgrade check of message 3.
@@ -123,7 +146,7 @@ func (s *Supplicant) Handle(frame, reply []byte) (int, Event, error) {
 	if !s.started {
 		return 0, EventNone, ErrNotStarted
 	}
-	f, err := parseKeyFrame(frame)
+	f, err := parseKeyFrame(frame, s.version())
 	if err != nil {
 		return 0, EventNone, err
 	}
@@ -159,6 +182,15 @@ func (s *Supplicant) GTK() ([]byte, uint8) {
 	return s.gtk[:s.gtkLen], s.gtkID
 }
 
+// IGTK returns the IGTK of PMF, its key ID and its IPN (the receive packet number, low byte
+// first) after the 4-way handshake or a group handshake that gave one, or nil.
+func (s *Supplicant) IGTK() (igtk []byte, id uint16, ipn []byte) {
+	if s.stage != stageDone || !s.hasIGTK {
+		return nil, 0, nil
+	}
+	return s.igtk[2+ipnLen:], uint16(s.igtk[0]) | uint16(s.igtk[1])<<8, s.igtk[2 : 2+ipnLen]
+}
+
 // GTKRSC returns the receive sequence counter of the group key from message 3 or
 // group message 1, or nil before the 4-way handshake. The first 6 bytes are the
 // CCMP packet number, low byte first.
@@ -186,7 +218,7 @@ func (s *Supplicant) message1(f *keyFrame, reply []byte) (int, Event, error) {
 	if err := s.keys.DerivePTK(s.aa, s.spa, s.anonce, s.snonce); err != nil {
 		return 0, EventNone, err
 	}
-	n, err := putKeyFrame(reply, f.version, infoVersionAES|infoPairwise|infoMIC, f.replay, s.snonce[:], s.ownRSN)
+	n, err := putKeyFrame(reply, f.version, s.version()|infoPairwise|infoMIC, f.replay, s.snonce[:], s.ownRSN)
 	if err != nil {
 		return 0, EventNone, err
 	}
@@ -215,7 +247,7 @@ func (s *Supplicant) message3(f *keyFrame, reply []byte) (int, Event, error) {
 		return 0, EventNone, err
 	}
 	copy(s.gtkRSC[:], f.rsc)
-	n, err := putKeyFrame(reply, f.version, infoVersionAES|infoPairwise|infoMIC|infoSecure, f.replay, nil, nil)
+	n, err := putKeyFrame(reply, f.version, s.version()|infoPairwise|infoMIC|infoSecure, f.replay, nil, nil)
 	if err != nil {
 		return 0, EventNone, err
 	}
@@ -241,7 +273,7 @@ func (s *Supplicant) group1(f *keyFrame, reply []byte) (int, Event, error) {
 		return 0, EventNone, err
 	}
 	copy(s.gtkRSC[:], f.rsc)
-	n, err := putKeyFrame(reply, f.version, infoVersionAES|infoMIC|infoSecure, f.replay, nil, nil)
+	n, err := putKeyFrame(reply, f.version, s.version()|infoMIC|infoSecure, f.replay, nil, nil)
 	if err != nil {
 		return 0, EventNone, err
 	}
@@ -315,6 +347,10 @@ func (s *Supplicant) readKeyData(wrapped []byte, checkRSN bool) error {
 	clear(s.gtk)
 	s.gtkLen = copy(s.gtk, gtk)
 	s.gtkID = id
+	if b := findIGTK(plain); b != nil {
+		copy(s.igtk[:], b)
+		s.hasIGTK = true
+	}
 	return nil
 }
 
@@ -339,6 +375,8 @@ func (s *Supplicant) releaseAssoc() {
 	s.release(&s.gtk)
 	s.gtkLen, s.gtkID, s.started = 0, 0, false
 	clear(s.gtkRSC[:])
+	clear(s.igtk[:])
+	s.hasIGTK = false
 }
 
 func (s *Supplicant) release(b *[]byte) {
