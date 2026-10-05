@@ -21,7 +21,7 @@ not.
 | HTTP requests in 2 min, 1 client | 4,326 to 4,796 | 3,143 to 3,169 |
 | Access point mode | WPA2-PSK or open, up to 4 stations, DHCP server in `tinygo/net/ip`. Not tested with a station yet | Yes, with a DHCP server |
 | Stop and restart | `Stop`, `Deinit`, `BLEDisable`. 20 cycles tested, no memory growth | Not compared |
-| ESP-NOW | Yes. Tested with one board, reception not tested yet | Yes |
+| ESP-NOW | Yes, with encryption, peer rates and Long Range. Tested with one board, reception not tested yet | Yes |
 | TCP/IP stack | Separate (`tinygo/net/ip`) | Included (lneto), and a `netdev` driver |
 
 ## Test setup
@@ -66,6 +66,8 @@ SSID and password with `-ldflags`:
 | `src/examples/wifi-http` | HTTP client and server with `tinygo/net/web`, with no allocation for each request |
 | `src/examples/wifi-ble` | HTTP server on Wi-Fi and BLE passive scan at the same time |
 | `src/examples/wifi-ap` | WPA2 access point with a DHCP server and an HTTP server on 192.168.4.1 |
+| `src/examples/espnow` | ESP-NOW broadcast and unicast messages between boards, with no access point |
+| `src/examples/udp-nodes` | Finds the other nodes on the Wi-Fi network with UDP broadcast on port 4210 |
 | `src/examples/ble-scan` | BLE scan with raw HCI commands |
 
 ```

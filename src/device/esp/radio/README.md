@@ -170,18 +170,32 @@ cannot receive it. The protocol is in `libespnow.a` of the blobs.
 - `ESPNowInit` after `Start`. Without a connection, `SetChannel` sets the
   channel. All devices must use the same channel.
 - `ESPNowAddPeer` before a send. `ESPNowBroadcast` sends to all devices on
-  the channel. A peer with a `Key` of 16 bytes uses encryption, up to 6
-  peers. Broadcast messages are not encrypted.
+  the channel. A peer with a `Key` of 16 bytes uses encryption, up to 7
+  peers. Broadcast messages are not encrypted. `ESPNowPeers` lists the
+  unicast peers.
 - `ESPNowSend` waits for the send status. A unicast message gives
   `ErrESPNowNoAck` when the peer did not acknowledge it.
 - `HandleESPNow` gets the received messages, with the source MAC and the
-  RSSI.
+  RSSI. Call it once.
+- `ESPNowSetPeerRate` sets the PHY rate for a peer. With `SetLongRange` on
+  the devices, `PHYModeLR` sends at 250 or 500 kbps over a longer distance.
+- `ESPNowSetWakeWindow` is for power save. As in ESP-IDF, it works only
+  when the station is connected.
+- `crypto.go` gives the blobs the AES block functions for encrypted peers.
 
 The `espnow` example sends a broadcast each second and answers each new
-board with a unicast message. Tested with one board: the broadcasts are
-sent, a unicast message to a MAC that does not exist gives
-`ErrESPNowNoAck`, and 5 cycles with `Deinit` left no memory in the blob
-heap. Reception and encryption need a test with two boards.
+board with a unicast message.
+
+Tested with one board:
+
+- The broadcasts are sent, also at 1 Mbps and at Long Range 500 kbps.
+- A unicast message to a MAC that does not exist gives `ErrESPNowNoAck`,
+  also for an encrypted peer.
+- The 8th encrypted peer gives `ErrESPNowFull`.
+- 5 cycles with `Deinit` left no memory in the blob heap.
+
+Reception, the acknowledgement of a real peer and decryption need two
+boards. See "Integration tests" below.
 
 ## Stop and restart
 
@@ -190,7 +204,7 @@ heap. Reception and encryption need a test with two boards.
   again.
 - `BLEDisable` stops the BT controller. `BLEEnable` starts it again.
 
-When no radio runs, the package stops the blob timers, resets coexistence and
+When no radio runs, the package stops the blob timers and
 turns off the power domain of the radio. The blob heap stays, because blob
 variables keep pointers into it, as in ESP-IDF. A restart uses the same heap.
 
@@ -225,13 +239,16 @@ failures. The LE ACL size was 251 bytes, with 12 buffers.
 
 ## Next work
 
-The items are in order of priority.
-
 1. **Current measurement.** Measure the current with `PowerSaveMinModem` and
    with `PowerSaveNone`, with a USB power meter or a shunt resistor.
-2. **Access point with a station.** Connect a phone to the `wifi-ap` example
-   and check the 4-way handshake, DHCP and HTTP.
-3. **ESP-NOW with two boards.** Test reception, the unicast ACK and
-   encryption with the `espnow` example on two boards.
-4. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
+2. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
    is not tested on these chips.
+
+## Integration tests
+
+These tests need other devices. They are not done yet.
+
+- **Access point with a station.** Connect a phone to the `wifi-ap` example
+  and check the 4-way handshake, DHCP and HTTP.
+- **ESP-NOW with two boards.** Flash the `espnow` example to two boards and
+  check reception, the unicast acknowledgement and an encrypted peer.
