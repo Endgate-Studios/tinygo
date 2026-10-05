@@ -282,6 +282,24 @@ func TestUnwrapRFC3394(t *testing.T) {
 	c.Close()
 }
 
+func TestWrapRFC3394(t *testing.T) {
+	mem := newCheckedMemory(t)
+	c, err := aes.New(mem, unhex(t, "000102030405060708090a0b0c0d0e0f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, 24)
+	wrap(c, unhex(t, "00112233445566778899aabbccddeeff"), out)
+	if got := hex.EncodeToString(out); got != "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5" {
+		t.Errorf("RFC 3394 4.1 wrap = %s", got)
+	}
+	plain := make([]byte, 16)
+	if !unwrap(c, out, plain) || hex.EncodeToString(plain) != "00112233445566778899aabbccddeeff" {
+		t.Error("unwrap of the wrap failed")
+	}
+	c.Close()
+}
+
 // refWrap is RFC 3394 key wrap built on crypto/aes, to make test input.
 func refWrap(kek, key []byte) []byte {
 	b, _ := stdaes.NewCipher(kek)

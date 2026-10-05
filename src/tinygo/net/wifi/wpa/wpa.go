@@ -136,6 +136,10 @@ func (k *Keys) DerivePTK(aa, spa [6]byte, anonce, snonce [32]byte) error {
 	return nil
 }
 
+// PMK returns the pairwise master key, or nil before SetPassphrase or SetPMK.
+// The slice is valid until Close.
+func (k *Keys) PMK() []byte { return k.pmk }
+
 // KCK returns the key confirmation key. The slice is valid until Close.
 func (k *Keys) KCK() []byte { return k.part(0, KCKLen) }
 
