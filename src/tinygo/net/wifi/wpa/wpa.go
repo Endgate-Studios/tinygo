@@ -3,7 +3,10 @@
 // HMAC states and buffers are on the stack and are cleared after use.
 package wpa
 
-import "runtime/memory"
+import (
+	"runtime/memory"
+	"tinygo/crypto/aes"
+)
 
 // Memory is where Keys allocates key material.
 type Memory interface {
@@ -46,6 +49,7 @@ type Keys struct {
 	mem    Memory
 	pmk    []byte
 	ptk    []byte
+	sae    bool
 	closed bool
 }
 
@@ -63,6 +67,11 @@ func (k *Keys) Close() {
 	k.release(&k.ptk)
 	k.closed = true
 }
+
+// UseSAE selects the key derivation and the MIC of the SAE AKM (IEEE 802.11-2020 table 12-11):
+// KDF-SHA256 for the PTK and AES-128-CMAC with the KCK for the EAPOL-Key MIC. Call it before
+// DerivePTK.
+func (k *Keys) UseSAE() { k.sae = true }
 
 // SetPassphrase derives the PMK from a WPA passphrase and SSID (IEEE 802.11-2020 J.4).
 func (k *Keys) SetPassphrase(passphrase, ssid []byte) error {
@@ -113,7 +122,11 @@ func (k *Keys) DerivePTK(aa, spa [6]byte, anonce, snonce [32]byte) error {
 	var data [2*6 + 2*32]byte
 	sortedPair(data[0:12], aa[:], spa[:])
 	sortedPair(data[12:], anonce[:], snonce[:])
-	prf(k.pmk, "Pairwise key expansion", data[:], k.ptk)
+	if k.sae {
+		KDFSHA256(k.pmk, "Pairwise key expansion", data[:], k.ptk)
+	} else {
+		prf(k.pmk, "Pairwise key expansion", data[:], k.ptk)
+	}
 	clear(data[:])
 	return nil
 }
@@ -131,14 +144,23 @@ func (k *Keys) KEK() []byte { return k.part(KCKLen, KEKLen) }
 // TK returns the temporal key for CCMP. The slice is valid until Close.
 func (k *Keys) TK() []byte { return k.part(KCKLen+KEKLen, TKLen) }
 
-// MIC computes the EAPOL-Key MIC for key descriptor version 2, HMAC-SHA1-128 (IEEE 802.11-2020 12.7.2).
-// The MIC field of frame must be zero.
+// MIC computes the EAPOL-Key MIC (IEEE 802.11-2020 12.7.2): HMAC-SHA1-128 for key descriptor
+// version 2, or AES-128-CMAC after UseSAE. The MIC field of frame must be zero.
 func (k *Keys) MIC(frame []byte, out *[MICLen]byte) error {
 	if k.closed {
 		return ErrClosed
 	}
 	if k.ptk == nil {
 		return ErrNoPTK
+	}
+	if k.sae {
+		var c aes.Cipher
+		if err := c.Init(k.mem, k.KCK()); err != nil {
+			return ErrNoMemory
+		}
+		err := c.CMAC(out, frame)
+		c.Close()
+		return err
 	}
 	var m mac
 	m.init(k.KCK())
