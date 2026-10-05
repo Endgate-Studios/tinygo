@@ -136,7 +136,6 @@ func radioStopped() {
 		return
 	}
 	disarmTimers()
-	coexReset()
 	powerDomainOff()
 }
 

@@ -81,9 +81,6 @@ func Init(opts ...Option) error {
 	return nil
 }
 
-// coexReset makes the next start set up coexistence again, see seam_coex_reset.
-func coexReset() { C.seam_coex_reset() }
-
 // wifiOn tells whether the Wi-Fi driver runs, from Init to Deinit.
 var wifiOn bool
 
@@ -93,9 +90,9 @@ func Stop() error {
 	return check(C.esp_wifi_stop())
 }
 
-// Deinit stops the Wi-Fi driver after Stop, as esp_wifi_deinit, and frees the
-// frame pool. Init starts it again. When BLE is off too, the GC heap gets the
-// blob heap back.
+// Deinit stops ESP-NOW and the Wi-Fi driver after Stop, as esp_wifi_deinit,
+// and frees the frame pool. Init starts it again. When BLE is off too, the
+// radio power domain goes off. The blob heap stays for the next start.
 func Deinit() error {
 	defer releaseThreadSemaphore()
 	if !wifiOn {

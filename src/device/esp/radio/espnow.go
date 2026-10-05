@@ -21,11 +21,13 @@ import (
 // frames, with no access point and no IP. The protocol is in libespnow.a. See
 // ESP-IDF v5.3.2 components/esp_wifi/include/esp_now.h.
 
-// Limits of esp_now.h for ESP-NOW v1.
+// Limits of esp_now.h for ESP-NOW v1. The encrypted peers are
+// espnow_max_encrypt_num of seam.c, the ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM default
+// of esp_wifi/Kconfig.
 const (
 	ESPNowMaxData           = 250
 	ESPNowMaxPeers          = 20
-	ESPNowMaxEncryptedPeers = 6
+	ESPNowMaxEncryptedPeers = 7
 	ESPNowKeyLen            = 16
 )
 
@@ -106,11 +108,7 @@ func ESPNowInit() error {
 	if espnow.on {
 		return nil
 	}
-	if espnow.msgs == nil {
-		espnow.sent = make(chan bool, 1)
-		espnow.msgs = make(chan espnowMsg, espnowPool)
-		espnow.free = make(chan *espnowBuf, espnowPool)
-	}
+	espnowChannels()
 	bufs := memory.MakeSlice[espnowBuf](blobHeap, espnowPool)
 	if bufs == nil {
 		return ErrNoMem
@@ -125,6 +123,15 @@ func ESPNowInit() error {
 	}
 	espnow.on = true
 	return nil
+}
+
+// espnowChannels makes the channels once. They stay after ESPNowDeinit.
+func espnowChannels() {
+	if espnow.msgs == nil {
+		espnow.sent = make(chan bool, 1)
+		espnow.msgs = make(chan espnowMsg, espnowPool)
+		espnow.free = make(chan *espnowBuf, espnowPool)
+	}
 }
 
 // ESPNowDeinit stops ESP-NOW and removes all peers. Deinit calls it.
@@ -187,6 +194,108 @@ func ESPNowRemovePeer(mac [6]byte) error {
 	return check(C.esp_now_del_peer((*C.uint8_t)(unsafe.Pointer(&mac[0]))))
 }
 
+// ESPNowPeerInfo is a peer in the list of ESPNowPeers.
+type ESPNowPeerInfo struct {
+	MAC         [6]byte
+	Channel     uint8
+	Encrypted   bool
+	AccessPoint bool
+}
+
+// ESPNowPeers fills peers from the peer list and gives the number of peers
+// that it filled. A list of ESPNowMaxPeers holds all peers. As
+// esp_now_fetch_peer, it skips the broadcast and multicast peers.
+func ESPNowPeers(peers []ESPNowPeerInfo) (int, error) {
+	defer releaseThreadSemaphore()
+	n := 0
+	for n < len(peers) {
+		p := &peers[n]
+		var enc, ap C.uint8_t
+		first := C.int(0)
+		if n == 0 {
+			first = 1
+		}
+		err := check(C.seam_espnow_fetch_peer(first, (*C.uint8_t)(unsafe.Pointer(&p.MAC[0])), (*C.uint8_t)(unsafe.Pointer(&p.Channel)), &enc, &ap))
+		if err == ErrESPNowNotFound {
+			break
+		}
+		if err != nil {
+			return n, err
+		}
+		p.Encrypted, p.AccessPoint = enc != 0, ap != 0
+		n++
+	}
+	return n, nil
+}
+
+// PHYMode is wifi_phy_mode_t of ESP-IDF v5.3.2 esp_wifi_types_generic.h.
+type PHYMode int32
+
+const (
+	PHYModeLR   PHYMode = 0 // Espressif Long Range
+	PHYMode11B  PHYMode = 1
+	PHYMode11G  PHYMode = 2
+	PHYModeHT20 PHYMode = 4 // 802.11n, 20 MHz
+)
+
+// PHYRate is wifi_phy_rate_t of esp_wifi_types_generic.h for the ESP32-S3.
+type PHYRate int32
+
+const (
+	PHYRate1ML     PHYRate = 0x00 // 1 Mbps, long preamble
+	PHYRate2ML     PHYRate = 0x01
+	PHYRate5ML     PHYRate = 0x02 // 5.5 Mbps
+	PHYRate11ML    PHYRate = 0x03
+	PHYRate2MS     PHYRate = 0x05 // 2 Mbps, short preamble
+	PHYRate5MS     PHYRate = 0x06
+	PHYRate11MS    PHYRate = 0x07
+	PHYRate48M     PHYRate = 0x08
+	PHYRate24M     PHYRate = 0x09
+	PHYRate12M     PHYRate = 0x0a
+	PHYRate6M      PHYRate = 0x0b
+	PHYRate54M     PHYRate = 0x0c
+	PHYRate36M     PHYRate = 0x0d
+	PHYRate18M     PHYRate = 0x0e
+	PHYRate9M      PHYRate = 0x0f
+	PHYRateMCS0LGI PHYRate = 0x10 // MCS0 to MCS7 with long guard interval
+	PHYRateMCS7LGI PHYRate = 0x17
+	PHYRateMCS0SGI PHYRate = 0x18 // MCS0 to MCS7 with short guard interval
+	PHYRateMCS7SGI PHYRate = 0x1f
+	PHYRateLR250K  PHYRate = 0x29 // Espressif Long Range, 250 kbps
+	PHYRateLR500K  PHYRate = 0x2a // Espressif Long Range, 500 kbps
+)
+
+// ESPNowSetPeerRate sets the PHY mode and rate of the messages to a peer, as
+// esp_now_set_peer_rate_config. For PHYModeLR, call SetLongRange on the two
+// devices.
+func ESPNowSetPeerRate(mac [6]byte, mode PHYMode, rate PHYRate) error {
+	defer releaseThreadSemaphore()
+	return check(C.seam_espnow_rate((*C.uint8_t)(unsafe.Pointer(&mac[0])), C.int(mode), C.int(rate)))
+}
+
+// ESPNowSetWakeWindow sets how long the radio stays awake in each wake
+// interval, both in milliseconds, for ESP-NOW with power save. As in ESP-IDF,
+// it works only when the station is connected.
+func ESPNowSetWakeWindow(window, interval uint16) error {
+	defer releaseThreadSemaphore()
+	if err := check(C.esp_wifi_connectionless_module_set_wake_interval(C.uint16_t(interval))); err != nil {
+		return err
+	}
+	return check(C.esp_now_set_wake_window(C.uint16_t(window)))
+}
+
+// SetLongRange adds the Espressif Long Range protocol to the station, or
+// removes it, as esp_wifi_set_protocol. Long Range frames go farther at 250
+// or 500 kbps. Only Espressif chips receive them.
+func SetLongRange(on bool) error {
+	defer releaseThreadSemaphore()
+	proto := C.uint8_t(0x1 | 0x2 | 0x4) // WIFI_PROTOCOL_11B, 11G and 11N
+	if on {
+		proto |= 0x8 // WIFI_PROTOCOL_LR
+	}
+	return check(C.esp_wifi_set_protocol(ifStation, proto))
+}
+
 // ESPNowSend sends data of up to ESPNowMaxData bytes to a peer and waits for
 // the send status. A unicast message gives ErrESPNowNoAck when the peer did
 // not acknowledge it. A broadcast message has no acknowledgement.
@@ -218,8 +327,9 @@ func ESPNowSend(mac [6]byte, data []byte) error {
 }
 
 // HandleESPNow calls handler for each received message in a new goroutine.
-// Call it once, after the first ESPNowInit. It goes on after a restart.
+// Call it once. It goes on after a restart.
 func HandleESPNow(handler func(m *ESPNowMessage)) {
+	espnowChannels()
 	go func() {
 		var m ESPNowMessage
 		for msg := range espnow.msgs {

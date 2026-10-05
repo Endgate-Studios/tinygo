@@ -70,7 +70,7 @@ static struct {
 };
 
 // seam_coex_pre_init is the coexistence part of the ESP-IDF startup
-// (esp_system/startup_funcs.c). It runs once.
+// (esp_system/startup_funcs.c). It runs once. Its tables stay in the blob heap.
 static bool coex_ready;
 
 int seam_coex_pre_init(void) {
@@ -83,12 +83,6 @@ int seam_coex_pre_init(void) {
 		return err;
 	}
 	return coex_pre_init();
-}
-
-// seam_coex_reset makes the next start run seam_coex_pre_init again. The deinit
-// of Wi-Fi calls coex_deinit, which clears the ROM function table of coexist.
-void seam_coex_reset(void) {
-	coex_ready = false;
 }
 
 extern int coex_init(void);

@@ -26,6 +26,16 @@ int esp_now_register_recv_cb(void (*cb)(const esp_now_recv_info_t *, const uint8
 int esp_now_register_send_cb(void (*cb)(const uint8_t *, int));
 int esp_now_add_peer(const esp_now_peer_info_t *peer);
 int esp_now_mod_peer(const esp_now_peer_info_t *peer);
+int esp_now_fetch_peer(bool from_head, esp_now_peer_info_t *peer);
+
+typedef struct {
+	int phymode; // wifi_phy_mode_t
+	int rate;    // wifi_phy_rate_t
+	bool ersu;
+	bool dcm;
+} esp_now_rate_config_t;
+
+int esp_now_set_peer_rate_config(const uint8_t *peer_addr, esp_now_rate_config_t *config);
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 	int8_t rssi = info->rx_ctrl != NULL ? info->rx_ctrl[0] : 0;
@@ -64,4 +74,23 @@ int seam_espnow_peer(const uint8_t *mac, const uint8_t *lmk, uint8_t channel, in
 	p.channel = channel;
 	p.ifidx = ifidx;
 	return modify ? esp_now_mod_peer(&p) : esp_now_add_peer(&p);
+}
+
+// seam_espnow_fetch_peer gives the first peer, or the next one, as
+// esp_now_fetch_peer. It gives ESP_ERR_ESPNOW_NOT_FOUND after the last one.
+int seam_espnow_fetch_peer(int from_head, uint8_t *mac, uint8_t *channel, uint8_t *encrypt, uint8_t *ap) {
+	esp_now_peer_info_t p;
+	int err = esp_now_fetch_peer(from_head != 0, &p);
+	if (err == 0) {
+		memcpy(mac, p.peer_addr, 6);
+		*channel = p.channel;
+		*encrypt = p.encrypt;
+		*ap = p.ifidx == 1; // WIFI_IF_AP
+	}
+	return err;
+}
+
+int seam_espnow_rate(const uint8_t *mac, int phymode, int rate) {
+	esp_now_rate_config_t c = {.phymode = phymode, .rate = rate};
+	return esp_now_set_peer_rate_config(mac, &c);
 }
