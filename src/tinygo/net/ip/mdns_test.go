@@ -123,8 +123,15 @@ func TestMDNSCompressedQuestion(t *testing.T) {
 	q = append(q, 0x0b)
 	q = append(q, "tinygo-node"...)
 	q = append(q, 0xc0, dnsHdrLen+6, 0, dnsTypeA, 0x80, dnsClassIN) // .local, QU bit
-	if _, ok := mdnsQuestion(q, "tinygo-node"); !ok {
+	question, ok := mdnsQuestion(q, "tinygo-node")
+	if !ok {
 		t.Fatal("no match for a compressed name")
+	}
+	// The legacy answer writes the name in full, with no pointer.
+	var out [256]byte
+	n := putMDNSAnswer(out[:], "tinygo-node", myIP, 1, question)
+	if c := bytes.Count(out[:n], []byte("\x0btinygo-node\x05local\x00")); c != 2 {
+		t.Errorf("legacy answer %x has the full name %d times, want 2", out[:n], c)
 	}
 	if _, ok := mdnsQuestion(q[:len(q)-3], "tinygo-node"); ok {
 		t.Fatal("a short message matched")

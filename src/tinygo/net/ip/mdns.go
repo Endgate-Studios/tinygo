@@ -171,21 +171,29 @@ func putMDNSAnswer(b []byte, name string, addr Addr, id uint16, question []byte)
 	n := dnsHdrLen
 	class, ttl := uint16(dnsClassIN|mdnsCacheFlush), uint32(mdnsTTL)
 	if question != nil {
+		// The name in full: a compression pointer of the query would point
+		// to other bytes here.
 		put16(b[4:], 1)
-		n += copy(b[n:], question)
+		n = putLocalName(b, n, name)
+		n += copy(b[n:], question[len(question)-4:])
 		class, ttl = dnsClassIN, mdnsLegacyTTL
 	}
 	put16(b[6:], 1)
-	b[n] = byte(len(name))
-	n += 1 + copy(b[n+1:], name)
-	b[n] = 5
-	n += 1 + copy(b[n+1:], "local")
-	b[n] = 0
-	n++
+	n = putLocalName(b, n, name)
 	put16(b[n:], dnsTypeA)
 	put16(b[n+2:], class)
 	put32(b[n+4:], ttl)
 	put16(b[n+8:], 4)
 	copy(b[n+10:], addr[:])
 	return n + 14
+}
+
+// putLocalName writes name.local at b[n:] and gives the offset after it.
+func putLocalName(b []byte, n int, name string) int {
+	b[n] = byte(len(name))
+	n += 1 + copy(b[n+1:], name)
+	b[n] = 5
+	n += 1 + copy(b[n+1:], "local")
+	b[n] = 0
+	return n + 1
 }
