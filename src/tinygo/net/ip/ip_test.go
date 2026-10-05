@@ -186,6 +186,39 @@ func TestUDPReceiveAndSend(t *testing.T) {
 	}
 }
 
+// TestUDPSubnetBroadcast sends to the subnet broadcast address with no ARP,
+// and receives a datagram to it.
+func TestUDPSubnetBroadcast(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	c, err := s.ListenUDP(4210, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bcast := Addr{192, 168, 1, 255}
+	if err := c.WriteTo([]byte("node"), bcast, 4210); err != nil {
+		t.Fatal(err)
+	}
+	f := l.next(t)
+	want := ethernet(broadcastMAC, myMAC, etherIPv4, udpPacket(myIP, bcast, 4210, 4210, []byte("node")))
+	if !bytes.Equal(f[:14], want[:14]) || !bytes.Equal(f[14+20:], want[14+20:]) {
+		t.Fatalf("broadcast frame\n got %x\nwant %x", f, want)
+	}
+	noSeg(t, l) // one frame for one WriteTo
+	for _, dst := range []Addr{bcast, Broadcast} {
+		s.Input(ethernet(broadcastMAC, peerMAC, etherIPv4, udpPacket(peerIP, dst, 4210, 4210, []byte("peer"))))
+		buf := make([]byte, 16)
+		n, from, _, ok, err := c.TryReadFrom(buf)
+		if !ok || err != nil || string(buf[:n]) != "peer" || from != peerIP {
+			t.Fatalf("datagram to %v: %q from %v ok %v %v", dst, buf[:n], from, ok, err)
+		}
+	}
+	// A broadcast of another subnet is not for this stack.
+	s.Input(ethernet(broadcastMAC, peerMAC, etherIPv4, udpPacket(peerIP, Addr{10, 0, 0, 255}, 4210, 4210, []byte("other"))))
+	if _, _, _, ok, _ := c.TryReadFrom(make([]byte, 16)); ok {
+		t.Error("a broadcast of another subnet came in")
+	}
+}
+
 func TestUDPRingWrapAndDrop(t *testing.T) {
 	s, _, _ := newTestStack(t)
 	c, err := s.ListenUDP(9, 64)
