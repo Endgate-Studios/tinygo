@@ -293,6 +293,18 @@ int seam_bt_register_vhci(void);
 bool seam_bt_can_send(void);
 void seam_bt_send(uint8_t *data, uint16_t len);
 
+// ESP-NOW, see espnow_seam.c and espnow.go.
+int seam_espnow_init(void);
+int seam_espnow_peer(const uint8_t *mac, const uint8_t *lmk, uint8_t channel, int ifidx, bool modify);
+int esp_now_deinit(void);
+int esp_now_send(const uint8_t *peer_addr, const uint8_t *data, size_t len);
+int esp_now_del_peer(const uint8_t *peer_addr);
+int esp_now_set_pmk(const uint8_t *pmk);
+int esp_wifi_set_channel(uint8_t primary, int second);
+int esp_wifi_get_channel(uint8_t *primary, int *second);
+void tinygo_espnow_recv(uint8_t *src, uint8_t *dst, int8_t rssi, uint8_t *data, int len);
+void tinygo_espnow_sent(uint8_t *mac, bool ok);
+
 // Seam functions in seam.c.
 int seam_wifi_init(bool psram, int dynamic_rx_buf_num);
 bool seam_env_is_chip(void);

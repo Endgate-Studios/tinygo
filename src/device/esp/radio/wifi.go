@@ -18,7 +18,7 @@ package radio
 #cgo LDFLAGS: -Lblobs/esp32-wifi-lib/esp32s3
 #cgo LDFLAGS: -Lblobs/esp-phy-lib/esp32s3
 #cgo LDFLAGS: -Lblobs/esp-coex-lib/esp32s3
-#cgo LDFLAGS: -lnet80211 -lpp -lcore -lphy -lcoexist
+#cgo LDFLAGS: -lespnow -lnet80211 -lpp -lcore -lphy -lcoexist
 #include "seam.h"
 */
 import "C"
@@ -100,6 +100,9 @@ func Deinit() error {
 	defer releaseThreadSemaphore()
 	if !wifiOn {
 		return nil
+	}
+	if err := ESPNowDeinit(); err != nil {
+		return err
 	}
 	if err := check(C.seam_wifi_deinit()); err != nil {
 		return err
