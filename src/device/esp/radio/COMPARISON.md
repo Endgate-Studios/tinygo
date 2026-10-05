@@ -18,7 +18,9 @@ not.
 | PSRAM | Optional, for the TX cache and the frame pool | Not used |
 | Memory statistics | In use, peak, failures, largest free block | In use and capacity |
 | Station mode | Yes | Yes |
-| Access point mode | Mode value only. No AP configuration and no DHCP server yet | Yes, with a DHCP server |
+| HTTP requests in 2 min, 1 client | 4,326 to 4,796 | 3,143 to 3,169 |
+| Access point mode | WPA2-PSK or open, up to 4 stations, DHCP server in `tinygo/net/ip`. Not tested with a station yet | Yes, with a DHCP server |
+| Stop and restart | `Stop`, `Deinit`, `BLEDisable`. 20 cycles tested, no memory growth | Not compared |
 | ESP-NOW | No | Yes |
 | TCP/IP stack | Separate (`tinygo/net/ip`) | Included (lneto), and a `netdev` driver |
 
@@ -63,6 +65,7 @@ SSID and password with `-ldflags`:
 | `src/examples/wifi` | Connects with WPA2, gets an address with DHCP, gets a page, answers ping, and runs UDP and TCP echo on port 7 |
 | `src/examples/wifi-http` | HTTP client and server with `tinygo/net/web`, with no allocation for each request |
 | `src/examples/wifi-ble` | HTTP server on Wi-Fi and BLE passive scan at the same time |
+| `src/examples/wifi-ap` | WPA2 access point with a DHCP server and an HTTP server on 192.168.4.1 |
 | `src/examples/ble-scan` | BLE scan with raw HCI commands |
 
 ```
@@ -88,14 +91,16 @@ core.
 | GC heap left without example buffers | 343,944 | 332,704 | 327,116 | 313,312 |
 
 The example buffers are the socket memory and the server buffers of our
-examples. The espradio test programs have no such buffers. Without them, the
+examples. The HTTP examples now have 32 KB of socket memory, 16,384 bytes
+more than in this table. The espradio test programs have no such buffers. Without them, the
 radio of device/esp/radio leaves more GC heap.
 
 On the ESP32-S3, IRAM and DRAM are the same SRAM. Each byte of IRAM code is
-one byte less for the GC heap. The two packages use the same linker script,
-which puts the Wi-Fi IRAM sections of the blobs (about 35 KB) and the BT
-`.iram1` code (about 16 KB) in IRAM. If these sections go to flash, the two
-packages get this memory back. The Wi-Fi throughput can then be lower.
+one byte less for the GC heap. The two packages use the same linker script.
+The values above are from the old script, which put all Wi-Fi IRAM sections
+of the blobs (about 35 KB) in IRAM. The script now uses the ESP-IDF placement:
+the sleep and extra Wi-Fi sections go to flash. This gives the two packages
+16,608 bytes more GC heap with Wi-Fi. See README.md, section IRAM.
 
 ### Blob heap
 
@@ -103,7 +108,7 @@ The blobs allocate memory at run time from an arena in the GC heap.
 
 | | device/esp/radio | espradio |
 |---|---|---|
-| Arena | One share for each radio: Wi-Fi 48 KB, BLE 32 KB | One arena of 48 KB for Wi-Fi and BLE |
+| Arena | One share for each radio: Wi-Fi 64 KB, BLE 32 KB | One arena of 48 KB for Wi-Fi and BLE |
 | RX frame buffers | 8 × 1,536 = 12,288 bytes in the arena, or in PSRAM | 6 × 1,602 = 9,612 bytes in a static C ring |
 | Wi-Fi buffers | 10 static RX, 32 dynamic RX, 32 dynamic TX, 5 management | The same |
 | AMPDU RX and TX | On | Off |
@@ -116,7 +121,7 @@ The blobs allocate memory at run time from an arena in the GC heap.
 |---|---|---|
 | Wi-Fi connected, no traffic | 40,264 bytes: 27,976 blobs and 12,288 frame pool | 31,296 bytes, plus 9,612 bytes in the static ring |
 | Wi-Fi peak during the connection | 45,400 bytes | No peak counter |
-| Wi-Fi under load | Peak 47,192 bytes at 57 requests/s | Not measured |
+| Wi-Fi under load | Peak 47,192 bytes at 57 requests/s with 1 client. Peak 56.0 KB with 4 clients and a 64 KB share | Not measured |
 | Wi-Fi and BLE scan, no traffic | 67,040 bytes | Could not run |
 | Wi-Fi and BLE under load | Peak 74,000 to 79,800 bytes | Could not run |
 
@@ -129,7 +134,22 @@ espradio, Wi-Fi and BLE need about 58 KB, which is more than its arena of
 
 ## Throughput
 
-device/esp/radio, one HTTP client, `PowerSaveNone`, measured:
+One HTTP client asks for `/` again and again for 2 minutes, with a timeout of
+3 s. Two rounds for each build:
+
+| Build | Requests in 2 min | Failures |
+|---|---|---|
+| espradio, lneto HTTP server, `-scheduler=tasks`, `WIFI_PS_NONE` | 3,169 and 3,143 | 0 |
+| device/esp/radio, `wifi-http`, `-scheduler=tasks`, `PowerSaveMinModem` | 4,796 and 4,678 | 0 |
+| device/esp/radio, `wifi-http`, `-scheduler=cores`, `PowerSaveMinModem` | 4,435 and 4,326 | 0 |
+
+device/esp/radio gave 39% to 50% more requests. These runs used the old Wi-Fi
+share of 48 KB. With one client, this share was sufficient. This compares the full
+stacks: the TCP/IP stack and the HTTP server are different in the two builds.
+So the result does not show the speed of the radio code alone. The espradio
+build did not answer ping.
+
+Other measurements of device/esp/radio, one HTTP client, `PowerSaveNone`:
 
 | Test | Result |
 |---|---|
@@ -137,10 +157,6 @@ device/esp/radio, one HTTP client, `PowerSaveNone`, measured:
 | `wifi-ble`, small pages, BLE scan on | About 30 requests/s |
 | `wifi-ble`, 16 KB pages, 1 client | 91.3 KB/s out |
 | `wifi-ble`, 16 KB pages, 4 clients | 109.4 KB/s out |
-
-We did not measure the throughput of espradio. Thus this document does not
-tell which package is faster. AMPDU and the second core can give
-device/esp/radio more throughput, but this is not measured against espradio.
 
 ## Power
 
@@ -209,6 +225,6 @@ traffic, and the peak current during a transfer.
 - One board and one access point.
 - The espradio BLE build used 41 extra ROM symbols, and its BLE stopped with
   an assert. So there are no run-time values for espradio with BLE.
-- The espradio Wi-Fi test program has no TCP stack, so there are no values
-  for espradio under load.
+- The throughput test used a different TCP/IP stack and HTTP server for each
+  package, and only one client.
 - No current measurements. The power values are from the datasheet.

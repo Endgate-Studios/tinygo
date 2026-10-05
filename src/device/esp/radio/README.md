@@ -13,10 +13,10 @@ uses DMA. Each radio adds its share to this heap:
 
 | Radio | Default share | Option |
 |---|---|---|
-| Wi-Fi (`Init`) | 48 KB (`DefaultArenaSize`) | `WithArenaSize`, `WithArenaMemory` |
+| Wi-Fi (`Init`) | 64 KB (`DefaultArenaSize`) | `WithArenaSize`, `WithArenaMemory`, `WithRXBuffers` |
 | BLE (`BLEEnable`) | 32 KB (`DefaultBLEArenaSize`) | `WithArenaSize`, `WithBLEActivities` |
 
-With the two radios, the heap is 81,904 bytes. `MemoryStats` gives the
+With the two radios, the heap is 98,288 bytes. `MemoryStats` gives the
 counters of the heap. `Failures` is the number of allocations that did not
 get memory.
 
@@ -49,25 +49,70 @@ A 2-hour test with one client gave 205,583 requests, 0 failed requests and
   allocates up to 32 dynamic RX buffers and 32 dynamic TX buffers
   (`dynamic_rx_buf_num` and `dynamic_tx_buf_num` in `seam.c`). It uses more
   buffers when memory is free, and fewer when the heap is small.
+  `WithRXBuffers` changes the RX limit, from 10 to 128.
 - Many small incoming frames at the same time can fill the heap. Each failed
-  allocation is one dynamic RX buffer of 1,700 bytes. The blob then drops the
-  frame, and the access point sends it again. At 180 RX frames/s, this was
-  0.6% of the frames. It did not cause HTTP errors.
+  allocation is one dynamic RX buffer of 1,700 bytes (ESF buffer type 7 of
+  the blob). The blob then drops the frame, and the access point sends it
+  again.
+- The RX buffers fail because the heap is full, not because of the limit.
+  The number of RX buffers in use stayed far below the limit. Thus
+  `WithRXBuffers(16)` did not change the failures.
 - Large outgoing data did not fill the heap. 110 KB/s out used less memory
   than 180 small frames/s in.
 - With 4 clients and 16 KB pages, 44 requests failed with "connection
-  refused". The cause is the one TCP listener of the example, not the radio
-  or the memory.
+  refused". The cause was the socket memory of the example, see "Socket
+  memory" below.
 
-### Recommendations
+### Size of the Wi-Fi share
 
-- The default shares are sufficient for one client at all the loads above.
-- For bursts of many small incoming frames, add memory to the Wi-Fi share,
-  for example `WithArenaSize(56 << 10)`. Each 1.7 KB gives one more RX buffer
-  for a burst.
-- Wi-Fi alone (`wifi-http`, 48 KB) had a heap peak of 47 KB at 57 req/s with
-  no failed requests. The heap was almost full, but the blob worked with the
-  buffers that it had.
+The tests above used a Wi-Fi share of 48 KB, the old default. A test with 4
+HTTP clients, small pages, `PowerSaveNone` and `-scheduler=cores`, 60 s for
+each run:
+
+| Radios | Wi-Fi share | Requests/s | Failed allocations | Heap peak |
+|---|---|---|---|---|
+| Wi-Fi | 48 KB | 12.9 to 15.7 | 6.3 to 7.2 per second | 47.8 KB (full) |
+| Wi-Fi | 56 KB | 107.1 | 3 in total | 54.5 KB |
+| Wi-Fi | 64 KB | 107.6 | 0 | 56.0 KB |
+| Wi-Fi | 80 KB | 105.5 | 0 | 59.2 KB |
+| Wi-Fi and BLE scan | 48 KB | 27.9 to 43.6 | 1.2 to 1.6 per second | 80.1 KB (full) |
+| Wi-Fi and BLE scan | 56 KB | 48.2 | 0 | 82.9 KB |
+| Wi-Fi and BLE scan | 64 KB | 56.8 and 57.8 | 0 | 82.8 to 84.5 KB |
+
+With a full heap, the blob drops RX frames and TCP sends them again. For Wi-Fi
+alone, this made the server 7 times slower. Thus the default share is now
+64 KB. The HTTP errors in these tests were 1 to 22 "connection refused" for
+each run, from the socket memory of the example.
+
+- To keep 16 KB more GC heap, use `WithArenaSize(48 << 10)` for one client
+  at a time.
+- `WithRXBuffers` sets the RX limit of ESP-IDF. A lower limit did not reduce
+  the failures in these tests.
+
+### Socket memory
+
+Each TCP connection of `tinygo/net/ip` takes a send ring and a receive ring of
+the buffer size of `ListenTCP` from the socket memory, from the SYN to
+TIME-WAIT. 16 KB holds about 3 connections with 2 KB rings. The HTTP
+examples have 32 KB. A server that handles one connection at a time needs one connection
+for each client that waits, and one more.
+
+When the memory is full, the stack drops the SYN, and the client sends it
+again later, as lwIP does. Before, the stack refused the connection.
+
+Test with 4 clients, a Wi-Fi share of 64 KB and the `wifi-ble` code:
+
+| Radios | Socket memory | Requests/s | HTTP errors in 60 s |
+|---|---|---|---|
+| Wi-Fi | 16 KB, SYN refused (old) | 107.6 | 22 refused |
+| Wi-Fi | 16 KB, SYN dropped | 90.8 and 108.4 | 10 and 11 timeouts |
+| Wi-Fi | 32 KB | 121.2 | 0 |
+| Wi-Fi and BLE scan | 16 KB, SYN dropped | 59.9 | 10 timeouts |
+| Wi-Fi and BLE scan | 32 KB | 73.6 | 0 |
+
+With 4 clients at the same time, 32 KB of socket memory was sufficient.
+In the Wi-Fi run with 32 KB, the frame pool of 8 buffers dropped 20 frames
+(`FramesDropped`), and TCP sent them again.
 
 ## Power save
 
@@ -97,26 +142,73 @@ The runtime sets the core voltage for 240 MHz from the eFuse values before it
 changes the CPU clock (`src/runtime/runtime_esp32s3.go`). Without this, core 0
 gets errors when the radio transmits.
 
+## Access point
+
+`SetMode(ModeAccessPoint)` and `ConfigureAP` make a soft-AP with WPA2-PSK and
+CCMP, or an open AP when the password is empty. It accepts up to `MaxStations`
+(4) stations. `ap.go` does the 4-way handshake with `tinygo/net/wifi/eapol`,
+as hostapd does in ESP-IDF.
+
+- `AccessPoint` is the Ethernet link of the AP for `tinygo/net/ip`, and
+  `HandleAPFrames` gives it the received frames.
+- `Stack.ServeDHCP` of `tinygo/net/ip` gives addresses to the stations.
+- `EventAPStaConnected` and `EventAPStaDisconnected` tell when a station joins
+  or leaves.
+- The blobs derive the PMK in `ConfigureAP` with `crypto.go`. This takes about
+  760 ms at 240 MHz.
+
+The `wifi-ap` example makes the network `tinygo-ap` and serves HTTP on
+192.168.4.1. The board sends beacons and the unit tests do the handshake and
+DHCP, but a test with a station is not done yet.
+
+## Stop and restart
+
+- `Stop` stops Wi-Fi, as `esp_wifi_stop`. `Start` starts it again.
+- `Deinit` stops the Wi-Fi blobs and frees the frame pools. `Init` starts them
+  again.
+- `BLEDisable` stops the BT controller. `BLEEnable` starts it again.
+
+When no radio runs, the package stops the blob timers, resets coexistence and
+turns off the power domain of the radio. The blob heap stays, because blob
+variables keep pointers into it, as in ESP-IDF. A restart uses the same heap.
+
+Test: 20 cycles of Wi-Fi `Init`, connect and DHCP, `BLEEnable` and a BLE scan,
+then `BLEDisable`, `Stop` and `Deinit`, with `-scheduler=cores`. Each cycle
+took about 4.1 s. After each cycle, the blob heap had 56 bytes in use, which
+the coexist blob allocates one time. The GC heap stayed from 142.7 KB to
+152.2 KB.
+
+`Deinit` frees the IEs that the blobs copy for `esp_wifi_set_appie_internal`,
+as `esp_supplicant_deinit` of ESP-IDF does. Before this, each connection
+left 16 bytes in the blob heap.
+
+`Deinit` while BLE runs also works. After it, a passive BLE scan got 22 to 30
+reports for each cycle, and Wi-Fi started again while BLE stayed on.
+
+## IRAM
+
+The linker script uses the placement of ESP-IDF. `.wifi0iram` and
+`.wifirxiram` stay in IRAM. The sleep and extra Wi-Fi sections go to flash.
+This gives 16,608 bytes more GC heap (`wifi-http`: 338,016 bytes).
+
+In an A/B test, all Wi-Fi IRAM sections in flash gave 2% to 6% fewer HTTP
+requests than all of them in IRAM.
+
+## BLE connections
+
+A GATT peripheral test program (not in the examples) ran with the `wifi-http`
+server under load for 4 minutes. One connection stayed up. 295 GATT write and
+read cycles had 0 errors and 0 data mismatches. 8,086 HTTP requests had 0
+failures. The LE ACL size was 251 bytes, with 12 buffers.
+
 ## Next work
 
 The items are in order of priority.
 
 1. **Current measurement.** Measure the current with `PowerSaveMinModem` and
    with `PowerSaveNone`, with a USB power meter or a shunt resistor.
-2. **Reconnect.** Test what occurs when the access point stops or the signal
-   is lost. The station must connect again after a disconnect event.
-3. **Throughput against espradio.** Add a TCP server to the espradio test
-   program and measure the two packages with the same load.
-4. **Access point mode.** Add the AP configuration and a DHCP server, so that
-   the board can make its own network.
-5. **BLE advertising and connections.** Only the passive scan is tested. Test
-   advertising and a connection with Wi-Fi under load.
-6. **Stop and restart.** Add functions to stop Wi-Fi and BLE, give back their
-   memory, and start them again.
-7. **IRAM option.** The Wi-Fi IRAM sections of the blobs use about 35 KB of
-   SRAM. Add an option to put them in flash, and measure the throughput.
-8. **RX bursts.** Many small incoming frames can fill the Wi-Fi share. Give a
-   size option for the dynamic RX buffers, or a larger default share.
-9. **ESP-NOW.** Add it if a user needs it.
-10. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but
-    it is not tested on these chips.
+2. **Access point with a station.** Connect a phone to the `wifi-ap` example
+   and check the 4-way handshake, DHCP and HTTP.
+3. **ESP-NOW.** Add it if a user needs it.
+4. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
+   is not tested on these chips.
