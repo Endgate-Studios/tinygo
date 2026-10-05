@@ -1,4 +1,5 @@
-// Package p256 is ECDH on the NIST P-256 curve for LE Secure Connections pairing (Core spec v5.4 Vol 3 Part H 2.3.5.6).
+// Package p256 is the NIST P-256 curve: ECDH for LE Secure Connections pairing (Core spec v5.4 Vol 3
+// Part H 2.3.5.6) and the operations of SAE group 19 for WPA3 (IEEE 802.11-2020 12.4).
 // Its working points come from an injected allocator that can free, and it has no precomputed tables.
 package p256
 

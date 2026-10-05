@@ -5,7 +5,7 @@ import (
 	"io"
 
 	"runtime/memory"
-	"tinygo/net/bluetooth/p256"
+	"tinygo/crypto/p256"
 )
 
 const codeSecurityRequest = 0x0b
