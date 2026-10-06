@@ -89,11 +89,14 @@ func main() {
 	hex.Decode(g2N[:], []byte(g2Modulus))
 	root := tls.PublicKey{}
 	root.RSA.N, root.RSA.E = g2N[:], 65537
-	cfg := &tls.Config{ServerName: broker, Time: now.Add(time.Since(boot)), Roots: []tls.PublicKey{root}}
+	// EMQX agrees to max_fragment_length, so the receive buffer gets small
+	// after the handshake.
+	cfg := &tls.Config{ServerName: broker, Time: now.Add(time.Since(boot)), Roots: []tls.PublicKey{root}, RecordSizeLimit: 4096}
 	conn := tls.Client(raw, tm, rng{}, cfg)
 	t0 := time.Now()
 	must("tls handshake", conn.Handshake())
-	println("tls handshake ms", int(time.Since(t0)/time.Millisecond))
+	println("tls handshake ms", int(time.Since(t0)/time.Millisecond), "record limit", conn.RecordLimit(),
+		"tls memory in use", tm.Stats().InUse, "peak", tm.Stats().Peak)
 
 	id := strconv.FormatUint(uint64(esp.RNG.DATA.Get()), 16)
 	prefix := "tinygo-demo/" + id
