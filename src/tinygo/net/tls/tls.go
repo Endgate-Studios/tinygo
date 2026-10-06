@@ -1,5 +1,5 @@
 // Package tls is a TLS 1.3 client (RFC 8446) with TLS_AES_128_GCM_SHA256,
-// key exchange on secp256r1 and server certificates with ECDSA P-256 or RSA,
+// key exchange on X25519 or secp256r1, server certificates with ECDSA P-256 or RSA,
 // with SHA-256. It checks the server name, the validity, the certificate
 // chain up to a configured CA key or a pinned server key, and the
 // CertificateVerify signature. Its buffers come from an injected allocator.

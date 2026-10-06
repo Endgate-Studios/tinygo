@@ -9,6 +9,7 @@ import (
 	"tinygo/crypto/p256"
 	"tinygo/crypto/rsa"
 	"tinygo/crypto/sha256"
+	"tinygo/crypto/x25519"
 	"tinygo/crypto/x509"
 )
 
@@ -27,6 +28,7 @@ const (
 const (
 	suiteAES128GCMSHA256 = 0x1301
 	groupSecp256r1       = 0x0017
+	groupX25519          = 0x001d
 	sigECDSAP256SHA256   = 0x0403
 	sigRSAPSSSHA256      = 0x0804 // rsa_pss_rsae_sha256
 	sigRSAPKCS1SHA256    = 0x0401 // only for certificates
@@ -42,6 +44,8 @@ var helloRetry = [32]byte{
 // hsState is the state of the handshake that the Conn does not keep.
 type hsState struct {
 	priv, pubX, pubY [32]byte
+	xPriv, xPub      [32]byte
+	group            int // the group of the server key share
 	sessionID        [32]byte
 	hsSecret         [sha256.Size]byte
 	cHS, sHS         [sha256.Size]byte
@@ -98,6 +102,10 @@ func (c *Conn) handshake(st *hsState) error {
 	if err := p256.GenerateKey(c.mem, c.rng, &st.priv, &st.pubX, &st.pubY); err != nil {
 		return err
 	}
+	if _, err := io.ReadFull(c.rng, st.xPriv[:]); err != nil {
+		return err
+	}
+	x25519.X25519(&st.xPub, &st.xPriv, &x25519.Basepoint)
 	if err := c.sendClientHello(st); err != nil {
 		return err
 	}
@@ -116,10 +124,16 @@ func (c *Conn) handshake(st *hsState) error {
 
 	// The handshake secrets (section 7.1).
 	var shared, early, derived, zero [32]byte
-	if err := p256.SharedSecret(c.mem, &st.priv, &peerX, &peerY, &shared); err != nil {
+	if st.group == groupX25519 {
+		x25519.X25519(&shared, &st.xPriv, &peerX)
+		if shared == zero { // RFC 8446 section 7.4.2
+			return ErrHandshake
+		}
+	} else if err := p256.SharedSecret(c.mem, &st.priv, &peerX, &peerY, &shared); err != nil {
 		return ErrHandshake
 	}
 	clear(st.priv[:])
+	clear(st.xPriv[:])
 	hkdf.Extract(&early, nil, zero[:])
 	deriveSecret(&derived, early[:], "derived", emptyHash[:])
 	hkdf.Extract(&st.hsSecret, derived[:], shared[:])
@@ -257,11 +271,14 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		b = append(b, 0, 0, byte((n+5)>>8), byte(n+5), byte((n+3)>>8), byte(n+3), 0, byte(n>>8), byte(n))
 		b = append(b, name...)
 	}
-	b = append(b, 0, 0x0a, 0, 4, 0, 2, groupSecp256r1>>8, groupSecp256r1&0xff)
+	b = append(b, 0, 0x0a, 0, 6, 0, 4, groupX25519>>8, groupX25519&0xff, groupSecp256r1>>8, groupSecp256r1&0xff)
 	b = append(b, 0, 0x0d, 0, 8, 0, 6, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
 		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff)
 	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
-	b = append(b, 0, 0x33, 0, 71, 0, 69, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
+	// Key shares for X25519 and secp256r1: 36 and 69 bytes.
+	b = append(b, 0, 0x33, 0, 107, 0, 105, groupX25519>>8, groupX25519&0xff, 0, 32)
+	b = append(b, st.xPub[:]...)
+	b = append(b, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
 	b = append(b, st.pubX[:]...)
 	b = append(b, st.pubY[:]...)
 	el := len(b) - ext - 2
@@ -341,11 +358,17 @@ func parseServerHello(b []byte, st *hsState, x, y *[32]byte) error {
 		case 0x2b: // supported_versions
 			version = n == 2 && v[0] == 3 && v[1] == 4
 		case 0x33: // key_share
-			if n != 4+65 || int(v[0])<<8|int(v[1]) != groupSecp256r1 || v[2] != 0 || v[3] != 65 || v[4] != 4 {
+			switch {
+			case n == 4+32 && int(v[0])<<8|int(v[1]) == groupX25519 && v[2] == 0 && v[3] == 32:
+				copy(x[:], v[4:36])
+				st.group = groupX25519
+			case n == 4+65 && int(v[0])<<8|int(v[1]) == groupSecp256r1 && v[2] == 0 && v[3] == 65 && v[4] == 4:
+				copy(x[:], v[5:37])
+				copy(y[:], v[37:69])
+				st.group = groupSecp256r1
+			default:
 				return ErrUnsupported
 			}
-			copy(x[:], v[5:37])
-			copy(y[:], v[37:69])
 			key = true
 		}
 	}

@@ -70,10 +70,15 @@ func key(k *ecdsa.PrivateKey) PublicKey {
 // serve runs a crypto/tls server on the conn that sends a greeting, echoes
 // one message and closes. It also sends NewSessionTicket after the handshake.
 func serve(t *testing.T, conn net.Conn, ch *chain, done chan<- error) {
+	serveCurve(t, conn, ch, stdtls.CurveP256, done)
+}
+
+// serveCurve is serve with only the key exchange group curve.
+func serveCurve(t *testing.T, conn net.Conn, ch *chain, curve stdtls.CurveID, done chan<- error) {
 	srv := stdtls.Server(conn, &stdtls.Config{
 		Certificates:     []stdtls.Certificate{ch.serverCert},
 		MinVersion:       stdtls.VersionTLS13,
-		CurvePreferences: []stdtls.CurveID{stdtls.CurveP256},
+		CurvePreferences: []stdtls.CurveID{curve},
 	})
 	if err := srv.Handshake(); err != nil {
 		done <- err
@@ -285,4 +290,26 @@ func TestTimeouts(t *testing.T) {
 func isTimeout(err error) bool {
 	t, ok := err.(interface{ Timeout() bool })
 	return ok && t.Timeout()
+}
+
+// TestX25519 uses a server that takes only X25519.
+func TestX25519(t *testing.T) {
+	ch := newChain(t, "node.example")
+	c, srvConn, _ := client(t, &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}})
+	done := make(chan error, 1)
+	go serveCurve(t, srvConn, ch, stdtls.X25519, done)
+	if err := c.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	buf := make([]byte, 64)
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "hello client" {
+		t.Fatalf("read %q %v", buf[:n], err)
+	}
+	c.Write([]byte("x"))
+	c.Read(buf)
+	c.Read(buf)
+	if err := <-done; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	c.Close()
 }
