@@ -115,12 +115,14 @@ In the Wi-Fi run with 32 KB, the frame pool of 8 buffers dropped 20 frames
 (`FramesDropped`), and TCP sent them again.
 
 The receive ring of `ListenTCP` is also the TCP window, because the stack does
-not scale the window. A PC sent 1 MB to the board, 3 times for each size:
+not scale the window. The send ring limits the data in flight. A PC sent 1 MB
+to the board, and the board sent 1 MB to the PC, 3 times for each size of the
+two rings:
 
-| Receive ring | Speed |
-|---|---|
-| 4 KB | about 200 KB/s |
-| 14 KB | about 700 KB/s |
+| Rings | PC to board | Board to PC |
+|---|---|---|
+| 4 KB | about 200 KB/s | about 560 KB/s |
+| 14 KB | about 700 KB/s | about 1.3 MB/s |
 
 The stack drops a segment that comes after a gap. `Stats.TCPOutOfOrder`
 counted 1 such segment for each megabyte, so the drop costs little on this
