@@ -23,6 +23,9 @@ not.
 | Stop and restart | `Stop`, `Deinit`, `BLEDisable`. 20 cycles tested, no memory growth | Not compared |
 | ESP-NOW | Yes, with encryption, peer rates and Long Range. Tested with one board, reception not tested yet | Yes |
 | TCP/IP stack | Separate (`tinygo/net/ip`) | Included (lneto), and a `netdev` driver |
+| TLS 1.3 client | `tinygo/net/tls`, with P-256, P-384 and RSA chains, session resumption and smaller records. See the README | Not compared |
+| Hardware crypto | SHA, AES and RSA (big number) accelerators, through `tinygo/crypto` | Not compared |
+| WPA3 (SAE) | SAE and its 4-way handshake in `tinygo/net/wifi`, with unit tests only. Not used by the blob yet | Not compared |
 
 ## Test setup
 
@@ -69,6 +72,10 @@ SSID and password with `-ldflags`:
 | `src/examples/espnow` | ESP-NOW broadcast and unicast messages between boards, with no access point |
 | `src/examples/udp-nodes` | Finds the other nodes on the Wi-Fi network with UDP broadcast on port 4210, and answers mDNS for `tinygo-XXXXXX.local` |
 | `src/examples/ble-scan` | BLE scan with raw HCI commands |
+| `src/examples/mqtt` | MQTT 3.1.1 client with `tinygo/net/mqtt` to broker.hivemq.com |
+| `src/examples/mqtt-tls` | MQTT over TLS 1.3 to broker.emqx.io on port 8883, with records of 4096 bytes |
+| `src/examples/tls-get` | Gets www.google.com with the `tinygo/net/tls` API, then again with a resumed session |
+| `src/examples/https-get` | Gets www.google.com two times with the `tinygo/net/https` client |
 
 ```
 tinygo flash -target esp32s3-psram-octal -scheduler=cores \

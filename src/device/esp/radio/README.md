@@ -213,7 +213,7 @@ cannot receive it. The protocol is in `libespnow.a` of the blobs.
   when the station is connected.
 - `crypto.go` gives the blobs the AES block functions for encrypted peers.
   `tinygo/crypto/aes` uses the AES accelerator for 128 and 256 bit keys:
-  3 µs for each block, against 43 µs in software.
+  3 Âµs for each block, against 43 Âµs in software.
 
 The `espnow` example sends a broadcast each second and answers each new
 board with a unicast message.
@@ -269,11 +269,37 @@ server under load for 4 minutes. One connection stayed up. 295 GATT write and
 read cycles had 0 errors and 0 data mismatches. 8,086 HTTP requests had 0
 failures. The LE ACL size was 251 bytes, with 12 buffers.
 
+## TLS and crypto
+
+`tinygo/net/tls` is a TLS 1.3 client, and `tinygo/net/https` is a small HTTPS
+client on top of it. They use the SHA, AES and RSA accelerators through
+`tinygo/crypto`. The RSA accelerator also does the multiplication of the
+elliptic curves. Measured on the board at 240 MHz:
+
+| Operation | Time |
+|---|---|
+| X25519 | 16.7 ms |
+| P-256 key or ECDH | 33.6 ms |
+| P-256 ECDSA verification | 35.8 ms |
+| P-384 ECDSA verification | 67 ms |
+| RSA-2048 verification | 3.8 ms |
+| AES-GCM of 16 KB | 11.5 ms |
+| SHA-256 of 16 KB | 2.3 ms |
+| WPA3 SAE commit (`sae.New`) | 61 ms |
+| TLS handshake with www.google.com | about 270 ms, 53 ms resumed |
+| TLS handshake with broker.emqx.io (RSA chain) | about 230 ms |
+
+A connection takes about 30 KB during the handshake and about 19 KB after it.
+With `RecordSizeLimit: 4096` and a server that agrees (broker.emqx.io does),
+it takes 6.8 KB after the handshake.
+
 ## Next work
 
-1. **Current measurement.** Measure the current with `PowerSaveMinModem` and
+1. **WPA3 on the board.** SAE passes its unit tests, but the board test needs
+   an access point in WPA2/WPA3 mixed mode.
+2. **Current measurement.** Measure the current with `PowerSaveMinModem` and
    with `PowerSaveNone`, with a USB power meter or a shunt resistor.
-2. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
+3. **ESP32-C3 and ESP32-C6.** The runtime fix for `sleepTicks` builds, but it
    is not tested on these chips.
 
 ## Integration tests
