@@ -43,6 +43,7 @@ const (
 	ErrDecrypt     Error = "tls: record decryption failed"
 	ErrCertificate Error = "tls: the server certificate is not trusted"
 	ErrName        Error = "tls: the certificate is not for the server name"
+	ErrUsage       Error = "tls: a certificate does not allow this use"
 	ErrExpired     Error = "tls: a certificate is not valid at this time"
 	ErrSignature   Error = "tls: the server signature is wrong"
 	ErrFinished    Error = "tls: the server Finished is wrong"

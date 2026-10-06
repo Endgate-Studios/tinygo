@@ -172,6 +172,19 @@ func TestRSA(t *testing.T) {
 	if leaf.CheckSignatureFrom(mem, &ca) {
 		t.Error("a changed certificate verifies")
 	}
+	for _, tc := range []struct {
+		alg  stdx509.SignatureAlgorithm
+		want int
+	}{{stdx509.SHA384WithRSA, SigRSASHA384}, {stdx509.SHA512WithRSA, SigRSASHA512}} {
+		leafTmpl.SignatureAlgorithm = tc.alg
+		var l Certificate
+		if err := Parse(makeCertAny(t, leafTmpl, caTmpl, &leafKey.PublicKey, caKey), &l); err != nil {
+			t.Fatal(err)
+		}
+		if l.SigAlg != tc.want || !l.CheckSignatureFrom(mem, &ca) {
+			t.Errorf("%v: SigAlg %d, does not verify", tc.alg, l.SigAlg)
+		}
+	}
 }
 
 func makeCertAny(t *testing.T, tmpl, parent *stdx509.Certificate, pub, priv any) []byte {
@@ -181,4 +194,86 @@ func makeCertAny(t *testing.T, tmpl, parent *stdx509.Certificate, pub, priv any)
 		t.Fatal(err)
 	}
 	return der
+}
+
+// TestUsage checks keyUsage, extKeyUsage, pathLenConstraint and an unknown
+// critical extension.
+func TestUsage(t *testing.T) {
+	mem, _ := arena.NewHeap(make([]byte, 8<<10))
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	now := time.Now()
+	base := func(n int64, name string) *stdx509.Certificate {
+		return &stdx509.Certificate{SerialNumber: big.NewInt(n), Subject: pkix.Name{CommonName: name},
+			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
+	}
+	parse := func(tmpl, parent *stdx509.Certificate) (Certificate, error) {
+		var c Certificate
+		err := Parse(makeCert(t, tmpl, parent, &key.PublicKey, key), &c)
+		return c, err
+	}
+
+	ca := base(1, "ca")
+	ca.IsCA, ca.BasicConstraintsValid, ca.KeyUsage = true, true, stdx509.KeyUsageCertSign
+	ca.MaxPathLen, ca.MaxPathLenZero = 0, true
+	c, err := parse(ca, ca)
+	if err != nil || !c.CanSign() || c.MaxPathLen != 0 || !c.HasKeyUsage || c.KeyUsage != UsageCertSign {
+		t.Fatalf("CA: %v, CanSign %v, MaxPathLen %d, KeyUsage %#x", err, c.CanSign(), c.MaxPathLen, c.KeyUsage)
+	}
+	ca.MaxPathLen, ca.MaxPathLenZero = 300, false
+	if c, _ = parse(ca, ca); c.MaxPathLen != 300 {
+		t.Errorf("MaxPathLen %d, want 300", c.MaxPathLen)
+	}
+	ca.MaxPathLen = -1
+	if c, _ = parse(ca, ca); c.MaxPathLen != -1 {
+		t.Errorf("MaxPathLen %d, want -1", c.MaxPathLen)
+	}
+	signer := c
+
+	// A CA without keyCertSign must not sign.
+	noSign := base(2, "ca")
+	noSign.IsCA, noSign.BasicConstraintsValid, noSign.KeyUsage = true, true, stdx509.KeyUsageDigitalSignature
+	c, _ = parse(noSign, noSign)
+	if c.CanSign() {
+		t.Error("a CA without keyCertSign can sign")
+	}
+	leafTmpl := base(3, "leaf")
+	leafTmpl.SignatureAlgorithm = stdx509.ECDSAWithSHA256
+	leaf, _ := parse(leafTmpl, noSign)
+	if leaf.CheckSignatureFrom(mem, &c) {
+		t.Error("a CA without keyCertSign signed")
+	}
+	if leaf, _ = parse(leafTmpl, ca); !leaf.CheckSignatureFrom(mem, &signer) {
+		t.Error("the CA with keyCertSign did not sign")
+	}
+
+	for _, tc := range []struct {
+		ku   stdx509.KeyUsage
+		eku  []stdx509.ExtKeyUsage
+		want bool
+	}{
+		{0, nil, true},
+		{stdx509.KeyUsageDigitalSignature, []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageServerAuth}, true},
+		{stdx509.KeyUsageDigitalSignature, []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageAny}, true},
+		{stdx509.KeyUsageKeyEncipherment, nil, false},
+		{0, []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageClientAuth}, false},
+		{stdx509.KeyUsageDigitalSignature, []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageClientAuth, stdx509.ExtKeyUsageServerAuth}, true},
+	} {
+		l := base(4, "leaf")
+		l.KeyUsage, l.ExtKeyUsage = tc.ku, tc.eku
+		c, err := parse(l, ca)
+		if err != nil || c.ForServer() != tc.want {
+			t.Errorf("key usage %#x, extended %v: %v, ForServer %v, want %v", tc.ku, tc.eku, err, c.ForServer(), tc.want)
+		}
+	}
+
+	// An unknown critical extension, and the same one not critical.
+	crit := base(5, "leaf")
+	crit.ExtraExtensions = []pkix.Extension{{Id: []int{1, 2, 3, 4}, Critical: true, Value: []byte{5, 0}}}
+	if _, err := parse(crit, ca); err != ErrCritical {
+		t.Errorf("critical extension: %v, want %v", err, ErrCritical)
+	}
+	crit.ExtraExtensions[0].Critical = false
+	if _, err := parse(crit, ca); err != nil {
+		t.Errorf("extension that is not critical: %v", err)
+	}
 }

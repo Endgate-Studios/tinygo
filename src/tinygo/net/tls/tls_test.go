@@ -424,3 +424,69 @@ func TestHelloRetry(t *testing.T) {
 		}
 	}
 }
+
+// longChain makes root -> inter1 -> inter2 -> leaf on P-256, with the leaf
+// extended key usage leafEKU, the inter2 extended key usage interEKU, and a
+// pathLenConstraint of 0 on inter1 when pathZero is set.
+func longChain(t *testing.T, leafEKU, interEKU []stdx509.ExtKeyUsage, pathZero bool) *chain {
+	t.Helper()
+	now := time.Now()
+	mk := func(tmpl, parent *stdx509.Certificate, pub *ecdsa.PublicKey, priv *ecdsa.PrivateKey) *stdx509.Certificate {
+		der, err := stdx509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := stdx509.ParseCertificate(der)
+		return c
+	}
+	ca := func(n int64, name string) *stdx509.Certificate {
+		return &stdx509.Certificate{SerialNumber: big.NewInt(n), Subject: pkix.Name{CommonName: name}, NotBefore: now.Add(-time.Hour),
+			NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: stdx509.KeyUsageCertSign,
+			SignatureAlgorithm: stdx509.ECDSAWithSHA256}
+	}
+	var keys [4]*ecdsa.PrivateKey
+	for i := range keys {
+		keys[i], _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	}
+	rootT := ca(1, "root")
+	root := mk(rootT, rootT, &keys[0].PublicKey, keys[0])
+	i1T := ca(2, "inter1")
+	i1T.MaxPathLenZero = pathZero
+	i1 := mk(i1T, root, &keys[1].PublicKey, keys[0])
+	i2T := ca(3, "inter2")
+	i2T.ExtKeyUsage = interEKU
+	i2 := mk(i2T, i1, &keys[2].PublicKey, keys[1])
+	leafT := &stdx509.Certificate{SerialNumber: big.NewInt(4), Subject: pkix.Name{CommonName: "node.example"}, DNSNames: []string{"node.example"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), SignatureAlgorithm: stdx509.ECDSAWithSHA256,
+		KeyUsage: stdx509.KeyUsageDigitalSignature, ExtKeyUsage: leafEKU}
+	leaf := mk(leafT, i2, &keys[3].PublicKey, keys[2])
+	return &chain{ca: keys[0], serverCert: stdtls.Certificate{Certificate: [][]byte{leaf.Raw, i2.Raw, i1.Raw}, PrivateKey: keys[3]}}
+}
+
+// TestUsageRejects checks the key usages and the path length of the chain.
+func TestUsageRejects(t *testing.T) {
+	server := []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageServerAuth}
+	clientOnly := []stdx509.ExtKeyUsage{stdx509.ExtKeyUsageClientAuth}
+	for _, tt := range []struct {
+		name              string
+		leafEKU, interEKU []stdx509.ExtKeyUsage
+		pathZero          bool
+		want              error
+	}{
+		{"valid", server, server, false, nil},
+		{"leaf for clients", clientOnly, nil, false, ErrUsage},
+		{"intermediate for clients", server, clientOnly, false, ErrUsage},
+		{"path too long", server, nil, true, ErrUsage},
+	} {
+		ch := longChain(t, tt.leafEKU, tt.interEKU, tt.pathZero)
+		c, srvConn, _ := client(t, &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}})
+		done := make(chan error, 1)
+		go serve(t, srvConn, ch, done)
+		if err := c.Handshake(); err != tt.want {
+			t.Errorf("%s: %v, want %v", tt.name, err, tt.want)
+		}
+		srvConn.Close()
+		<-done
+		c.Close()
+	}
+}

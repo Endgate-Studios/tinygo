@@ -27,8 +27,9 @@ type Error string
 func (e Error) Error() string { return string(e) }
 
 const (
-	ErrFormat Error = "x509: bad certificate"
-	ErrKey    Error = "x509: the key is not on P-256"
+	ErrFormat   Error = "x509: bad certificate"
+	ErrCritical Error = "x509: unknown critical extension"
+	ErrKey      Error = "x509: the key is not on P-256"
 )
 
 // Signature algorithms.
@@ -37,6 +38,8 @@ const (
 	SigECDSASHA256
 	SigECDSASHA384
 	SigRSASHA256
+	SigRSASHA384
+	SigRSASHA512
 )
 
 // Certificate is a parsed certificate. Its slices refer to the DER bytes.
@@ -59,6 +62,33 @@ type Certificate struct {
 	RSAKey    rsa.PublicKey // N refers to the DER bytes
 	dnsNames  []byte        // the content of the SAN extension, or nil
 	IsCA      bool
+	// MaxPathLen is the pathLenConstraint of a CA, or -1 without one.
+	MaxPathLen int
+	// KeyUsage has the bits of the keyUsage extension, digitalSignature
+	// first, when HasKeyUsage is set (RFC 5280 section 4.2.1.3).
+	KeyUsage    uint16
+	HasKeyUsage bool
+	// ServerAuth tells that the extKeyUsage extension allows TLS servers,
+	// when HasExtKeyUsage is set (RFC 5280 section 4.2.1.12).
+	ServerAuth     bool
+	HasExtKeyUsage bool
+}
+
+// Bits of KeyUsage.
+const (
+	UsageDigitalSignature = 0x8000
+	UsageCertSign         = 0x0400
+)
+
+// CanSign reports whether c is a CA that may sign certificates.
+func (c *Certificate) CanSign() bool {
+	return c.IsCA && (!c.HasKeyUsage || c.KeyUsage&UsageCertSign != 0)
+}
+
+// ForServer reports whether the key of c may sign for a TLS 1.3 server: the
+// extended key usage allows serverAuth and the key usage digitalSignature.
+func (c *Certificate) ForServer() bool {
+	return (!c.HasExtKeyUsage || c.ServerAuth) && (!c.HasKeyUsage || c.KeyUsage&UsageDigitalSignature != 0)
 }
 
 // Object identifiers, the DER content of the OID.
@@ -66,12 +96,18 @@ var (
 	oidECDSASHA256 = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02}
 	oidECDSASHA384 = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03}
 	oidRSASHA256   = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b}
+	oidRSASHA384   = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c}
+	oidRSASHA512   = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d}
 	oidRSA         = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01}
 	oidECPublicKey = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01}
 	oidP256        = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07}
 	oidP384        = []byte{0x2b, 0x81, 0x04, 0x00, 0x22}
 	oidSAN         = []byte{0x55, 0x1d, 0x11}
 	oidBasic       = []byte{0x55, 0x1d, 0x13}
+	oidKeyUsage    = []byte{0x55, 0x1d, 0x0f}
+	oidExtKeyUsage = []byte{0x55, 0x1d, 0x25}
+	oidAnyUsage    = []byte{0x55, 0x1d, 0x25, 0x00}
+	oidServerAuth  = []byte{0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01}
 )
 
 // DER tags.
@@ -124,7 +160,7 @@ func expect(b []byte, want byte) (content, whole, rest []byte, ok bool) {
 
 // Parse parses der into c.
 func Parse(der []byte, c *Certificate) error {
-	*c = Certificate{Raw: der}
+	*c = Certificate{Raw: der, MaxPathLen: -1}
 	cert, _, _, ok := expect(der, tagSequence)
 	if !ok {
 		return ErrFormat
@@ -149,6 +185,10 @@ func Parse(der []byte, c *Certificate) error {
 		c.SigAlg = SigECDSASHA384
 	case equal(oid, oidRSASHA256):
 		c.SigAlg = SigRSASHA256
+	case equal(oid, oidRSASHA384):
+		c.SigAlg = SigRSASHA384
+	case equal(oid, oidRSASHA512):
+		c.SigAlg = SigRSASHA512
 	}
 	sig, _, _, ok := expect(rest, tagBitString)
 	if !ok || len(sig) < 1 || sig[0] != 0 {
@@ -288,10 +328,13 @@ func parseExtensions(b []byte, c *Certificate) error {
 		if !ok {
 			return ErrFormat
 		}
-		if len(r) > 0 && r[0] == tagBoolean { // critical
-			if _, _, r, ok = expect(r, tagBoolean); !ok {
+		critical := false
+		if len(r) > 0 && r[0] == tagBoolean {
+			var v []byte
+			if v, _, r, ok = expect(r, tagBoolean); !ok || len(v) != 1 {
 				return ErrFormat
 			}
+			critical = v[0] != 0
 		}
 		value, _, _, ok := expect(r, tagOctetString)
 		if !ok {
@@ -309,8 +352,48 @@ func parseExtensions(b []byte, c *Certificate) error {
 			if !ok {
 				return ErrFormat
 			}
-			if ca, _, _, ok := expect(bc, tagBoolean); ok && len(ca) == 1 && ca[0] != 0 {
-				c.IsCA = true
+			if ca, _, rest, ok := expect(bc, tagBoolean); ok {
+				c.IsCA = len(ca) == 1 && ca[0] != 0
+				bc = rest
+			}
+			if n, _, _, ok := expect(bc, tagInteger); ok {
+				if len(n) == 0 || len(n) > 2 || n[0]&0x80 != 0 {
+					return ErrFormat
+				}
+				c.MaxPathLen = int(n[0])
+				if len(n) == 2 {
+					c.MaxPathLen = c.MaxPathLen<<8 | int(n[1])
+				}
+			}
+		case equal(oid, oidKeyUsage):
+			bits, _, _, ok := expect(value, tagBitString)
+			if !ok || len(bits) < 2 || len(bits) > 3 {
+				return ErrFormat
+			}
+			c.KeyUsage = uint16(bits[1]) << 8
+			if len(bits) == 3 {
+				c.KeyUsage |= uint16(bits[2])
+			}
+			c.HasKeyUsage = true
+		case equal(oid, oidExtKeyUsage):
+			list, _, _, ok := expect(value, tagSequence)
+			if !ok {
+				return ErrFormat
+			}
+			for len(list) > 0 {
+				u, _, rest, ok := expect(list, tagOID)
+				if !ok {
+					return ErrFormat
+				}
+				list = rest
+				if equal(u, oidServerAuth) || equal(u, oidAnyUsage) {
+					c.ServerAuth = true
+				}
+			}
+			c.HasExtKeyUsage = true
+		default:
+			if critical {
+				return ErrCritical
 			}
 		}
 	}
@@ -396,9 +479,10 @@ func matchHost(pattern []byte, host string) bool {
 }
 
 // CheckSignatureFrom reports whether parent, a CA, signed c with ECDSA on
-// P-256 or P-384 with SHA-256 or SHA-384, or with RSA PKCS #1 v1.5 and SHA-256.
+// P-256 or P-384 with SHA-256 or SHA-384, or with RSA PKCS #1 v1.5 and SHA-256,
+// SHA-384 or SHA-512.
 func (c *Certificate) CheckSignatureFrom(mem Memory, parent *Certificate) bool {
-	if !parent.IsCA || !equal(c.Issuer, parent.Subject) {
+	if !parent.CanSign() || !equal(c.Issuer, parent.Subject) {
 		return false
 	}
 	switch {
@@ -411,20 +495,38 @@ func (c *Certificate) CheckSignatureFrom(mem Memory, parent *Certificate) bool {
 		return parseSig(c.Sig, r[:], s[:]) && p256.VerifyECDSA(mem, h[:], &r, &s, &parent.KeyX, &parent.KeyY)
 	case parent.P384:
 		return VerifyECDSA384(c.SigAlg, c.TBS, c.Sig, parent.Key384)
-	case parent.RSA && c.SigAlg == SigRSASHA256:
-		return VerifyRSA(mem, c.TBS, c.Sig, &parent.RSAKey)
+	case parent.RSA:
+		return VerifyRSA(mem, c.SigAlg, c.TBS, c.Sig, &parent.RSAKey)
 	}
 	return false
 }
 
-// VerifyRSA checks a PKCS #1 v1.5 signature over the SHA-256 of msg.
-func VerifyRSA(mem Memory, msg, sig []byte, k *rsa.PublicKey) bool {
-	var d sha256.Digest
-	d.Reset(sha256.Init, 0)
-	d.Write(msg)
-	var h [sha256.Size]byte
-	d.Sum(&h)
-	return rsa.VerifyPKCS1v15(mem, k, &h, sig)
+// VerifyRSA checks a PKCS #1 v1.5 signature over msg, with the hash of alg:
+// SigRSASHA256, SigRSASHA384 or SigRSASHA512.
+func VerifyRSA(mem Memory, alg int, msg, sig []byte, k *rsa.PublicKey) bool {
+	var h [sha512.Size]byte
+	var hash []byte
+	switch alg {
+	case SigRSASHA256:
+		var d sha256.Digest
+		d.Reset(sha256.Init, 0)
+		d.Write(msg)
+		d.Sum((*[sha256.Size]byte)(h[:]))
+		hash = h[:sha256.Size]
+	case SigRSASHA384, SigRSASHA512:
+		var d sha512.Digest
+		init, n := sha512.Init384, sha512.Size384
+		if alg == SigRSASHA512 {
+			init, n = sha512.Init512, sha512.Size
+		}
+		d.Reset(init, 0)
+		d.Write(msg)
+		d.Sum(&h)
+		hash = h[:n]
+	default:
+		return false
+	}
+	return rsa.VerifyPKCS1v15Digest(mem, k, hash, sig)
 }
 
 // VerifyECDSA checks a DER ECDSA-Sig-Value over the SHA-256 of msg.

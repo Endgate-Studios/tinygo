@@ -1,5 +1,5 @@
-// Package rsa verifies RSA signatures with SHA-256 (RFC 8017): PKCS #1 v1.5
-// for certificates and PSS for TLS 1.3. The inputs are public, so the code is
+// Package rsa verifies RSA signatures (RFC 8017): PKCS #1 v1.5 with SHA-256,
+// SHA-384 or SHA-512 for certificates, and PSS with SHA-256 for TLS 1.3. The inputs are public, so the code is
 // not constant time. The working numbers come from an injected allocator, and
 // tinygo/crypto/internal/mpi multiplies, so the RSA accelerator does it on the
 // ESP32-S3.
@@ -86,12 +86,34 @@ func toBytes(b []byte, z []uint32) {
 	}
 }
 
-// digestInfo is the DER prefix of a SHA-256 DigestInfo (RFC 8017 section 9.2).
-var digestInfo = []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
+// The DER prefixes of a DigestInfo with SHA-256, SHA-384 and SHA-512 (RFC 8017
+// section 9.2, note 1).
+var (
+	digestInfo256 = []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
+	digestInfo384 = []byte{0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30}
+	digestInfo512 = []byte{0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40}
+)
 
 // VerifyPKCS1v15 reports whether sig is a PKCS #1 v1.5 signature of hash, a
 // SHA-256 digest (RFC 8017 section 8.2.2).
 func VerifyPKCS1v15(mem Memory, k *PublicKey, hash *[sha256.Size]byte, sig []byte) bool {
+	return VerifyPKCS1v15Digest(mem, k, hash[:], sig)
+}
+
+// VerifyPKCS1v15Digest is VerifyPKCS1v15 for a SHA-256, SHA-384 or SHA-512
+// digest, which the length of hash tells.
+func VerifyPKCS1v15Digest(mem Memory, k *PublicKey, hash, sig []byte) bool {
+	var prefix []byte
+	switch len(hash) {
+	case 32:
+		prefix = digestInfo256
+	case 48:
+		prefix = digestInfo384
+	case 64:
+		prefix = digestInfo512
+	default:
+		return false
+	}
 	em := memory.MakeSlice[byte](mem, len(k.N))
 	if em == nil {
 		return false
@@ -101,7 +123,7 @@ func VerifyPKCS1v15(mem Memory, k *PublicKey, hash *[sha256.Size]byte, sig []byt
 		return false
 	}
 	// EM = 0x00 || 0x01 || PS || 0x00 || DigestInfo || hash, with PS of 0xff.
-	tLen := len(digestInfo) + sha256.Size
+	tLen := len(prefix) + len(hash)
 	if len(em) < tLen+11 || em[0] != 0 || em[1] != 1 {
 		return false
 	}
@@ -111,8 +133,8 @@ func VerifyPKCS1v15(mem Memory, k *PublicKey, hash *[sha256.Size]byte, sig []byt
 		ok &= subtle.ConstantTimeByteEq(b, 0xff)
 	}
 	ok &= subtle.ConstantTimeByteEq(em[len(em)-tLen-1], 0)
-	ok &= subtle.ConstantTimeCompare(em[len(em)-tLen:len(em)-sha256.Size], digestInfo)
-	ok &= subtle.ConstantTimeCompare(em[len(em)-sha256.Size:], hash[:])
+	ok &= subtle.ConstantTimeCompare(em[len(em)-tLen:len(em)-len(hash)], prefix)
+	ok &= subtle.ConstantTimeCompare(em[len(em)-len(hash):], hash)
 	return ok == 1
 }
 

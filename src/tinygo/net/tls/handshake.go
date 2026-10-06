@@ -471,6 +471,9 @@ func (c *Conn) checkChain(st *hsState) error {
 	if !leaf.P256 && !leaf.RSA {
 		return ErrUnsupported
 	}
+	if !leaf.ForServer() {
+		return ErrUsage
+	}
 	if !leaf.VerifyHostname(c.cfg.ServerName) {
 		return ErrName
 	}
@@ -489,6 +492,11 @@ func (c *Conn) checkChain(st *hsState) error {
 		if err := c.checkTime(cert); err != nil {
 			return err
 		}
+		// cert signed the one before it, so it is a CA of the path with i-1
+		// CAs below it (RFC 5280 sections 4.2.1.9 and 4.2.1.12).
+		if i > 0 && (cert.HasExtKeyUsage && !cert.ServerAuth || cert.MaxPathLen >= 0 && i-1 > cert.MaxPathLen) {
+			return ErrUsage
+		}
 		for k := range c.cfg.Roots {
 			r := &c.cfg.Roots[k]
 			switch {
@@ -500,8 +508,8 @@ func (c *Conn) checkChain(st *hsState) error {
 				if x509.VerifyECDSA(c.mem, cert.TBS, cert.Sig, &r.X, &r.Y) {
 					return nil
 				}
-			case r.RSA.N != nil && cert.SigAlg == x509.SigRSASHA256:
-				if x509.VerifyRSA(c.mem, cert.TBS, cert.Sig, &r.RSA) {
+			case r.RSA.N != nil:
+				if x509.VerifyRSA(c.mem, cert.SigAlg, cert.TBS, cert.Sig, &r.RSA) {
 					return nil
 				}
 			}
