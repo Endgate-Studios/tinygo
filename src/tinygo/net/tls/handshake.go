@@ -7,6 +7,7 @@ import (
 	"runtime/memory"
 	"tinygo/crypto/hkdf"
 	"tinygo/crypto/p256"
+	"tinygo/crypto/rsa"
 	"tinygo/crypto/sha256"
 	"tinygo/crypto/x509"
 )
@@ -27,6 +28,8 @@ const (
 	suiteAES128GCMSHA256 = 0x1301
 	groupSecp256r1       = 0x0017
 	sigECDSAP256SHA256   = 0x0403
+	sigRSAPSSSHA256      = 0x0804 // rsa_pss_rsae_sha256
+	sigRSAPKCS1SHA256    = 0x0401 // only for certificates
 	maxCerts             = 4
 )
 
@@ -44,9 +47,16 @@ type hsState struct {
 	cHS, sHS         [sha256.Size]byte
 	certs            [maxCerts]x509.Certificate
 	nCerts           int
+	// leafN is a copy of the RSA modulus of the leaf: the certificates refer
+	// to the handshake buffer, which addTranscript moves.
+	leafN [rsa.MaxBits / 8]byte
+	leafE uint32
+	nLen  int
 }
 
-// Handshake runs the TLS 1.3 handshake.
+// Handshake runs the TLS 1.3 handshake. It does not go on after an error of
+// the transport, so use no read deadline or a long one. After the handshake,
+// Read goes on after a timeout.
 func (c *Conn) Handshake() error {
 	if c.handshaked {
 		return nil
@@ -140,6 +150,10 @@ func (c *Conn) handshake(st *hsState) error {
 	}
 	if err := c.checkChain(st); err != nil {
 		return err
+	}
+	if leaf := &st.certs[0]; leaf.RSA {
+		st.nLen = copy(st.leafN[:], leaf.RSAKey.N)
+		st.leafE = leaf.RSAKey.E
 	}
 	c.addTranscript()
 	th = c.hash()
@@ -244,7 +258,8 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		b = append(b, name...)
 	}
 	b = append(b, 0, 0x0a, 0, 4, 0, 2, groupSecp256r1>>8, groupSecp256r1&0xff)
-	b = append(b, 0, 0x0d, 0, 4, 0, 2, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff)
+	b = append(b, 0, 0x0d, 0, 8, 0, 6, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
+		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff)
 	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
 	b = append(b, 0, 0x33, 0, 71, 0, 69, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
 	b = append(b, st.pubX[:]...)
@@ -381,7 +396,7 @@ func parseCertificates(b []byte, st *hsState) error {
 // chain.
 func (c *Conn) checkChain(st *hsState) error {
 	leaf := &st.certs[0]
-	if !leaf.P256 {
+	if !leaf.P256 && !leaf.RSA {
 		return ErrUnsupported
 	}
 	if !leaf.VerifyHostname(c.cfg.ServerName) {
@@ -402,10 +417,15 @@ func (c *Conn) checkChain(st *hsState) error {
 		if err := c.checkTime(cert); err != nil {
 			return err
 		}
-		if cert.SigAlg == x509.SigECDSASHA256 {
-			for k := range c.cfg.Roots {
-				r := &c.cfg.Roots[k]
+		for k := range c.cfg.Roots {
+			r := &c.cfg.Roots[k]
+			switch {
+			case r.RSA.N == nil && cert.SigAlg == x509.SigECDSASHA256:
 				if x509.VerifyECDSA(c.mem, cert.TBS, cert.Sig, &r.X, &r.Y) {
+					return nil
+				}
+			case r.RSA.N != nil && cert.SigAlg == x509.SigRSASHA256:
+				if x509.VerifyRSA(c.mem, cert.TBS, cert.Sig, &r.RSA) {
 					return nil
 				}
 			}
@@ -428,9 +448,10 @@ func (c *Conn) checkTime(cert *x509.Certificate) error {
 // checkVerify checks the CertificateVerify signature of the leaf key over
 // the transcript hash th (section 4.4.3).
 func (c *Conn) checkVerify(b []byte, st *hsState, th []byte) error {
-	if len(b) < 4 || int(b[0])<<8|int(b[1]) != sigECDSAP256SHA256 {
-		return ErrUnsupported
+	if len(b) < 4 {
+		return ErrHandshake
 	}
+	alg := int(b[0])<<8 | int(b[1])
 	sig := b[4:]
 	if int(b[2])<<8|int(b[3]) != len(sig) {
 		return ErrHandshake
@@ -442,9 +463,26 @@ func (c *Conn) checkVerify(b []byte, st *hsState, th []byte) error {
 	}
 	copy(msg[64:], context)
 	copy(msg[64+len(context)+1:], th)
+	// The certificates refer to moved bytes now. The key arrays and leafN
+	// are copies.
 	leaf := &st.certs[0]
-	if !x509.VerifyECDSA(c.mem, msg[:], sig, &leaf.KeyX, &leaf.KeyY) {
-		return ErrSignature
+	switch {
+	case alg == sigECDSAP256SHA256 && leaf.P256:
+		if !x509.VerifyECDSA(c.mem, msg[:], sig, &leaf.KeyX, &leaf.KeyY) {
+			return ErrSignature
+		}
+	case alg == sigRSAPSSSHA256 && leaf.RSA:
+		var d sha256.Digest
+		d.Reset(sha256.Init, 0)
+		d.Write(msg[:])
+		var h [sha256.Size]byte
+		d.Sum(&h)
+		k := rsa.PublicKey{N: st.leafN[:st.nLen], E: st.leafE}
+		if !rsa.VerifyPSS(c.mem, &k, &h, sig) {
+			return ErrSignature
+		}
+	default:
+		return ErrUnsupported
 	}
 	return nil
 }

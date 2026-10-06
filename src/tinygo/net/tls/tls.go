@@ -1,9 +1,8 @@
-// Package tls is a TLS 1.3 client (RFC 8446) with one profile:
-// TLS_AES_128_GCM_SHA256, key exchange on secp256r1 and server certificates
-// with ECDSA P-256 and SHA-256. It checks the server name, the validity, the
-// certificate chain up to a configured P-256 key or a pinned server key, and
-// the CertificateVerify signature. Its buffers come from an injected
-// allocator.
+// Package tls is a TLS 1.3 client (RFC 8446) with TLS_AES_128_GCM_SHA256,
+// key exchange on secp256r1 and server certificates with ECDSA P-256 or RSA,
+// with SHA-256. It checks the server name, the validity, the certificate
+// chain up to a configured CA key or a pinned server key, and the
+// CertificateVerify signature. Its buffers come from an injected allocator.
 package tls
 
 import (
@@ -11,7 +10,9 @@ import (
 	"time"
 
 	"runtime/memory"
+	"tinygo/crypto/rsa"
 	"tinygo/crypto/sha256"
+	"tinygo/crypto/x509"
 )
 
 // RawConn is the transport, for example an ip.TCPConn.
@@ -65,8 +66,28 @@ const (
 	hsBufferSize = 8 << 10
 )
 
-// PublicKey is a P-256 key of a trusted CA.
-type PublicKey struct{ X, Y [32]byte }
+// PublicKey is the key of a trusted CA: a P-256 key, or an RSA key when
+// RSA.N is not nil.
+type PublicKey struct {
+	X, Y [32]byte
+	RSA  rsa.PublicKey
+}
+
+// AnchorFromCertificate gives the key of a CA certificate in DER, for
+// Config.Roots. An RSA key refers to der, so der must stay.
+func AnchorFromCertificate(der []byte) (PublicKey, error) {
+	var c x509.Certificate
+	if err := x509.Parse(der, &c); err != nil {
+		return PublicKey{}, err
+	}
+	switch {
+	case c.P256:
+		return PublicKey{X: c.KeyX, Y: c.KeyY}, nil
+	case c.RSA:
+		return PublicKey{RSA: c.RSAKey}, nil
+	}
+	return PublicKey{}, ErrUnsupported
+}
 
 // Config is the configuration of a connection.
 type Config struct {
@@ -91,6 +112,7 @@ type Conn struct {
 	rng    io.Reader
 	cfg    *Config
 	rx, tx []byte
+	rxHave int    // the bytes of the current record in rx, kept after a timeout
 	hs     []byte // handshake reassembly, during the handshake
 	hsLen  int
 
@@ -213,20 +235,23 @@ func alertError(content []byte) error {
 
 // readRecord reads one record. Protected records are decrypted, and the
 // content type is the inner type. The content is valid until the next call.
+// After an error of the transport, for example a read deadline, the bytes of
+// the record so far stay, and the next call goes on with them.
 func (c *Conn) readRecord() (byte, []byte, error) {
 	for {
-		h := c.rx[:headerLen]
-		if err := readFull(c.raw, h); err != nil {
+		if err := c.fill(headerLen); err != nil {
 			return 0, nil, err
 		}
+		h := c.rx[:headerLen]
 		n := int(h[3])<<8 | int(h[4])
 		if n > maxRecord || n > len(c.rx)-headerLen {
 			return 0, nil, ErrRecord
 		}
-		body := c.rx[headerLen : headerLen+n]
-		if err := readFull(c.raw, body); err != nil {
+		if err := c.fill(headerLen + n); err != nil {
 			return 0, nil, err
 		}
+		c.rxHave = 0
+		body := c.rx[headerLen : headerLen+n]
 		typ := h[0]
 		if typ == recordCCS {
 			continue // compatibility mode (appendix D.4)
@@ -280,11 +305,12 @@ func (c *Conn) writeRecord(typ byte, data []byte) error {
 	return writeFull(c.raw, b[:headerLen+total])
 }
 
-func readFull(r RawConn, b []byte) error {
-	for len(b) > 0 {
-		n, err := r.Read(b)
-		b = b[n:]
-		if err != nil && len(b) > 0 {
+// fill reads until rx holds need bytes of the record.
+func (c *Conn) fill(need int) error {
+	for c.rxHave < need {
+		n, err := c.raw.Read(c.rx[c.rxHave:need])
+		c.rxHave += n
+		if err != nil && c.rxHave < need {
 			return err
 		}
 	}
