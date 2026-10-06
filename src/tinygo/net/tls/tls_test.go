@@ -82,11 +82,16 @@ func serve(t *testing.T, conn net.Conn, ch *chain, done chan<- error) {
 
 // serveCurve is serve with only the key exchange group curve.
 func serveCurve(t *testing.T, conn net.Conn, ch *chain, curve stdtls.CurveID, done chan<- error) {
-	srv := stdtls.Server(conn, &stdtls.Config{
+	serveConfig(conn, &stdtls.Config{
 		Certificates:     []stdtls.Certificate{ch.serverCert},
 		MinVersion:       stdtls.VersionTLS13,
 		CurvePreferences: []stdtls.CurveID{curve},
-	})
+	}, done)
+}
+
+// serveConfig is serve with the server configuration cfg.
+func serveConfig(conn net.Conn, cfg *stdtls.Config, done chan<- error) {
+	srv := stdtls.Server(conn, cfg)
 	if err := srv.Handshake(); err != nil {
 		done <- err
 		return
@@ -488,5 +493,69 @@ func TestUsageRejects(t *testing.T) {
 		srvConn.Close()
 		<-done
 		c.Close()
+	}
+}
+
+// TestResumption resumes with the ticket of a first connection, also after a
+// HelloRetryRequest, and checks that the client does not offer the ticket to
+// another name or after it expired.
+func TestResumption(t *testing.T) {
+	ch := newChain(t, "node.example")
+	srvCfg := &stdtls.Config{Certificates: []stdtls.Certificate{ch.serverCert}, MinVersion: stdtls.VersionTLS13,
+		CurvePreferences: []stdtls.CurveID{stdtls.X25519}}
+	var sess Session
+	run := func(name string, cfg *Config, scfg *stdtls.Config) (*Conn, error) {
+		a, b := connPair(t)
+		defer a.Close()
+		defer b.Close()
+		mem, _ := arena.NewHeap(make([]byte, 48<<10))
+		c := Client(pipeConn{a}, mem, rand.Reader, cfg)
+		done := make(chan error, 1)
+		go serveConfig(b, scfg, done)
+		err := c.Handshake()
+		if err == nil {
+			buf := make([]byte, 64)
+			n, rerr := c.Read(buf)
+			if rerr != nil || string(buf[:n]) != "hello client" {
+				t.Fatalf("%s: read %q %v", name, buf[:n], rerr)
+			}
+		}
+		b.Close()
+		<-done
+		c.Close()
+		if mem.Stats().InUse != 0 {
+			t.Errorf("%s: memory in use after Close: %d", name, mem.Stats().InUse)
+		}
+		return c, err
+	}
+
+	c, err := run("full", &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}, Session: &sess}, srvCfg)
+	if err != nil || c.Resumed() || sess.ticketLen == 0 {
+		t.Fatalf("full handshake: %v, resumed %v, ticket %d bytes", err, c.Resumed(), sess.ticketLen)
+	}
+	// Without roots, only a resumed handshake can succeed.
+	c, err = run("resumed", &Config{ServerName: "node.example", Session: &sess}, srvCfg)
+	if err != nil || !c.Resumed() {
+		t.Fatalf("resumption: %v, resumed %v", err, c.Resumed())
+	}
+	p256Cfg := srvCfg.Clone() // the same ticket keys
+	p256Cfg.CurvePreferences = []stdtls.CurveID{stdtls.CurveP256}
+	c, err = run("resumed after HelloRetryRequest", &Config{ServerName: "node.example", Session: &sess}, p256Cfg)
+	if err != nil || !c.Resumed() {
+		t.Fatalf("resumption after HelloRetryRequest: %v, resumed %v", err, c.Resumed())
+	}
+	// A full handshake, so the name check of the certificate fails.
+	if _, err = run("other name", &Config{ServerName: "other.example", Session: &sess}, srvCfg); err != ErrName {
+		t.Errorf("other name: %v, want %v", err, ErrName)
+	}
+	bad := sess
+	bad.psk[0] ^= 1
+	if _, err = run("wrong PSK", &Config{ServerName: "node.example", Session: &bad}, srvCfg); err == nil {
+		t.Error("a wrong PSK resumed")
+	}
+	old := sess
+	old.received = old.received.Add(-old.lifetime - time.Second)
+	if _, err = run("expired", &Config{ServerName: "node.example", Session: &old}, srvCfg); err != ErrCertificate {
+		t.Errorf("expired ticket: %v, want %v", err, ErrCertificate)
 	}
 }

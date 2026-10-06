@@ -54,6 +54,8 @@ type hsState struct {
 	sessionID        [32]byte
 	cookie           [maxCookie]byte
 	cookieLen        int
+	offeredPSK       bool // the ClientHello has the ticket of Config.Session
+	resumed          bool // the server accepted it
 	hsSecret         [sha256.Size]byte
 	cHS, sHS         [sha256.Size]byte
 	certs            [maxCerts]x509.Certificate
@@ -171,7 +173,11 @@ func (c *Conn) handshake(st *hsState) error {
 	}
 	clear(st.priv[:])
 	clear(st.xPriv[:])
-	hkdf.Extract(&early, nil, zero[:])
+	if st.resumed {
+		earlySecret(&early, c.cfg.Session.psk[:])
+	} else {
+		earlySecret(&early, nil)
+	}
 	deriveSecret(&derived, early[:], "derived", emptyHash[:])
 	hkdf.Extract(&st.hsSecret, derived[:], shared[:])
 	clear(shared[:])
@@ -189,37 +195,41 @@ func (c *Conn) handshake(st *hsState) error {
 		return ErrHandshake
 	}
 	c.addTranscript()
-
-	if typ, body, err = c.readHandshake(); err != nil {
-		return err
-	}
-	if typ != hsCertificate {
-		return ErrHandshake
-	}
-	if err := parseCertificates(body, st); err != nil {
-		return err
-	}
-	if err := c.checkChain(st); err != nil {
-		return err
-	}
-	if leaf := &st.certs[0]; leaf.RSA {
-		st.nLen = copy(st.leafN[:], leaf.RSAKey.N)
-		st.leafE = leaf.RSAKey.E
-	}
-	c.addTranscript()
 	th = c.hash()
 
-	if typ, body, err = c.readHandshake(); err != nil {
-		return err
+	// A resumed session has no certificates (section 2.2).
+	if !st.resumed {
+		if typ, body, err = c.readHandshake(); err != nil {
+			return err
+		}
+		if typ != hsCertificate {
+			return ErrHandshake
+		}
+		if err := parseCertificates(body, st); err != nil {
+			return err
+		}
+		if err := c.checkChain(st); err != nil {
+			return err
+		}
+		if leaf := &st.certs[0]; leaf.RSA {
+			st.nLen = copy(st.leafN[:], leaf.RSAKey.N)
+			st.leafE = leaf.RSAKey.E
+		}
+		c.addTranscript()
+		th = c.hash()
+
+		if typ, body, err = c.readHandshake(); err != nil {
+			return err
+		}
+		if typ != hsCertificateVerify {
+			return ErrHandshake
+		}
+		if err := c.checkVerify(body, st, th[:]); err != nil {
+			return err
+		}
+		c.addTranscript()
+		th = c.hash()
 	}
-	if typ != hsCertificateVerify {
-		return ErrHandshake
-	}
-	if err := c.checkVerify(body, st, th[:]); err != nil {
-		return err
-	}
-	c.addTranscript()
-	th = c.hash()
 
 	if typ, body, err = c.readHandshake(); err != nil {
 		return err
@@ -241,7 +251,6 @@ func (c *Conn) handshake(st *hsState) error {
 	hkdf.Extract(&master, derived[:], zero[:])
 	deriveSecret(&c.cAP, master[:], "c ap traffic", th[:])
 	deriveSecret(&c.sAP, master[:], "s ap traffic", th[:])
-	clear(master[:])
 	clear(early[:])
 	clear(derived[:])
 
@@ -257,6 +266,12 @@ func (c *Conn) handshake(st *hsState) error {
 	var vd [sha256.Size]byte
 	finished(&vd, st.cHS[:], th[:])
 	copy(fin[4:], vd[:])
+	// The resumption secret covers the transcript up to the client Finished.
+	c.transcript.Write(fin[:])
+	th = c.hash()
+	deriveSecret(&c.resMaster, master[:], "res master", th[:])
+	clear(master[:])
+	c.resumed = st.resumed
 	if err := c.writeRecord(recordHandshake, fin[:]); err != nil {
 		return err
 	}
@@ -319,10 +334,16 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		b = append(b, 0, 0x2c, byte((n+2)>>8), byte(n+2), byte(n>>8), byte(n))
 		b = append(b, st.cookie[:n]...)
 	}
-	el := len(b) - ext - 2
-	b[ext], b[ext+1] = byte(el>>8), byte(el)
-	l := len(b) - 4
-	b[1], b[2], b[3] = byte(l>>16), byte(l>>8), byte(l)
+	// Without psk_key_exchange_modes the server sends no tickets (section
+	// 4.6.1). Only psk_dhe_ke, so each connection has an ECDHE key.
+	if c.cfg.Session != nil {
+		b = append(b, 0, 0x2d, 0, 2, 1, 1)
+	}
+	if age, ok := c.cfg.Session.usable(name); ok {
+		b = c.appendPSK(b, ext, st, age)
+	} else {
+		setLengths(b, ext)
+	}
 	c.transcript.Write(b)
 	return c.writeRecord(recordHandshake, b)
 }
@@ -402,6 +423,11 @@ func parseServerHello(b []byte, st *hsState, x, y *[32]byte) (retry bool, err er
 				return false, ErrUnsupported
 			}
 			st.cookieLen = copy(st.cookie[:], v[2:])
+		case 0x29: // pre_shared_key: the index of the ticket
+			if retry || !st.offeredPSK || n != 2 || v[0] != 0 || v[1] != 0 {
+				return false, ErrUnsupported
+			}
+			st.resumed = true
 		case 0x33: // key_share
 			switch {
 			case retry:
@@ -583,6 +609,9 @@ func (c *Conn) postHandshake(b []byte) error {
 		b = b[4+n:]
 		switch typ {
 		case hsNewSessionTicket:
+			if err := c.storeTicket(body); err != nil {
+				return err
+			}
 		case hsKeyUpdate:
 			if n != 1 {
 				return ErrHandshake

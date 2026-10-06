@@ -107,6 +107,9 @@ type Config struct {
 	Pins [][sha256.Size]byte
 	// WriteBuffer is the size of the send buffer. The default is 2048.
 	WriteBuffer int
+	// Session, when not nil, keeps the last ticket of the server for the
+	// next connection, which then skips the certificate checks.
+	Session *Session
 }
 
 // Conn is a TLS client connection.
@@ -122,6 +125,8 @@ type Conn struct {
 
 	read, write trafficKeys
 	cAP, sAP    [sha256.Size]byte // the application traffic secrets
+	resMaster   [sha256.Size]byte // the resumption master secret
+	resumed     bool
 
 	data       []byte // decrypted application data not yet read
 	transcript sha256.Digest
@@ -135,6 +140,9 @@ type Conn struct {
 func Client(raw RawConn, mem Memory, rng io.Reader, cfg *Config) *Conn {
 	return &Conn{raw: raw, mem: mem, rng: rng, cfg: cfg}
 }
+
+// Resumed reports whether the handshake used the ticket of Config.Session.
+func (c *Conn) Resumed() bool { return c.resumed }
 
 // SetReadDeadline sets the deadline of Read.
 func (c *Conn) SetReadDeadline(t time.Time) { c.raw.SetReadDeadline(t) }
@@ -216,6 +224,7 @@ func (c *Conn) free() {
 	c.write.close()
 	clear(c.cAP[:])
 	clear(c.sAP[:])
+	clear(c.resMaster[:])
 	c.release(&c.rx)
 	c.release(&c.tx)
 	c.release(&c.hs)

@@ -191,7 +191,7 @@ func runFuzz(t *testing.T, ch *chain, heap, data []byte) (error, []byte) {
 	}
 	mem, _ := arena.NewHeap(heap)
 	srv := &fuzzServer{data: data[1:], mode: data[0] % 3, mem: mem}
-	c := Client(srv, mem, &countReader{}, &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}})
+	c := Client(srv, mem, &countReader{}, &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}, Session: &Session{}})
 	buf := make([]byte, 256)
 	var first error
 	var got []byte
