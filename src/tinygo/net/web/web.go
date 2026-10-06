@@ -198,7 +198,7 @@ func (s *Server) serve(c *ip.TCPConn) {
 
 // readHead reads until the empty line. It gives the head without the empty
 // line, and the bytes after it.
-func readHead(c *ip.TCPConn, buf []byte) (head, rest []byte, err error) {
+func readHead(c io.Reader, buf []byte) (head, rest []byte, err error) {
 	n := 0
 	for {
 		if i := indexHeadEnd(buf[:n]); i >= 0 {
@@ -363,22 +363,54 @@ func Get(s *ip.Stack, host string, port uint16, path string, buf []byte, body io
 		return 0, err
 	}
 	defer c.Close()
+	return Do(c, "GET", host, path, "", nil, buf, body)
+}
 
+// ErrBadBody tells that a chunked body is not valid.
+var ErrBadBody = errors.New("web: bad chunked body")
+
+// Do sends a request on conn, for example an ip.TCPConn or a tls.Conn, and
+// copies the body of the response to body. header has more header lines,
+// each with CRLF at the end, and reqBody is the body of the request. buf
+// holds the request head and the response head, and then the body as it
+// arrives. The body ends at its Content-Length, at the last chunk of a
+// chunked body, or when the server closes. It gives the status code.
+func Do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []byte, body io.Writer) (int, error) {
 	req := buf[:0]
-	for _, part := range [...]string{"GET ", path, " HTTP/1.1\r\nHost: ", host, "\r\nConnection: close\r\n\r\n"} {
+	for _, part := range [...]string{method, " ", path, " HTTP/1.1\r\nHost: ", host, "\r\nConnection: close\r\n", header} {
 		if len(req)+len(part) > len(buf) {
 			return 0, ErrHeadTooLarge
 		}
 		req = append(req, part...)
 	}
-	if _, err := c.Write(req); err != nil {
+	if reqBody != nil {
+		var num [20]byte
+		n := strconv.AppendInt(num[:0], int64(len(reqBody)), 10)
+		if len(req)+len("Content-Length: \r\n")+len(n) > len(buf) {
+			return 0, ErrHeadTooLarge
+		}
+		req = append(req, "Content-Length: "...)
+		req = append(req, n...)
+		req = append(req, "\r\n"...)
+	}
+	if len(req)+2 > len(buf) {
+		return 0, ErrHeadTooLarge
+	}
+	req = append(req, "\r\n"...)
+	if _, err := conn.Write(req); err != nil {
 		return 0, err
 	}
-	head, rest, err := readHead(c, buf)
+	if len(reqBody) > 0 {
+		if _, err := conn.Write(reqBody); err != nil {
+			return 0, err
+		}
+	}
+
+	head, rest, err := readHead(conn, buf)
 	if err != nil {
 		return 0, err
 	}
-	line, _ := cutLine(head)
+	line, fields := cutLine(head)
 	if len(line) < 12 || line[8] != ' ' {
 		return 0, ErrBadHead
 	}
@@ -386,22 +418,145 @@ func Get(s *ip.Stack, host string, port uint16, path string, buf []byte, body io
 	if !ok {
 		return 0, ErrBadHead
 	}
-	// The body is the rest of the stream, because of Connection: close.
-	if _, err := body.Write(rest); err != nil {
-		return status, err
+	chunked := equalFold(findHeader(fields, "Transfer-Encoding"), "chunked")
+	length := -1
+	if v := findHeader(fields, "Content-Length"); v != nil && !chunked {
+		if length, ok = atoi(v); !ok {
+			return status, ErrBadHead
+		}
+	}
+	if method == "HEAD" || status == 204 || status == 304 {
+		return status, nil
+	}
+	// The head is used, so buf now buffers the body.
+	r := &bodyReader{r: conn, buf: buf, end: copy(buf, rest)}
+	if chunked {
+		return status, r.chunks(body)
+	}
+	return status, r.copyN(body, length)
+}
+
+// bodyReader reads the body of a response through the buffer of Do.
+type bodyReader struct {
+	r          io.Reader
+	buf        []byte
+	start, end int
+}
+
+// fill reads more bytes when the buffer is empty.
+func (b *bodyReader) fill() error {
+	if b.start < b.end {
+		return nil
+	}
+	n, err := b.r.Read(b.buf)
+	b.start, b.end = 0, n
+	if n > 0 {
+		return nil
+	}
+	if err == nil {
+		err = io.ErrNoProgress
+	}
+	return err
+}
+
+// copyN copies n bytes to w, or all bytes up to the end of the stream when
+// n is negative.
+func (b *bodyReader) copyN(w io.Writer, n int) error {
+	for n != 0 {
+		if err := b.fill(); err != nil {
+			if err == io.EOF && n < 0 {
+				return nil
+			}
+			if err == io.EOF {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}
+		k := b.end - b.start
+		if n > 0 {
+			k = min(k, n)
+			n -= k
+		}
+		if _, err := w.Write(b.buf[b.start : b.start+k]); err != nil {
+			return err
+		}
+		b.start += k
+	}
+	return nil
+}
+
+// line gives the next line without CRLF. It must fit in the buffer.
+func (b *bodyReader) line() ([]byte, error) {
+	if b.start > 0 {
+		b.end = copy(b.buf, b.buf[b.start:b.end])
+		b.start = 0
 	}
 	for {
-		n, err := c.Read(buf)
-		if n > 0 {
-			if _, werr := body.Write(buf[:n]); werr != nil {
-				return status, werr
+		if i := indexByte(b.buf[b.start:b.end], '\n'); i >= 0 {
+			l := b.buf[b.start : b.start+i]
+			b.start += i + 1
+			if len(l) > 0 && l[len(l)-1] == '\r' {
+				l = l[:len(l)-1]
+			}
+			return l, nil
+		}
+		if b.end == len(b.buf) {
+			return nil, ErrBadBody
+		}
+		n, err := b.r.Read(b.buf[b.end:])
+		b.end += n
+		if n == 0 {
+			if err == nil || err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+	}
+}
+
+// chunks copies a chunked body to w (RFC 9112 section 7.1).
+func (b *bodyReader) chunks(w io.Writer) error {
+	for {
+		l, err := b.line()
+		if err != nil {
+			return err
+		}
+		if i := indexByte(l, ';'); i >= 0 {
+			l = l[:i] // chunk extensions
+		}
+		for len(l) > 0 && (l[len(l)-1] == ' ' || l[len(l)-1] == '\t') {
+			l = l[:len(l)-1]
+		}
+		if len(l) == 0 || len(l) > 7 {
+			return ErrBadBody
+		}
+		size := 0
+		for _, c := range l {
+			switch {
+			case c >= '0' && c <= '9':
+				size = size<<4 | int(c-'0')
+			case c|0x20 >= 'a' && c|0x20 <= 'f':
+				size = size<<4 | int(c|0x20-'a'+10)
+			default:
+				return ErrBadBody
 			}
 		}
-		if err == io.EOF {
-			return status, nil
+		if size == 0 {
+			// The trailer lines up to an empty line.
+			for {
+				if l, err = b.line(); err != nil || len(l) == 0 {
+					return err
+				}
+			}
 		}
-		if err != nil {
-			return status, err
+		if err := b.copyN(w, size); err != nil {
+			return err
+		}
+		if l, err = b.line(); err != nil {
+			return err
+		}
+		if len(l) != 0 {
+			return ErrBadBody
 		}
 	}
 }
