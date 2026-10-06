@@ -6,17 +6,6 @@ type element [8]uint32
 // p = 2^256 - 2^224 + 2^192 + 2^96 - 1 (FIPS 186-4 appendix D.1.2.3).
 var pElem = element{0xffffffff, 0xffffffff, 0xffffffff, 0, 0, 0, 1, 0xffffffff}
 
-// feAdd sets r = a + b mod p in constant time.
-func feAdd(r, a, b *element) {
-	var s element
-	var carry uint64
-	for i := range s {
-		v := uint64(a[i]) + uint64(b[i]) + carry
-		s[i], carry = uint32(v), v>>32
-	}
-	subtractP(r, &s, uint32(carry))
-}
-
 // subtractP sets r = s - p when s plus carry*2^256 is at least p, and r = s otherwise.
 func subtractP(r, s *element, carry uint32) {
 	var d element
@@ -28,22 +17,6 @@ func subtractP(r, s *element, carry uint32) {
 	mask := -(carry | uint32(borrow^1))
 	for i := range r {
 		r[i] = d[i]&mask | s[i]&^mask
-	}
-}
-
-// feSub sets r = a - b mod p in constant time.
-func feSub(r, a, b *element) {
-	var d element
-	var borrow uint64
-	for i := range d {
-		v := uint64(a[i]) - uint64(b[i]) - borrow
-		d[i], borrow = uint32(v), (v>>32)&1
-	}
-	mask := -uint32(borrow)
-	var carry uint64
-	for i := range r {
-		v := uint64(d[i]) + uint64(pElem[i]&mask) + carry
-		r[i], carry = uint32(v), v>>32
 	}
 }
 

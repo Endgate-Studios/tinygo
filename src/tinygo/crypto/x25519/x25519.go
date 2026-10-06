@@ -23,16 +23,6 @@ var Basepoint = [32]byte{9}
 
 func mul(z, a, b *fe) { modP.Mul(z[:], a[:], b[:]) }
 
-// add sets z = a + b mod p. The sum is below 2^256, as a and b are below p.
-func add(z, a, b *fe) {
-	var c uint64
-	for i := range z {
-		v := uint64(a[i]) + uint64(b[i]) + c
-		z[i], c = uint32(v), v>>32
-	}
-	reduce(z)
-}
-
 // reduce subtracts p from z when z is at least p, with a mask.
 func reduce(z *fe) {
 	var d fe
@@ -44,21 +34,6 @@ func reduce(z *fe) {
 	keep := -uint32(borrow) // all ones when z < p
 	for i := range z {
 		z[i] = z[i]&keep | d[i]&^keep
-	}
-}
-
-// sub sets z = a - b mod p.
-func sub(z, a, b *fe) {
-	var borrow uint64
-	for i := range z {
-		v := uint64(a[i]) - uint64(b[i]) - borrow
-		z[i], borrow = uint32(v), (v>>32)&1
-	}
-	mask := -uint32(borrow)
-	var c uint64
-	for i := range z {
-		v := uint64(z[i]) + uint64(p[i]&mask) + c
-		z[i], c = uint32(v), v>>32
 	}
 }
 

@@ -1,0 +1,107 @@
+package x25519
+
+// add sets r = a + b mod p for a and b below p, in constant time. The code is
+// unrolled and the carries have no branches, because TinyGo builds with -opt=z.
+func add(r, a, b *fe) {
+	a0, a1, a2, a3, a4, a5, a6, a7 := a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
+	b0, b1, b2, b3, b4, b5, b6, b7 := b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+	s0 := a0 + b0
+	c := (a0&b0 | (a0|b0)&^s0) >> 31
+	s1 := a1 + b1 + c
+	c = (a1&b1 | (a1|b1)&^s1) >> 31
+	s2 := a2 + b2 + c
+	c = (a2&b2 | (a2|b2)&^s2) >> 31
+	s3 := a3 + b3 + c
+	c = (a3&b3 | (a3|b3)&^s3) >> 31
+	s4 := a4 + b4 + c
+	c = (a4&b4 | (a4|b4)&^s4) >> 31
+	s5 := a5 + b5 + c
+	c = (a5&b5 | (a5|b5)&^s5) >> 31
+	s6 := a6 + b6 + c
+	c = (a6&b6 | (a6|b6)&^s6) >> 31
+	s7 := a7 + b7 + c
+	c = (a7&b7 | (a7|b7)&^s7) >> 31
+	// d = s - p, kept when s >= p, which the carry or no borrow tells.
+	d0 := s0 - 0xffffffed
+	bo := (^s0&0xffffffed | ^(s0^0xffffffed)&d0) >> 31
+	d1 := s1 - 0xffffffff - bo
+	bo = (^s1&0xffffffff | ^(s1^0xffffffff)&d1) >> 31
+	d2 := s2 - 0xffffffff - bo
+	bo = (^s2&0xffffffff | ^(s2^0xffffffff)&d2) >> 31
+	d3 := s3 - 0xffffffff - bo
+	bo = (^s3&0xffffffff | ^(s3^0xffffffff)&d3) >> 31
+	d4 := s4 - 0xffffffff - bo
+	bo = (^s4&0xffffffff | ^(s4^0xffffffff)&d4) >> 31
+	d5 := s5 - 0xffffffff - bo
+	bo = (^s5&0xffffffff | ^(s5^0xffffffff)&d5) >> 31
+	d6 := s6 - 0xffffffff - bo
+	bo = (^s6&0xffffffff | ^(s6^0xffffffff)&d6) >> 31
+	d7 := s7 - 0x7fffffff - bo
+	bo = (^s7&0x7fffffff | ^(s7^0x7fffffff)&d7) >> 31
+	mask := -(c | (bo ^ 1))
+	r[0] = d0&mask | s0&^mask
+	r[1] = d1&mask | s1&^mask
+	r[2] = d2&mask | s2&^mask
+	r[3] = d3&mask | s3&^mask
+	r[4] = d4&mask | s4&^mask
+	r[5] = d5&mask | s5&^mask
+	r[6] = d6&mask | s6&^mask
+	r[7] = d7&mask | s7&^mask
+}
+
+// sub sets r = a - b mod p for a and b below p, in constant time, unrolled as
+// add.
+func sub(r, a, b *fe) {
+	a0, a1, a2, a3, a4, a5, a6, a7 := a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
+	b0, b1, b2, b3, b4, b5, b6, b7 := b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+	d0 := a0 - b0
+	bo := (^a0&b0 | ^(a0^b0)&d0) >> 31
+	d1 := a1 - b1 - bo
+	bo = (^a1&b1 | ^(a1^b1)&d1) >> 31
+	d2 := a2 - b2 - bo
+	bo = (^a2&b2 | ^(a2^b2)&d2) >> 31
+	d3 := a3 - b3 - bo
+	bo = (^a3&b3 | ^(a3^b3)&d3) >> 31
+	d4 := a4 - b4 - bo
+	bo = (^a4&b4 | ^(a4^b4)&d4) >> 31
+	d5 := a5 - b5 - bo
+	bo = (^a5&b5 | ^(a5^b5)&d5) >> 31
+	d6 := a6 - b6 - bo
+	bo = (^a6&b6 | ^(a6^b6)&d6) >> 31
+	d7 := a7 - b7 - bo
+	bo = (^a7&b7 | ^(a7^b7)&d7) >> 31
+	mask := -bo
+	m0 := 0xffffffed & mask
+	r0 := d0 + m0
+	c := (d0&m0 | (d0|m0)&^r0) >> 31
+	m1 := 0xffffffff & mask
+	r1 := d1 + m1 + c
+	c = (d1&m1 | (d1|m1)&^r1) >> 31
+	m2 := 0xffffffff & mask
+	r2 := d2 + m2 + c
+	c = (d2&m2 | (d2|m2)&^r2) >> 31
+	m3 := 0xffffffff & mask
+	r3 := d3 + m3 + c
+	c = (d3&m3 | (d3|m3)&^r3) >> 31
+	m4 := 0xffffffff & mask
+	r4 := d4 + m4 + c
+	c = (d4&m4 | (d4|m4)&^r4) >> 31
+	m5 := 0xffffffff & mask
+	r5 := d5 + m5 + c
+	c = (d5&m5 | (d5|m5)&^r5) >> 31
+	m6 := 0xffffffff & mask
+	r6 := d6 + m6 + c
+	c = (d6&m6 | (d6|m6)&^r6) >> 31
+	m7 := 0x7fffffff & mask
+	r7 := d7 + m7 + c
+	c = (d7&m7 | (d7|m7)&^r7) >> 31
+	_ = c
+	r[0] = r0
+	r[1] = r1
+	r[2] = r2
+	r[3] = r3
+	r[4] = r4
+	r[5] = r5
+	r[6] = r6
+	r[7] = r7
+}
