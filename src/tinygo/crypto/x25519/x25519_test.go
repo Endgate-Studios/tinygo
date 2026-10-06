@@ -86,3 +86,41 @@ func TestECDH(t *testing.T) {
 		}
 	}
 }
+
+// TestNonCanonical uses u-coordinates of p and more and with the top bit set,
+// which RFC 7748 section 5 reduces modulo p.
+func TestNonCanonical(t *testing.T) {
+	r := rand.New(rand.NewSource(5))
+	var us [][32]byte
+	for _, low := range []byte{0xed, 0xee, 0xf0, 0xff} {
+		var u [32]byte
+		for i := range u {
+			u[i] = 0xff
+		}
+		u[0], u[31] = low, 0x7f
+		us = append(us, u)
+		u[31] = 0xff
+		us = append(us, u)
+	}
+	for i := 0; i < 10; i++ {
+		var u [32]byte
+		r.Read(u[:])
+		u[31] |= 0x80
+		us = append(us, u)
+	}
+	for _, u := range us {
+		var k [32]byte
+		r.Read(k[:])
+		priv, _ := ecdh.X25519().NewPrivateKey(k[:])
+		pub, _ := ecdh.X25519().NewPublicKey(u[:])
+		var got [32]byte
+		X25519(&got, &k, &u)
+		want, err := priv.ECDH(pub)
+		if err != nil {
+			want = make([]byte, 32) // a point of low order gives zero
+		}
+		if hex.EncodeToString(got[:]) != hex.EncodeToString(want) {
+			t.Errorf("u %x: %x, want %x", u, got, want)
+		}
+	}
+}
