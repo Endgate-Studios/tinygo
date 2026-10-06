@@ -1,6 +1,6 @@
 // Command wifi connects an ESP32-S3 to a WPA2 network, gets an address with
-// DHCP, gets a page with HTTP, answers ping and runs a UDP and a TCP echo
-// server on port 7. The SSID and the password come from the link:
+// DHCP, gets the time with SNTP and a page with HTTP, answers ping and runs a
+// UDP and a TCP echo server on port 7. The SSID and the password come from the link:
 //
 //	tinygo flash -target esp32s3-psram-octal -ldflags='-X "main.ssid=..." -X "main.password=..."' ./src/examples/wifi
 package main
@@ -43,6 +43,7 @@ func main() {
 	c := stack.Config()
 	println("address", c.Addr.String(), "gateway", c.Gateway.String(), "dns", c.DNS.String(), "lease", int(stack.Lease().Seconds()), "s")
 
+	printTime(stack)
 	httpGet(stack, httpHost, httpPort)
 
 	echo, err := stack.ListenUDP(7, 2048)
@@ -62,6 +63,21 @@ func main() {
 			println("write:", err.Error())
 		}
 	}
+}
+
+// printTime gets the time from pool.ntp.org with SNTP.
+func printTime(stack *ip.Stack) {
+	addr, err := stack.LookupHost("pool.ntp.org", 5*time.Second)
+	if err != nil {
+		println("lookup pool.ntp.org:", err.Error())
+		return
+	}
+	now, err := stack.SNTP(addr, 5*time.Second)
+	if err != nil {
+		println("sntp:", err.Error())
+		return
+	}
+	println("time", now.Format(time.RFC3339), "from", addr.String())
 }
 
 // httpGet looks up host, sends an HTTP/1.0 GET and prints the status line.
