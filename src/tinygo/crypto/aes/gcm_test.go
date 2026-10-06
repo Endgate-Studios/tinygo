@@ -4,6 +4,8 @@ import (
 	"bytes"
 	stdaes "crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"math/rand"
 	"testing"
@@ -86,5 +88,63 @@ func TestGCMStd(t *testing.T) {
 			t.Fatalf("open in place %d: %v", i, err)
 		}
 		c.Close()
+	}
+}
+
+// ghashRef is the bit-serial multiplication of SP 800-38D algorithm 1.
+func ghashRef(y, x, h *[BlockSize]byte) {
+	vh := binary.BigEndian.Uint64(h[:8])
+	vl := binary.BigEndian.Uint64(h[8:])
+	xh := binary.BigEndian.Uint64(y[:8]) ^ binary.BigEndian.Uint64(x[:8])
+	xl := binary.BigEndian.Uint64(y[8:]) ^ binary.BigEndian.Uint64(x[8:])
+	var zh, zl uint64
+	for i := 0; i < 128; i++ {
+		var bit uint64
+		if i < 64 {
+			bit = xh >> (63 - i) & 1
+		} else {
+			bit = xl >> (127 - i) & 1
+		}
+		mask := -bit
+		zh ^= vh & mask
+		zl ^= vl & mask
+		r := -(vl & 1)
+		vl = vl>>1 | vh<<63
+		vh = vh>>1 ^ 0xe100000000000000&r
+	}
+	binary.BigEndian.PutUint64(y[:8], zh)
+	binary.BigEndian.PutUint64(y[8:], zl)
+}
+
+func TestGHASHBlock(t *testing.T) {
+	var seed [32]byte
+	for i := 0; i < 2000; i++ {
+		var h, y, x [BlockSize]byte
+		sum := sha256.Sum256(append(seed[:], byte(i), byte(i>>8)))
+		copy(h[:], sum[:16])
+		copy(y[:], sum[16:])
+		sum = sha256.Sum256(sum[:])
+		copy(x[:], sum[:16])
+		switch i {
+		case 0:
+			h = [BlockSize]byte{}
+		case 1:
+			for k := range h {
+				h[k], y[k], x[k] = 0xff, 0xff, 0
+			}
+		case 2:
+			h, y, x = [BlockSize]byte{0x80}, [BlockSize]byte{15: 1}, [BlockSize]byte{}
+		}
+		want := y
+		ghashRef(&want, &x, &h)
+		g := GCM{h: load(&h)}
+		yw, xw := load(&y), load(&x)
+		for k := range yw {
+			yw[k] ^= xw[k]
+		}
+		g.mul(&yw)
+		if got := yw; got != load(&want) {
+			t.Fatalf("case %d: %x, want %x", i, got, load(&want))
+		}
 	}
 }

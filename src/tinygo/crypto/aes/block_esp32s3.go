@@ -42,7 +42,31 @@ func (c *Cipher) decrypt(dst, src *[BlockSize]byte) {
 // hwBlock is aes_hal_setkey and aes_hal_transform_block. The registers hold
 // the bytes in memory order.
 func (c *Cipher) hwBlock(dst, src *[BlockSize]byte, mode uint32) {
-	key := c.key()
+	hwStart(c.key(), mode)
+	hwRun(dst, src)
+	hwStop()
+}
+
+// ctr XORs src with the encrypted counter blocks from cb into dst, and
+// increments the last 4 bytes of cb for each block. It sets the key once.
+func (c *Cipher) ctr(dst, src []byte, cb *[BlockSize]byte) {
+	if c.rounds == 12 {
+		c.ctrSoft(dst, src, cb)
+		return
+	}
+	var ks [BlockSize]byte
+	hwStart(c.key(), 0)
+	for len(src) > 0 {
+		hwRun(&ks, cb)
+		n := xorBlock(dst, src, &ks)
+		dst, src = dst[n:], src[n:]
+		incCounter(cb)
+	}
+	hwStop()
+	clear(ks[:])
+}
+
+func hwStart(key []byte, mode uint32) {
 	hwMu.Lock()
 	if !hwOn {
 		esp.SYSTEM.PERIP_CLK_EN1.SetBits(esp.SYSTEM_PERIP_CLK_EN1_CRYPTO_AES_CLK_EN)
@@ -57,6 +81,9 @@ func (c *Cipher) hwBlock(dst, src *[BlockSize]byte, mode uint32) {
 	for i := 0; i < len(key)/4; i++ {
 		keyRegs[i].Set(binary.LittleEndian.Uint32(key[4*i:]))
 	}
+}
+
+func hwRun(dst, src *[BlockSize]byte) {
 	for i := range inRegs {
 		inRegs[i].Set(binary.LittleEndian.Uint32(src[4*i:]))
 	}
@@ -66,7 +93,10 @@ func (c *Cipher) hwBlock(dst, src *[BlockSize]byte, mode uint32) {
 	for i := range outRegs {
 		binary.LittleEndian.PutUint32(dst[4*i:], outRegs[i].Get())
 	}
-	// The key registers keep the key of the last block: clear them.
+}
+
+// hwStop clears the key registers, which keep the key of the last block.
+func hwStop() {
 	for i := range keyRegs {
 		keyRegs[i].Set(0)
 	}
