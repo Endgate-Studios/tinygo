@@ -67,6 +67,8 @@ type Config struct {
 type Stats struct {
 	Frames, Dropped, ARPReplies, EchoReplies, UDPDelivered, UDPDropped uint32
 	TCPSegments, TCPBytesIn                                            uint32
+	// TCPOutOfOrder counts the data segments after a gap, which the stack drops.
+	TCPOutOfOrder uint32
 }
 
 const (

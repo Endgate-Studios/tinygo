@@ -114,6 +114,18 @@ With 4 clients at the same time, 32 KB of socket memory was sufficient.
 In the Wi-Fi run with 32 KB, the frame pool of 8 buffers dropped 20 frames
 (`FramesDropped`), and TCP sent them again.
 
+The receive ring of `ListenTCP` is also the TCP window, because the stack does
+not scale the window. A PC sent 1 MB to the board, 3 times for each size:
+
+| Receive ring | Speed |
+|---|---|
+| 4 KB | about 200 KB/s |
+| 14 KB | about 700 KB/s |
+
+The stack drops a segment that comes after a gap. `Stats.TCPOutOfOrder`
+counted 1 such segment for each megabyte, so the drop costs little on this
+link.
+
 ## Power save
 
 The station uses `PowerSaveMinModem`, the ESP-IDF default. The receiver

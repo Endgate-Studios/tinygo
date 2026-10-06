@@ -737,6 +737,9 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 
 	// The data and the FIN.
 	needACK := len(data) > 0 || flags&tcpFIN != 0
+	if len(data) > 0 && seqLT(c.rcvNxt, seq) {
+		s.stats.TCPOutOfOrder++
+	}
 	if seq == c.rcvNxt && !c.peerFin {
 		n := min(len(data), len(c.rcv)-c.rcvLen)
 		if n > 0 {
