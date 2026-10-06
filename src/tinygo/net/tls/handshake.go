@@ -32,6 +32,7 @@ const (
 	sigECDSAP256SHA256   = 0x0403
 	sigRSAPSSSHA256      = 0x0804 // rsa_pss_rsae_sha256
 	sigRSAPKCS1SHA256    = 0x0401 // only for certificates
+	sigECDSAP384SHA384   = 0x0503 // only for certificates
 	maxCerts             = 4
 )
 
@@ -272,8 +273,9 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		b = append(b, name...)
 	}
 	b = append(b, 0, 0x0a, 0, 6, 0, 4, groupX25519>>8, groupX25519&0xff, groupSecp256r1>>8, groupSecp256r1&0xff)
-	b = append(b, 0, 0x0d, 0, 8, 0, 6, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
-		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff)
+	b = append(b, 0, 0x0d, 0, 10, 0, 8, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
+		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff,
+		sigECDSAP384SHA384>>8, sigECDSAP384SHA384&0xff)
 	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
 	// Key shares for X25519 and secp256r1: 36 and 69 bytes.
 	b = append(b, 0, 0x33, 0, 107, 0, 105, groupX25519>>8, groupX25519&0xff, 0, 32)
@@ -443,6 +445,10 @@ func (c *Conn) checkChain(st *hsState) error {
 		for k := range c.cfg.Roots {
 			r := &c.cfg.Roots[k]
 			switch {
+			case r.P384 != nil:
+				if x509.VerifyECDSA384(cert.SigAlg, cert.TBS, cert.Sig, r.P384) {
+					return nil
+				}
 			case r.RSA.N == nil && cert.SigAlg == x509.SigECDSASHA256:
 				if x509.VerifyECDSA(c.mem, cert.TBS, cert.Sig, &r.X, &r.Y) {
 					return nil

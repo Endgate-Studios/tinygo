@@ -1,6 +1,6 @@
 // Package tls is a TLS 1.3 client (RFC 8446) with TLS_AES_128_GCM_SHA256,
 // key exchange on X25519 or secp256r1, server certificates with ECDSA P-256 or RSA,
-// with SHA-256. It checks the server name, the validity, the certificate
+// with SHA-256, and CA keys on P-256, P-384 or RSA. It checks the server name, the validity, the certificate
 // chain up to a configured CA key or a pinned server key, and the
 // CertificateVerify signature. Its buffers come from an injected allocator.
 package tls
@@ -66,15 +66,16 @@ const (
 	hsBufferSize = 8 << 10
 )
 
-// PublicKey is the key of a trusted CA: a P-256 key, or an RSA key when
-// RSA.N is not nil.
+// PublicKey is the key of a trusted CA: a P-256 key, an RSA key when RSA.N
+// is not nil, or a P-384 key when P384 is not nil.
 type PublicKey struct {
 	X, Y [32]byte
 	RSA  rsa.PublicKey
+	P384 []byte // x and y, 48 bytes each
 }
 
 // AnchorFromCertificate gives the key of a CA certificate in DER, for
-// Config.Roots. An RSA key refers to der, so der must stay.
+// Config.Roots. An RSA or P-384 key refers to der, so der must stay.
 func AnchorFromCertificate(der []byte) (PublicKey, error) {
 	var c x509.Certificate
 	if err := x509.Parse(der, &c); err != nil {
@@ -85,6 +86,8 @@ func AnchorFromCertificate(der []byte) (PublicKey, error) {
 		return PublicKey{X: c.KeyX, Y: c.KeyY}, nil
 	case c.RSA:
 		return PublicKey{RSA: c.RSAKey}, nil
+	case c.P384:
+		return PublicKey{P384: c.Key384}, nil
 	}
 	return PublicKey{}, ErrUnsupported
 }

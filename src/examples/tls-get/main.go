@@ -1,6 +1,6 @@
 // Command tls-get gets https://www.google.com/ with TLS 1.3. It takes the time
-// from pool.ntp.org for the validity check, and it trusts the P-256 keys of
-// the Google Trust Services intermediate CAs WE1 and WE2 (valid until 2029).
+// from pool.ntp.org for the validity check, and it trusts the P-384 key of
+// the Google Trust Services root CA GTS Root R4 (valid until 2036).
 // The SSID and the password come from the link:
 //
 //	tinygo flash -target esp32s3-psram-octal -ldflags='-X "main.ssid=..." -X "main.password=..."' ./src/examples/tls-get
@@ -27,16 +27,14 @@ var (
 	page      [1024]byte
 )
 
-// The keys of Google Trust Services WE1 and WE2.
-var roots = []tls.PublicKey{
-	key("6fcd3afe6757474c21038540c2475dbb58470f40c15c1785c61937e7d57ced86", "4b9b81d9d71a13a50a03f898c4c6e89eff10598f2c2698f5e62625bb0f02fa56"),
-	key("357e1ff214ed907de19e2a344386c1d596e82770df9e04cba9ca86790b084d46", "8ac274a4bbd9bfeefd23d738f34bef5417e1bee7ca5525a80c30ac2d5d4ea151"),
-}
+// The key of GTS Root R4, x and y.
+var roots = []tls.PublicKey{key384(
+	"f37473a7688b60ae43b835c581307b4b499dfbc161cee6de46bd6bd5611835ae40dd73f78991305aeb3cee857ca24076" +
+		"3ba9c6b847d82ae792916a73e9b172399f299fa298d35f5e5886650fa1846506d1dc8bc9c773c88c6a2fe5c4abd11d8a")}
 
-func key(x, y string) tls.PublicKey {
-	var k tls.PublicKey
-	hex.Decode(k.X[:], []byte(x))
-	hex.Decode(k.Y[:], []byte(y))
+func key384(xy string) tls.PublicKey {
+	k := tls.PublicKey{P384: make([]byte, 96)}
+	hex.Decode(k.P384, []byte(xy))
 	return k
 }
 

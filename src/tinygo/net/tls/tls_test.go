@@ -33,6 +33,13 @@ type chain struct {
 // P-256 with SHA-256.
 func newChain(t *testing.T, host string) *chain {
 	t.Helper()
+	return newChainRoot(t, host, elliptic.P256(), stdx509.ECDSAWithSHA256)
+}
+
+// newChainRoot is newChain with a root key on curve, which signs the
+// intermediate with alg.
+func newChainRoot(t *testing.T, host string, curve elliptic.Curve, alg stdx509.SignatureAlgorithm) *chain {
+	t.Helper()
 	mk := func(tmpl, parent *stdx509.Certificate, pub *ecdsa.PublicKey, priv *ecdsa.PrivateKey) *stdx509.Certificate {
 		der, err := stdx509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
 		if err != nil {
@@ -43,7 +50,7 @@ func newChain(t *testing.T, host string) *chain {
 	}
 	now := time.Now()
 	c := &chain{}
-	c.ca, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c.ca, _ = ecdsa.GenerateKey(curve, rand.Reader)
 	c.inter, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	caT := &stdx509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"}, NotBefore: now.Add(-time.Hour),
@@ -51,7 +58,7 @@ func newChain(t *testing.T, host string) *chain {
 	c.caCert = mk(caT, caT, &c.ca.PublicKey, c.ca)
 	inT := &stdx509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "inter"}, NotBefore: now.Add(-time.Hour),
 		NotAfter: now.Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: stdx509.KeyUsageCertSign,
-		SignatureAlgorithm: stdx509.ECDSAWithSHA256}
+		SignatureAlgorithm: alg}
 	c.interCert = mk(inT, c.caCert, &c.inter.PublicKey, c.ca)
 	leafT := &stdx509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
 		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), SignatureAlgorithm: stdx509.ECDSAWithSHA256}
@@ -150,6 +157,42 @@ func TestWithCryptoTLS(t *testing.T) {
 		c.Close()
 		if mem.Stats().InUse != 0 {
 			t.Errorf("%s: memory in use after Close: %d", name, mem.Stats().InUse)
+		}
+	}
+}
+
+// TestP384Root uses a P-384 root that signs the intermediate with SHA-384 or
+// SHA-256.
+func TestP384Root(t *testing.T) {
+	for _, alg := range []stdx509.SignatureAlgorithm{stdx509.ECDSAWithSHA384, stdx509.ECDSAWithSHA256} {
+		ch := newChainRoot(t, "node.example", elliptic.P384(), alg)
+		anchor, err := AnchorFromCertificate(ch.caCert.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var xy [96]byte
+		ch.ca.X.FillBytes(xy[:48])
+		ch.ca.Y.FillBytes(xy[48:])
+		other, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		var bad [96]byte
+		other.X.FillBytes(bad[:48])
+		other.Y.FillBytes(bad[48:])
+		for _, tc := range []struct {
+			root PublicKey
+			want error
+		}{{anchor, nil}, {PublicKey{P384: xy[:]}, nil}, {PublicKey{P384: bad[:]}, ErrCertificate}} {
+			c, srvConn, mem := client(t, &Config{ServerName: "node.example", Time: time.Now(), Roots: []PublicKey{tc.root}})
+			done := make(chan error, 1)
+			go serve(t, srvConn, ch, done)
+			if err := c.Handshake(); err != tc.want {
+				t.Fatalf("%v: handshake: %v, want %v", alg, err, tc.want)
+			}
+			srvConn.Close()
+			<-done
+			c.Close()
+			if mem.Stats().InUse != 0 {
+				t.Errorf("memory in use after Close: %d", mem.Stats().InUse)
+			}
 		}
 	}
 }
