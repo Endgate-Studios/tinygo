@@ -3,6 +3,7 @@ package p256
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"math/big"
 	"math/rand"
 	"testing"
 
@@ -40,6 +41,25 @@ func TestVerifyECDSA(t *testing.T) {
 		rb[31] ^= 1
 		if VerifyECDSA(h, hash, &rb, &sb, &qx, &qy) {
 			t.Fatalf("changed signature %d verifies", i)
+		}
+	}
+	// The key G makes G + Q a doubling, and a hash of zeros makes u1 zero.
+	params := elliptic.P256().Params()
+	g := &ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: params.Gx, Y: params.Gy}, D: big.NewInt(1)}
+	var gx, gy [32]byte
+	params.Gx.FillBytes(gx[:])
+	params.Gy.FillBytes(gy[:])
+	for i := 0; i < 10; i++ {
+		hash := make([]byte, 32)
+		if i > 0 {
+			r.Read(hash)
+		}
+		sr, ss, _ := ecdsa.Sign(r, g, hash)
+		var rb, sb [32]byte
+		sr.FillBytes(rb[:])
+		ss.FillBytes(sb[:])
+		if !VerifyECDSA(h, hash, &rb, &sb, &gx, &gy) {
+			t.Fatalf("signature %d with the key G does not verify", i)
 		}
 	}
 	var zero [32]byte
