@@ -54,6 +54,8 @@ type hsState struct {
 	sessionID        [32]byte
 	cookie           [maxCookie]byte
 	cookieLen        int
+	peerLimit        int  // the record_size_limit of the server, or 0
+	fragLimit        int  // the max_fragment_length that the server agreed to, or 0
 	offeredPSK       bool // the ClientHello has the ticket of Config.Session
 	resumed          bool // the server accepted it
 	hsSecret         [sha256.Size]byte
@@ -103,6 +105,15 @@ func (c *Conn) Handshake() error {
 		return err
 	}
 	c.handshaked = true
+	if c.recvLimit > 0 {
+		// The handshake has used all bytes of rx, so a smaller one can take
+		// its place. 256 is the most that a TLS 1.3 record adds to the
+		// plaintext (RFC 8446 section 5.2).
+		if rx := memory.MakeSlice[byte](c.mem, headerLen+c.recvLimit+256); rx != nil {
+			c.release(&c.rx)
+			c.rx = rx
+		}
+	}
 	return nil
 }
 
@@ -188,11 +199,14 @@ func (c *Conn) handshake(st *hsState) error {
 		return err
 	}
 
-	if typ, _, err = c.readHandshake(); err != nil {
+	if typ, body, err = c.readHandshake(); err != nil {
 		return err
 	}
 	if typ != hsEncryptedExtensions {
 		return ErrHandshake
+	}
+	if err := c.parseEncryptedExtensions(body, st); err != nil {
+		return err
 	}
 	c.addTranscript()
 	th = c.hash()
@@ -272,6 +286,13 @@ func (c *Conn) handshake(st *hsState) error {
 	deriveSecret(&c.resMaster, master[:], "res master", th[:])
 	clear(master[:])
 	c.resumed = st.resumed
+	switch {
+	case st.peerLimit > 0:
+		c.sendLimit = min(st.peerLimit-1, maxPlain)
+		c.recvLimit = min(max(c.cfg.RecordSizeLimit, minRecordLimit), maxPlain)
+	case st.fragLimit > 0:
+		c.sendLimit, c.recvLimit = st.fragLimit, st.fragLimit
+	}
 	if err := c.writeRecord(recordHandshake, fin[:]); err != nil {
 		return err
 	}
@@ -322,6 +343,15 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff,
 		sigECDSAP384SHA384>>8, sigECDSAP384SHA384&0xff)
 	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
+	if l := c.cfg.RecordSizeLimit; l > 0 {
+		v := min(max(l, minRecordLimit), maxPlain) + 1 // with the content type (RFC 8449 section 4)
+		b = append(b, 0, 0x1c, 0, 2, byte(v>>8), byte(v))
+		// Also max_fragment_length, which more servers know (RFC 6066
+		// section 4). A server that knows both uses record_size_limit.
+		if code := fragCode(l); code > 0 {
+			b = append(b, 0, 0x01, 0, 1, code)
+		}
+	}
 	if st.offer == groupX25519 {
 		b = append(b, 0, 0x33, 0, 38, 0, 36, groupX25519>>8, groupX25519&0xff, 0, 32)
 		b = append(b, st.xPub[:]...)
@@ -451,6 +481,55 @@ func parseServerHello(b []byte, st *hsState, x, y *[32]byte) (retry bool, err er
 		return false, ErrUnsupported
 	}
 	return retry, nil
+}
+
+// fragCode gives the max_fragment_length code of the largest size from 512
+// to 4096 that is not above limit, or 0.
+func fragCode(limit int) byte {
+	code := byte(0)
+	for c := byte(1); c <= 4; c++ {
+		if 1<<(8+c) <= limit {
+			code = c
+		}
+	}
+	return code
+}
+
+// parseEncryptedExtensions reads record_size_limit and max_fragment_length. The server sends it only
+// when the client did, and then sends no record with more plaintext than
+// the limit of the client (RFC 8449 section 4).
+func (c *Conn) parseEncryptedExtensions(b []byte, st *hsState) error {
+	if len(b) < 2 || int(b[0])<<8|int(b[1]) != len(b)-2 {
+		return ErrHandshake
+	}
+	b = b[2:]
+	for len(b) >= 4 {
+		typ, n := int(b[0])<<8|int(b[1]), int(b[2])<<8|int(b[3])
+		if 4+n > len(b) {
+			return ErrHandshake
+		}
+		v := b[4 : 4+n]
+		b = b[4+n:]
+		switch typ {
+		case 0x1c: // record_size_limit
+			if c.cfg.RecordSizeLimit == 0 || n != 2 {
+				return ErrUnsupported
+			}
+			if st.peerLimit = int(v[0])<<8 | int(v[1]); st.peerLimit < minRecordLimit {
+				return ErrHandshake
+			}
+		case 0x01: // max_fragment_length: the code of the client
+			code := fragCode(c.cfg.RecordSizeLimit)
+			if code == 0 || n != 1 || v[0] != code {
+				return ErrUnsupported
+			}
+			st.fragLimit = 1 << (8 + code)
+		}
+	}
+	if len(b) != 0 {
+		return ErrHandshake
+	}
+	return nil
 }
 
 // parseCertificates reads the chain of the Certificate message.

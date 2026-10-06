@@ -65,6 +65,8 @@ const (
 	maxRecord    = maxPlain + 256
 	tagLen       = 16
 	hsBufferSize = 8 << 10
+	// minRecordLimit is the smallest record_size_limit (RFC 8449 section 4).
+	minRecordLimit = 64
 )
 
 // PublicKey is the key of a trusted CA: a P-256 key, an RSA key when RSA.N
@@ -110,6 +112,11 @@ type Config struct {
 	// Session, when not nil, keeps the last ticket of the server for the
 	// next connection, which then skips the certificate checks.
 	Session *Session
+	// RecordSizeLimit, when not 0, asks the server for records with at most
+	// this much plaintext, from 64 to 16384, with record_size_limit (RFC
+	// 8449), and with max_fragment_length (RFC 6066) of 512 to 4096. When
+	// the server agrees, the receive buffer gets smaller after the handshake.
+	RecordSizeLimit int
 }
 
 // Conn is a TLS client connection.
@@ -127,6 +134,8 @@ type Conn struct {
 	cAP, sAP    [sha256.Size]byte // the application traffic secrets
 	resMaster   [sha256.Size]byte // the resumption master secret
 	resumed     bool
+	sendLimit   int // the most plaintext in a record to the server, or 0
+	recvLimit   int // the most plaintext in a record from the server, or 0
 
 	data       []byte // decrypted application data not yet read
 	transcript sha256.Digest
@@ -140,6 +149,9 @@ type Conn struct {
 func Client(raw RawConn, mem Memory, rng io.Reader, cfg *Config) *Conn {
 	return &Conn{raw: raw, mem: mem, rng: rng, cfg: cfg}
 }
+
+// RecordLimit gives the record_size_limit that the server agreed to, or 0.
+func (c *Conn) RecordLimit() int { return c.recvLimit }
 
 // Resumed reports whether the handshake used the ticket of Config.Session.
 func (c *Conn) Resumed() bool { return c.resumed }
@@ -194,6 +206,9 @@ func (c *Conn) Write(b []byte) (int, error) {
 	max := len(c.tx) - headerLen - 1 - tagLen
 	for len(b) > 0 {
 		n := min(len(b), max, maxPlain)
+		if c.sendLimit > 0 {
+			n = min(n, c.sendLimit)
+		}
 		if err := c.writeRecord(recordData, b[:n]); err != nil {
 			return sent, err
 		}
@@ -281,6 +296,9 @@ func (c *Conn) readRecord() (byte, []byte, error) {
 		}
 		c.read.seq++
 		plain := body[:n-tagLen]
+		if c.recvLimit > 0 && len(plain) > c.recvLimit+1 {
+			return 0, nil, ErrRecord // record_overflow (RFC 8449 section 4)
+		}
 		// The inner type is the last byte that is not zero.
 		i := len(plain) - 1
 		for i >= 0 && plain[i] == 0 {
