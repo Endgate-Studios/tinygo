@@ -80,3 +80,29 @@ func TestInitRejects(t *testing.T) {
 		}
 	}
 }
+
+func TestExp(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+	for _, n := range []int{1, 8, 12, 64} {
+		for k := 0; k < 5; k++ {
+			m := make([]uint32, n)
+			for i := range m {
+				m[i] = r.Uint32()
+			}
+			m[0] |= 1
+			m[n-1] |= 1
+			var mod Modulus
+			mod.Init(m, make([]uint32, n))
+			mb := toBig(m)
+			x, e, z := make([]uint32, n), make([]uint32, n), make([]uint32, n)
+			xb := new(big.Int).Rand(r, mb)
+			eb := new(big.Int).Rand(r, mb)
+			fromBig(x, xb)
+			fromBig(e, eb)
+			mod.Exp(z, x, e)
+			if want := new(big.Int).Exp(xb, eb, mb); toBig(z).Cmp(want) != 0 {
+				t.Fatalf("%d words: %x^%x mod %x = %x, want %x", n, xb, eb, mb, toBig(z), want)
+			}
+		}
+	}
+}

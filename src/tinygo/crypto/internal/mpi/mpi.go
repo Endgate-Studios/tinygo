@@ -142,3 +142,22 @@ func sub(z, a, b []uint32) {
 		z[i], borrow = uint32(v), (v>>32)&1
 	}
 }
+
+// expSoft sets z = x^e mod m by square and multiply over all bits of e, so
+// the time does not depend on x. e is public.
+func (k *Modulus) expSoft(z, x, e []uint32) {
+	var accb, xb [MaxWords]uint32
+	n := len(k.m)
+	acc, xc := accb[:n], xb[:n]
+	copy(xc, x)
+	acc[0] = 1
+	for i := 32*len(e) - 1; i >= 0; i-- {
+		k.Mul(acc, acc, acc)
+		if e[i/32]>>(i%32)&1 == 1 {
+			k.Mul(acc, acc, xc)
+		}
+	}
+	copy(z, acc)
+	clear(acc)
+	clear(xc)
+}
