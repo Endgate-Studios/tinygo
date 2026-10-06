@@ -61,7 +61,8 @@ func newChainRoot(t testing.TB, host string, curve elliptic.Curve, alg stdx509.S
 		SignatureAlgorithm: alg}
 	c.interCert = mk(inT, c.caCert, &c.inter.PublicKey, c.ca)
 	leafT := &stdx509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
-		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), SignatureAlgorithm: stdx509.ECDSAWithSHA256}
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore:   now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), SignatureAlgorithm: stdx509.ECDSAWithSHA256}
 	leaf := mk(leafT, c.interCert, &leafKey.PublicKey, c.inter)
 	c.serverCert = stdtls.Certificate{Certificate: [][]byte{leaf.Raw, c.interCert.Raw}, PrivateKey: leafKey}
 	return c
@@ -557,5 +558,34 @@ func TestResumption(t *testing.T) {
 	old.received = old.received.Add(-old.lifetime - time.Second)
 	if _, err = run("expired", &Config{ServerName: "node.example", Session: &old}, srvCfg); err != ErrCertificate {
 		t.Errorf("expired ticket: %v, want %v", err, ErrCertificate)
+	}
+}
+
+// TestIPAddress connects to the address 127.0.0.1 of the certificate. The
+// client sends no SNI for an address (RFC 6066 section 3).
+func TestIPAddress(t *testing.T) {
+	ch := newChain(t, "node.example")
+	sni := make(chan string, 1)
+	srvCfg := &stdtls.Config{Certificates: []stdtls.Certificate{ch.serverCert}, MinVersion: stdtls.VersionTLS13,
+		GetConfigForClient: func(h *stdtls.ClientHelloInfo) (*stdtls.Config, error) {
+			sni <- h.ServerName
+			return nil, nil
+		}}
+	for _, tc := range []struct {
+		name string
+		want error
+	}{{"127.0.0.1", nil}, {"127.0.0.2", ErrName}} {
+		c, srvConn, _ := client(t, &Config{ServerName: tc.name, Roots: []PublicKey{key(ch.ca)}})
+		done := make(chan error, 1)
+		go serveConfig(srvConn, srvCfg, done)
+		if err := c.Handshake(); err != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
+		}
+		if s := <-sni; s != "" {
+			t.Errorf("%s: SNI %q", tc.name, s)
+		}
+		srvConn.Close()
+		<-done
+		c.Close()
 	}
 }

@@ -445,8 +445,10 @@ func digits(b []byte) int {
 }
 
 // VerifyHostname reports whether a DNS name of the SAN extension matches
-// host. A wildcard covers one label at the left, as RFC 6125 6.4.3.
+// host. A wildcard covers one label at the left, as RFC 6125 6.4.3. When
+// host is an IPv4 address, only an iPAddress of the SAN extension matches.
 func (c *Certificate) VerifyHostname(host string) bool {
+	ip, isIP := ParseIPv4(host)
 	names := c.dnsNames
 	for len(names) > 0 {
 		tag, name, _, rest, ok := next(names)
@@ -454,11 +456,42 @@ func (c *Certificate) VerifyHostname(host string) bool {
 			return false
 		}
 		names = rest
-		if tag == 0x82 && matchHost(name, host) { // dNSName [2]
+		switch {
+		case isIP:
+			// An address matches only an iPAddress (RFC 6125 section 6.2.1).
+			if tag == 0x87 && len(name) == 4 && [4]byte(name) == ip {
+				return true
+			}
+		case tag == 0x82 && matchHost(name, host): // dNSName [2]
 			return true
 		}
 	}
 	return false
+}
+
+// ParseIPv4 reads a dotted IPv4 address such as 192.168.1.10.
+func ParseIPv4(s string) ([4]byte, bool) {
+	var ip [4]byte
+	k, v, digits := 0, 0, 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == '.' {
+			if digits == 0 || k == 4 {
+				return ip, false
+			}
+			ip[k] = byte(v)
+			k, v, digits = k+1, 0, 0
+			continue
+		}
+		d := s[i] - '0'
+		if d > 9 || (digits > 0 && v == 0) { // no leading zeros
+			return ip, false
+		}
+		v, digits = v*10+int(d), digits+1
+		if v > 255 {
+			return ip, false
+		}
+	}
+	return ip, k == 4
 }
 
 func matchHost(pattern []byte, host string) bool {

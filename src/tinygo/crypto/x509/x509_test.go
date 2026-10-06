@@ -8,6 +8,7 @@ import (
 	stdx509 "crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
+	"net"
 	"testing"
 	"time"
 
@@ -275,5 +276,53 @@ func TestUsage(t *testing.T) {
 	crit.ExtraExtensions[0].Critical = false
 	if _, err := parse(crit, ca); err != nil {
 		t.Errorf("extension that is not critical: %v", err)
+	}
+}
+
+func TestParseIPv4(t *testing.T) {
+	for _, tc := range []struct {
+		s  string
+		ip [4]byte
+		ok bool
+	}{
+		{"192.168.1.10", [4]byte{192, 168, 1, 10}, true},
+		{"0.0.0.0", [4]byte{}, true},
+		{"255.255.255.255", [4]byte{255, 255, 255, 255}, true},
+		{"256.1.1.1", [4]byte{}, false},
+		{"1.2.3", [4]byte{}, false},
+		{"1.2.3.4.5", [4]byte{}, false},
+		{"01.2.3.4", [4]byte{}, false},
+		{"1..3.4", [4]byte{}, false},
+		{"1.2.3.4.", [4]byte{}, false},
+		{"example.com", [4]byte{}, false},
+		{"", [4]byte{}, false},
+	} {
+		ip, ok := ParseIPv4(tc.s)
+		if ok != tc.ok || (ok && ip != tc.ip) {
+			t.Errorf("%q: %v %v, want %v %v", tc.s, ip, ok, tc.ip, tc.ok)
+		}
+	}
+}
+
+// TestIPAddress checks that an address matches only an iPAddress.
+func TestIPAddress(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &stdx509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "device"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		DNSNames: []string{"device.local", "10.0.0.2"}, IPAddresses: []net.IP{net.IPv4(192, 168, 1, 10), net.ParseIP("2001:db8::1")}}
+	var c Certificate
+	if err := Parse(makeCert(t, tmpl, tmpl, &key.PublicKey, key), &c); err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]bool{
+		"192.168.1.10": true,
+		"192.168.1.11": false,
+		"10.0.0.2":     false, // only a dNSName
+		"device.local": true,
+		"2001:db8::1":  false,
+	} {
+		if got := c.VerifyHostname(host); got != want {
+			t.Errorf("%s: %v, want %v", host, got, want)
+		}
 	}
 }

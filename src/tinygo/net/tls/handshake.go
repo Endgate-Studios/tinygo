@@ -333,7 +333,8 @@ func (c *Conn) sendClientHello(st *hsState) error {
 	b = append(b, 0, 2, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff, 1, 0)
 	ext := len(b)
 	b = append(b, 0, 0)
-	if name != "" {
+	// No SNI for an IP address (RFC 6066 section 3).
+	if _, isIP := x509.ParseIPv4(name); name != "" && !isIP {
 		n := len(name)
 		b = append(b, 0, 0, byte((n+5)>>8), byte(n+5), byte((n+3)>>8), byte(n+3), 0, byte(n>>8), byte(n))
 		b = append(b, name...)
