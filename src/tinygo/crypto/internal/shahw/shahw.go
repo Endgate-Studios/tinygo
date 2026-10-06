@@ -16,19 +16,22 @@ import (
 const (
 	SHA1   = 0
 	SHA256 = 2
+	SHA512 = 4
 )
 
 var (
 	mu   sync.Mutex
 	on   bool
-	hMem = (*[8]volatile.Register32)(unsafe.Pointer(&esp.SHA.H_MEM[0]))
-	mMem = (*[16]volatile.Register32)(unsafe.Pointer(&esp.SHA.M_MEM[0]))
+	hMem = (*[16]volatile.Register32)(unsafe.Pointer(&esp.SHA.H_MEM[0]))
+	// The device struct has 64 bytes of M_MEM, but the registers go on to
+	// 128 bytes for SHA-512 (ESP-IDF SHA_TEXT_BASE and rom/sha.h).
+	mMem = (*[32]volatile.Register32)(unsafe.Pointer(&esp.SHA.M_MEM[0]))
 )
 
-// Block updates state, 20 bytes for SHA1 and 32 for SHA256, with one block.
-// CONTINUE starts from the state in H_MEM. The registers hold the bytes in
-// memory order.
-func Block(mode uint32, state []byte, p *[64]byte) {
+// Block updates state, 20 bytes for SHA1, 32 for SHA256 and 64 for SHA512,
+// with one block p of 64 or 128 bytes. CONTINUE starts from the state in
+// H_MEM. The registers hold the bytes in memory order.
+func Block(mode uint32, state []byte, p []byte) {
 	mu.Lock()
 	if !on {
 		esp.SYSTEM.PERIP_CLK_EN1.SetBits(esp.SYSTEM_PERIP_CLK_EN1_CRYPTO_SHA_CLK_EN)
@@ -42,7 +45,7 @@ func Block(mode uint32, state []byte, p *[64]byte) {
 	for i := 0; i < words; i++ {
 		hMem[i].Set(binary.LittleEndian.Uint32(state[4*i:]))
 	}
-	for i := range mMem {
+	for i := 0; i < len(p)/4; i++ {
 		mMem[i].Set(binary.LittleEndian.Uint32(p[4*i:]))
 	}
 	esp.SHA.MODE.Set(mode)

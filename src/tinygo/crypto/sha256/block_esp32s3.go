@@ -5,4 +5,4 @@ package sha256
 import "tinygo/crypto/internal/shahw"
 
 // Block updates s with one block on the SHA accelerator.
-func Block(s *State, p *[BlockSize]byte) { shahw.Block(shahw.SHA256, s[:], p) }
+func Block(s *State, p *[BlockSize]byte) { shahw.Block(shahw.SHA256, s[:], p[:]) }
