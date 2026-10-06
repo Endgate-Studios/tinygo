@@ -1,6 +1,7 @@
 // Command tls-get gets https://www.google.com/ with TLS 1.3. It takes the time
 // from pool.ntp.org for the validity check, and it trusts the P-384 key of
-// the Google Trust Services root CA GTS Root R4 (valid until 2036).
+// the Google Trust Services root CA GTS Root R4 (valid until 2036). A second
+// request resumes the TLS session with the ticket of the first.
 // The SSID and the password come from the link:
 //
 //	tinygo flash -target esp32s3-psram-octal -ldflags='-X "main.ssid=..." -X "main.password=..."' ./src/examples/tls-get
@@ -22,7 +23,7 @@ var ssid, password string
 const host = "www.google.com"
 
 var (
-	socketMem [16 << 10]byte
+	socketMem [32 << 10]byte
 	tlsMem    [40 << 10]byte
 	page      [1024]byte
 )
@@ -86,17 +87,28 @@ func main() {
 
 	addr, err := stack.LookupHost(host, 5*time.Second)
 	must("lookup", err)
+	// The second request resumes with the ticket of the first one.
+	var session tls.Session
+	for i := 0; i < 2; i++ {
+		get(stack, addr, &tls.Config{ServerName: host, Time: now.Add(time.Since(boot)), Roots: roots, Session: &session})
+	}
+	println("tls-get done")
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+func get(stack *ip.Stack, addr ip.Addr, cfg *tls.Config) {
 	raw, err := stack.DialTCP(addr, 443, 4096, 5*time.Second)
 	must("dial", err)
 	tm, err := arena.NewHeap(tlsMem[:])
 	must("tls memory", err)
-	cfg := &tls.Config{ServerName: host, Time: now.Add(time.Since(boot)), Roots: roots}
 	c := tls.Client(raw, tm, rng{}, cfg)
 	t0 := time.Now()
 	must("handshake", c.Handshake())
-	println("handshake ms", int(time.Since(t0)/time.Millisecond), "tls memory peak", tm.Stats().Peak)
+	println("handshake ms", int(time.Since(t0)/time.Millisecond), "resumed", c.Resumed(), "tls memory peak", tm.Stats().Peak)
 
-	_, err = c.Write([]byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"))
+	_, err = c.Write([]byte("GET / HTTP/1.1\r\nHost: " + cfg.ServerName + "\r\nConnection: close\r\n\r\n"))
 	must("write", err)
 	total, first := 0, true
 	for {
@@ -117,10 +129,6 @@ func main() {
 	}
 	c.Close()
 	raw.Close()
-	println("tls-get done")
-	for {
-		time.Sleep(time.Hour)
-	}
 }
 
 var connected = make(chan struct{}, 1)
