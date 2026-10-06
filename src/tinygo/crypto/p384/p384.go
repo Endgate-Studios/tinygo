@@ -3,6 +3,8 @@
 // not constant time. It does not allocate.
 package p384
 
+import "tinygo/crypto/internal/mpi"
+
 // Size is the length of a coordinate and of a scalar in bytes.
 const Size = 48
 
@@ -19,17 +21,13 @@ var (
 
 var (
 	fp, fn field
-	bMont  nat
 	gen    point
 )
 
 func init() {
 	fp.init(&pNat)
 	fn.init(&nNat)
-	fp.toMont(&bMont, &bNat)
-	fp.toMont(&gen.x, &gx)
-	fp.toMont(&gen.y, &gy)
-	gen.z = fp.one
+	gen = point{x: gx, y: gy, z: nat{1}}
 }
 
 func fromBytes(z *nat, b *[Size]byte) {
@@ -68,30 +66,19 @@ func subNat(z, x, y *nat) uint32 {
 	return uint32(borrow)
 }
 
-// field is arithmetic modulo an odd prime m in Montgomery form, with
-// R = 2^384 (Handbook of Applied Cryptography, algorithm 14.36).
+// field is arithmetic modulo an odd prime m. tinygo/crypto/internal/mpi
+// multiplies, so the RSA accelerator does it on the ESP32-S3.
 type field struct {
 	m   nat
-	inv uint32 // -m^-1 mod 2^32
-	one nat    // R mod m
-	r2  nat    // R^2 mod m
+	mod mpi.Modulus
+	rr  nat
+	one nat
 }
 
 func (f *field) init(m *nat) {
 	f.m = *m
-	y := m[0]
-	for i := 0; i < 5; i++ {
-		y *= 2 - m[0]*y
-	}
-	f.inv = -y
-	r := nat{1}
-	for i := 0; i < 2*384; i++ {
-		if i == 384 {
-			f.one = r
-		}
-		f.add(&r, &r, &r)
-	}
-	f.r2 = r
+	f.one = nat{1}
+	f.mod.Init(f.m[:], f.rr[:])
 }
 
 func (f *field) add(z, x, y *nat) {
@@ -106,41 +93,10 @@ func (f *field) sub(z, x, y *nat) {
 	}
 }
 
-// mul sets z = x * y / R mod m. z can be x or y.
-func (f *field) mul(z, x, y *nat) {
-	const l = 12
-	var t [l + 2]uint32
-	for i := 0; i < l; i++ {
-		var c uint64
-		for j := 0; j < l; j++ {
-			v := uint64(t[j]) + uint64(x[i])*uint64(y[j]) + c
-			t[j], c = uint32(v), v>>32
-		}
-		v := uint64(t[l]) + c
-		t[l], t[l+1] = uint32(v), uint32(v>>32)
-		u := t[0] * f.inv
-		c = (uint64(t[0]) + uint64(u)*uint64(f.m[0])) >> 32
-		for j := 1; j < l; j++ {
-			v := uint64(t[j]) + uint64(u)*uint64(f.m[j]) + c
-			t[j-1], c = uint32(v), v>>32
-		}
-		v = uint64(t[l]) + c
-		t[l-1] = uint32(v)
-		t[l] = t[l+1] + uint32(v>>32)
-	}
-	r := (*nat)(t[:l])
-	if t[l] != 0 || !less(r, &f.m) {
-		subNat(r, r, &f.m)
-	}
-	*z = *r
-}
+// mul sets z = x * y mod m. z can be x or y.
+func (f *field) mul(z, x, y *nat) { f.mod.Mul(z[:], x[:], y[:]) }
 
-func (f *field) toMont(z, x *nat) { f.mul(z, x, &f.r2) }
-
-func (f *field) fromMont(z, x *nat) { f.mul(z, x, &nat{1}) }
-
-// invert sets z = x^(m-2), the inverse of x when x is not 0. x and z are in
-// Montgomery form.
+// invert sets z = x^(m-2), the inverse of x when x is not 0.
 func (f *field) invert(z, x *nat) {
 	e := f.m
 	e[0] -= 2
@@ -154,8 +110,8 @@ func (f *field) invert(z, x *nat) {
 	*z = acc
 }
 
-// point is a point in Jacobian coordinates in Montgomery form. z == 0 is
-// the point at infinity.
+// point is a point in Jacobian coordinates. z == 0 is the point at
+// infinity.
 type point struct{ x, y, z nat }
 
 // double uses dbl-2001-b for a = -3 (Explicit-Formulas Database,
@@ -242,7 +198,7 @@ func (q *point) add(p1, p2 *point) {
 	q.x, q.y, q.z = x3, y3, z3
 }
 
-// onCurve reports whether y^2 = x^3 - 3x + b, for x and y in Montgomery form.
+// onCurve reports whether y^2 = x^3 - 3x + b.
 func onCurve(x, y *nat) bool {
 	var lhs, rhs, t nat
 	fp.mul(&lhs, y, y)
@@ -251,21 +207,19 @@ func onCurve(x, y *nat) bool {
 	fp.add(&t, x, x)
 	fp.add(&t, &t, x)
 	fp.sub(&rhs, &rhs, &t)
-	fp.add(&rhs, &rhs, &bMont)
+	fp.add(&rhs, &rhs, &bNat)
 	return lhs == rhs
 }
 
-// affine reads (x, y) into q, in Montgomery form with z = 1, and reports
-// whether it is a point of the curve.
+// affine reads (x, y) into q, with z = 1, and reports whether it is a point
+// of the curve.
 func (q *point) affine(x, y *[Size]byte) bool {
 	fromBytes(&q.x, x)
 	fromBytes(&q.y, y)
 	if !less(&q.x, &pNat) || !less(&q.y, &pNat) {
 		return false
 	}
-	fp.toMont(&q.x, &q.x)
-	fp.toMont(&q.y, &q.y)
-	q.z = fp.one
+	q.z = nat{1}
 	return onCurve(&q.x, &q.y)
 }
 
@@ -300,10 +254,8 @@ func VerifyECDSA(hash []byte, r, s, qx, qy *[Size]byte) bool {
 	if !less(&e, &nNat) {
 		subNat(&e, &e, &nNat)
 	}
-	// w = s^-1 * R, so e * w and r * w come out of Montgomery form.
 	var w, u1, u2 nat
-	fn.toMont(&w, &sn)
-	fn.invert(&w, &w)
+	fn.invert(&w, &sn)
 	fn.mul(&u1, &e, &w)
 	fn.mul(&u2, &rn, &w)
 	// u1 * G + u2 * Q with one chain of doublings (Shamir's trick).
@@ -328,7 +280,6 @@ func VerifyECDSA(hash []byte, r, s, qx, qy *[Size]byte) bool {
 	fp.invert(&zi, &acc.z)
 	fp.mul(&zi, &zi, &zi)
 	fp.mul(&x, &acc.x, &zi)
-	fp.fromMont(&x, &x)
 	if !less(&x, &nNat) {
 		subNat(&x, &x, &nNat)
 	}
