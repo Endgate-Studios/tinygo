@@ -11,7 +11,7 @@ not.
 |---|---|---|
 | Dual core (`-scheduler=cores`) | Yes. Tested for 2 hours with Wi-Fi and BLE | No multicore code. Not tested with `-scheduler=cores` |
 | Wi-Fi and BLE at the same time | Yes. Tested | BLE stops at start with `BLE assert emi.c 164` on our board |
-| Static RAM of the radio | 11.2 KB less (Wi-Fi), 13.8 KB less (Wi-Fi and BLE) | Reference |
+| Static RAM of the radio | 9.3 KB less with Wi-Fi | Reference |
 | Blob memory, Wi-Fi connected | 27,976 bytes | 31,296 bytes |
 | AMPDU (frame aggregation) | On | Off |
 | Wi-Fi power save | `PowerSaveMinModem` (ESP-IDF default). `SetPowerSave` can change it | `WIFI_PS_NONE`, fixed |
@@ -79,30 +79,37 @@ tinygo flash -target esp32s3-psram-octal -scheduler=cores \
 
 ### Static RAM
 
-All values are in bytes, with `-scheduler=tasks`. With `-scheduler=cores`,
-the heap is 4,096 bytes smaller in all builds, for the stack of the second
-core.
+Measured on 2026-10-05 with the current linker script, which puts the sleep
+and extra Wi-Fi sections of the blobs in flash (see README.md, section IRAM).
+The builds use `-scheduler=tasks` and a dummy SSID with `-ldflags`, because a
+build without an SSID drops the radio code. With `-scheduler=cores`, the heap
+is 4,096 bytes smaller, for the stack of the second core. All values are in
+bytes:
 
-| | radio, Wi-Fi | espradio, Wi-Fi | radio, Wi-Fi and BLE | espradio, Wi-Fi and BLE |
-|---|---|---|---|---|
-| IRAM code | 38,800 | 39,780 | 54,608 | 58,148 |
-| .data | 8,920 | 9,332 | 9,660 | 9,824 |
-| .bss | 28,974 | 20,394 | 37,166 | 21,162 |
-| Example buffers in .bss | 18,440 | 0 | 25,612 | 0 |
-| GC heap left | 325,504 | 332,704 | 301,504 | 313,312 |
-| GC heap left without example buffers | 343,944 | 332,704 | 327,116 | 313,312 |
+- IRAM, `.data` and `.bss` are the section sizes of the ELF file.
+- The example buffers are the sizes of the symbols `socketMem`, `serverBuf`
+  and `ringMem` of our examples. The espradio test program has no such
+  buffers.
+- The GC heap is `_heap_end` minus `_heap_start`.
 
-The example buffers are the socket memory and the server buffers of our
-examples. The HTTP examples now have 32 KB of socket memory, 16,384 bytes
-more than in this table. The espradio test programs have no such buffers. Without them, the
-radio of device/esp/radio leaves more GC heap.
+| | radio, Wi-Fi (`wifi-http`) | espradio, Wi-Fi | radio, Wi-Fi and BLE (`wifi-ble`) |
+|---|---|---|---|
+| IRAM code | 22,180 | 22,300 | 37,988 |
+| .data | 8,832 | 9,332 | 9,572 |
+| .bss | 45,894 | 20,394 | 54,086 |
+| Example buffers in .bss | 33,792 | 0 | 41,984 |
+| GC heap | 325,728 | 350,192 | 300,704 |
+| GC heap without example buffers | 359,520 | 350,192 | 342,688 |
 
-On the ESP32-S3, IRAM and DRAM are the same SRAM. Each byte of IRAM code is
-one byte less for the GC heap. The two packages use the same linker script.
-The values above are from the old script, which put all Wi-Fi IRAM sections
-of the blobs (about 35 KB) in IRAM. The script now uses the ESP-IDF placement:
-the sleep and extra Wi-Fi sections go to flash. This gives the two packages
-16,608 bytes more GC heap with Wi-Fi. See README.md, section IRAM.
+Without the example buffers, device/esp/radio leaves 9,328 bytes more GC heap
+than espradio with Wi-Fi. The espradio build with Wi-Fi and BLE does not link
+with this linker script, because it needs 41 old BT ROM symbols, so it has no
+column. The blob heap comes from the GC heap at run time and is not in these
+values: 64 KB for Wi-Fi in device/esp/radio, and 48 KB in espradio.
+
+With the old linker script, which put all Wi-Fi IRAM sections in IRAM, the
+IRAM code of device/esp/radio with Wi-Fi was 38,800 bytes, and of espradio
+39,780 bytes.
 
 ### Blob heap
 
