@@ -309,6 +309,9 @@ type Error string
 
 func (e Error) Error() string { return string(e) }
 
+// Timeout reports whether the error is a deadline or a timeout, as the Timeout method of net.Error.
+func (e Error) Timeout() bool { return e == ErrDeadline || e == ErrTimeout }
+
 const (
 	ErrNoRoute      Error = "ip: no route to the address"
 	ErrNoARP        Error = "ip: no ARP reply"
