@@ -228,3 +228,16 @@ func FuzzDNS(f *testing.F) {
 		}
 	})
 }
+
+// FuzzNTP gives answers to the NTP answer parser.
+func FuzzNTP(f *testing.F) {
+	m := make([]byte, ntpLen)
+	m[0], m[1] = 0x24, 2
+	put32(m[40:], 0xeb000000)
+	f.Add(m)
+	f.Fuzz(func(t *testing.T, m []byte) {
+		if len(m) >= ntpLen {
+			ntpAnswer(m, time.Second)
+		}
+	})
+}
