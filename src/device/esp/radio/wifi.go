@@ -32,18 +32,56 @@ import (
 // Error is an esp_err_t code of the blobs.
 type Error int32
 
-// Errors of ESP-IDF v5.3.2 esp_err.h.
+// Errors of ESP-IDF v5.3.2 esp_err.h and esp_wifi.h.
 const (
 	ErrNoMem      Error = 0x101  // ESP_ERR_NO_MEM
 	ErrInvalidArg Error = 0x102  // ESP_ERR_INVALID_ARG
 	ErrNotInit    Error = 0x3001 // ESP_ERR_WIFI_NOT_INIT
+	ErrNotStarted Error = 0x3002 // ESP_ERR_WIFI_NOT_STARTED
+	ErrNotStopped Error = 0x3003 // ESP_ERR_WIFI_NOT_STOPPED
 )
 
 // ifStation is WIFI_IF_STA of wifi_interface_t.
 const ifStation = 0
 
 func (e Error) Error() string {
-	return "wifi: error 0x" + strconv.FormatInt(int64(e), 16)
+	return "radio: " + e.text() + " (0x" + strconv.FormatInt(int64(e), 16) + ")"
+}
+
+// text gives the meaning of the code, from the comments of esp_wifi.h and
+// esp_now.h.
+func (e Error) text() string {
+	switch e {
+	case ErrNoMem:
+		return "no memory"
+	case ErrInvalidArg:
+		return "invalid argument"
+	case ErrNotInit:
+		return "Wi-Fi is not initialized"
+	case ErrNotStarted:
+		return "Wi-Fi is not started"
+	case ErrNotStopped:
+		return "Wi-Fi is not stopped"
+	case ErrESPNowNotInit:
+		return "ESP-NOW is not initialized"
+	case ErrESPNowArg:
+		return "ESP-NOW invalid argument"
+	case ErrESPNowNoMem:
+		return "ESP-NOW has no memory"
+	case ErrESPNowFull:
+		return "ESP-NOW peer list is full"
+	case ErrESPNowNotFound:
+		return "ESP-NOW peer is not found"
+	case ErrESPNowInternal:
+		return "ESP-NOW internal error"
+	case ErrESPNowExist:
+		return "ESP-NOW peer exists"
+	case ErrESPNowIf:
+		return "ESP-NOW interface error"
+	case ErrESPNowChannel:
+		return "ESP-NOW channel error"
+	}
+	return "error"
 }
 
 func check(r C.int) error {
@@ -148,7 +186,7 @@ type AP struct {
 	BSSID   [6]byte
 	Channel uint8
 	RSSI    int8
-	Auth    int // wifi_auth_mode_t
+	Auth    AuthMode
 }
 
 // Scan does an active scan of all channels. It waits until the scan is done.
@@ -185,15 +223,28 @@ func Scan() ([]AP, error) {
 			SSID:    string(ssid),
 			Channel: uint8(r.primary),
 			RSSI:    int8(r.rssi),
-			Auth:    int(r.authmode),
+			Auth:    AuthMode(r.authmode),
 		}
 		copy(aps[i].BSSID[:], unsafe.Slice((*byte)(unsafe.Pointer(&r.bssid[0])), 6))
 	}
 	return aps, nil
 }
 
-// AuthWPA2PSK is WIFI_AUTH_WPA2_PSK of wifi_auth_mode_t.
-const AuthWPA2PSK = 3
+// AuthMode is wifi_auth_mode_t of ESP-IDF v5.3.2 esp_wifi_types_generic.h.
+type AuthMode int32
+
+const (
+	AuthOpen           AuthMode = 0
+	AuthWEP            AuthMode = 1
+	AuthWPAPSK         AuthMode = 2
+	AuthWPA2PSK        AuthMode = 3
+	AuthWPAWPA2PSK     AuthMode = 4
+	AuthWPA2Enterprise AuthMode = 5
+	AuthWPA3PSK        AuthMode = 6
+	AuthWPA2WPA3PSK    AuthMode = 7
+	AuthWAPIPSK        AuthMode = 8
+	AuthOWE            AuthMode = 9
+)
 
 // Connect starts to connect the station to a network. An empty password
 // selects an open network, and other networks need WPA2-PSK with CCMP. The
@@ -210,7 +261,7 @@ func Connect(ssid, password string) error {
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&sta.ssid[0])), len(sta.ssid)), ssid)
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&sta.password[0])), len(sta.password)), password)
 	if password != "" {
-		sta.threshold.authmode = AuthWPA2PSK
+		sta.threshold.authmode = C.int(AuthWPA2PSK)
 	}
 	if err := prepareSupplicant(ssid, password); err != nil {
 		return err

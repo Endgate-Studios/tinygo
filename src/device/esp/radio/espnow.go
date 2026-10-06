@@ -47,9 +47,9 @@ const (
 var (
 	// ErrESPNowNoAck tells that the peer did not acknowledge a unicast
 	// message, or that the blobs could not send it.
-	ErrESPNowNoAck = errors.New("espnow: the peer did not acknowledge the message")
+	ErrESPNowNoAck = errors.New("radio: the ESP-NOW peer did not acknowledge the message")
 	// ErrESPNowTimeout tells that the blobs did not report the send.
-	ErrESPNowTimeout = errors.New("espnow: no send status")
+	ErrESPNowTimeout = errors.New("radio: no ESP-NOW send status")
 )
 
 // ESPNowBroadcast is the address of all ESP-NOW devices on the channel. Add it

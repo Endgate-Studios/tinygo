@@ -15,6 +15,7 @@ import (
 	"device/esp"
 	"runtime"
 	"runtime/interrupt"
+	"strconv"
 	"sync/atomic"
 	"unsafe"
 )
@@ -32,7 +33,7 @@ const btClock = 0x61 << 11
 // ErrBLE is a failed controller call. The value is the result of the call.
 type ErrBLE int32
 
-func (e ErrBLE) Error() string { return "radio: BLE controller error" }
+func (e ErrBLE) Error() string { return "radio: BLE controller error " + strconv.Itoa(int(e)) }
 
 var ble struct {
 	enabled atomic.Bool
@@ -83,7 +84,7 @@ func BLEEnable(recv func(packet []byte), opts ...Option) error {
 
 // BLEDisable stops the Bluetooth LE controller, as esp_bt_controller_disable
 // and esp_bt_controller_deinit. BLEEnable starts it again. When Wi-Fi is off
-// too, the GC heap gets the blob heap back.
+// too, the radio power domain goes off. The blob heap stays for the next start.
 func BLEDisable() error {
 	if !ble.enabled.Load() {
 		return nil
