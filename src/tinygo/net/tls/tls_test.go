@@ -31,14 +31,14 @@ type chain struct {
 
 // newChain makes a root CA, an intermediate CA and a leaf for host, all on
 // P-256 with SHA-256.
-func newChain(t *testing.T, host string) *chain {
+func newChain(t testing.TB, host string) *chain {
 	t.Helper()
 	return newChainRoot(t, host, elliptic.P256(), stdx509.ECDSAWithSHA256)
 }
 
 // newChainRoot is newChain with a root key on curve, which signs the
 // intermediate with alg.
-func newChainRoot(t *testing.T, host string, curve elliptic.Curve, alg stdx509.SignatureAlgorithm) *chain {
+func newChainRoot(t testing.TB, host string, curve elliptic.Curve, alg stdx509.SignatureAlgorithm) *chain {
 	t.Helper()
 	mk := func(tmpl, parent *stdx509.Certificate, pub *ecdsa.PublicKey, priv *ecdsa.PrivateKey) *stdx509.Certificate {
 		der, err := stdx509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
