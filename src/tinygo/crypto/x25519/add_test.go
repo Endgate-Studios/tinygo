@@ -14,7 +14,7 @@ func elemBig(e *fe) *big.Int {
 	return b
 }
 
-// TestAddSub compares feAdd and feSub with math/big, also at 0 and p - 1.
+// TestAddSub compares add and sub with math/big, also at 0 and p - 1.
 func TestAddSub(t *testing.T) {
 	r := rand.New(rand.NewSource(7))
 	pb := elemBig(&p)

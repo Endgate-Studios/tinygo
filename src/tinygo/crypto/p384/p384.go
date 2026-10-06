@@ -81,18 +81,6 @@ func (f *field) init(m *nat) {
 	f.mod.Init(f.m[:], f.rr[:])
 }
 
-func (f *field) add(z, x, y *nat) {
-	if addNat(z, x, y) != 0 || !less(z, &f.m) {
-		subNat(z, z, &f.m)
-	}
-}
-
-func (f *field) sub(z, x, y *nat) {
-	if subNat(z, x, y) != 0 {
-		addNat(z, z, &f.m)
-	}
-}
-
 // mul sets z = x * y mod m. z can be x or y.
 func (f *field) mul(z, x, y *nat) { f.mod.Mul(z[:], x[:], y[:]) }
 
@@ -121,27 +109,27 @@ func (q *point) double(p *point) {
 	fp.mul(&delta, &p.z, &p.z)
 	fp.mul(&gamma, &p.y, &p.y)
 	fp.mul(&beta, &p.x, &gamma)
-	fp.sub(&t1, &p.x, &delta)
-	fp.add(&t2, &p.x, &delta)
+	subP(&t1, &p.x, &delta)
+	addP(&t2, &p.x, &delta)
 	fp.mul(&alpha, &t1, &t2)
-	fp.add(&t1, &alpha, &alpha)
-	fp.add(&alpha, &alpha, &t1)
-	fp.add(&t1, &p.y, &p.z)
+	addP(&t1, &alpha, &alpha)
+	addP(&alpha, &alpha, &t1)
+	addP(&t1, &p.y, &p.z)
 	fp.mul(&z3, &t1, &t1)
-	fp.sub(&z3, &z3, &gamma)
-	fp.sub(&z3, &z3, &delta)
-	fp.add(&t1, &beta, &beta)
-	fp.add(&t1, &t1, &t1)
-	fp.add(&t2, &t1, &t1)
+	subP(&z3, &z3, &gamma)
+	subP(&z3, &z3, &delta)
+	addP(&t1, &beta, &beta)
+	addP(&t1, &t1, &t1)
+	addP(&t2, &t1, &t1)
 	fp.mul(&x3, &alpha, &alpha)
-	fp.sub(&x3, &x3, &t2)
-	fp.sub(&t1, &t1, &x3)
+	subP(&x3, &x3, &t2)
+	subP(&t1, &t1, &x3)
 	fp.mul(&y3, &alpha, &t1)
 	fp.mul(&t2, &gamma, &gamma)
-	fp.add(&t2, &t2, &t2)
-	fp.add(&t2, &t2, &t2)
-	fp.add(&t2, &t2, &t2)
-	fp.sub(&y3, &y3, &t2)
+	addP(&t2, &t2, &t2)
+	addP(&t2, &t2, &t2)
+	addP(&t2, &t2, &t2)
+	subP(&y3, &y3, &t2)
 	q.x, q.y, q.z = x3, y3, z3
 }
 
@@ -165,8 +153,8 @@ func (q *point) add(p1, p2 *point) {
 	fp.mul(&s1, &p1.y, &t)
 	fp.mul(&t, &p1.z, &z1z1)
 	fp.mul(&s2, &p2.y, &t)
-	fp.sub(&h, &u2, &u1)
-	fp.sub(&r, &s2, &s1)
+	subP(&h, &u2, &u1)
+	subP(&r, &s2, &s1)
 	if h == (nat{}) {
 		if r == (nat{}) {
 			q.double(p1)
@@ -175,25 +163,25 @@ func (q *point) add(p1, p2 *point) {
 		}
 		return
 	}
-	fp.add(&r, &r, &r)
-	fp.add(&i, &h, &h)
+	addP(&r, &r, &r)
+	addP(&i, &h, &h)
 	fp.mul(&i, &i, &i)
 	fp.mul(&j, &h, &i)
 	fp.mul(&v, &u1, &i)
 	var x3, y3, z3 nat
 	fp.mul(&x3, &r, &r)
-	fp.sub(&x3, &x3, &j)
-	fp.sub(&x3, &x3, &v)
-	fp.sub(&x3, &x3, &v)
-	fp.sub(&t, &v, &x3)
+	subP(&x3, &x3, &j)
+	subP(&x3, &x3, &v)
+	subP(&x3, &x3, &v)
+	subP(&t, &v, &x3)
 	fp.mul(&y3, &r, &t)
 	fp.mul(&t, &s1, &j)
-	fp.add(&t, &t, &t)
-	fp.sub(&y3, &y3, &t)
-	fp.add(&t, &p1.z, &p2.z)
+	addP(&t, &t, &t)
+	subP(&y3, &y3, &t)
+	addP(&t, &p1.z, &p2.z)
 	fp.mul(&t, &t, &t)
-	fp.sub(&t, &t, &z1z1)
-	fp.sub(&t, &t, &z2z2)
+	subP(&t, &t, &z1z1)
+	subP(&t, &t, &z2z2)
 	fp.mul(&z3, &t, &h)
 	q.x, q.y, q.z = x3, y3, z3
 }
@@ -204,10 +192,10 @@ func onCurve(x, y *nat) bool {
 	fp.mul(&lhs, y, y)
 	fp.mul(&rhs, x, x)
 	fp.mul(&rhs, &rhs, x)
-	fp.add(&t, x, x)
-	fp.add(&t, &t, x)
-	fp.sub(&rhs, &rhs, &t)
-	fp.add(&rhs, &rhs, &bNat)
+	addP(&t, x, x)
+	addP(&t, &t, x)
+	subP(&rhs, &rhs, &t)
+	addP(&rhs, &rhs, &bNat)
 	return lhs == rhs
 }
 
@@ -258,20 +246,18 @@ func VerifyECDSA(hash []byte, r, s, qx, qy *[Size]byte) bool {
 	fn.invert(&w, &sn)
 	fn.mul(&u1, &e, &w)
 	fn.mul(&u2, &rn, &w)
-	// u1 * G + u2 * Q with one chain of doublings (Shamir's trick).
-	var both, acc point
-	both.add(&gen, &q)
-	for i := 383; i >= 0; i-- {
+	// u1 * G + u2 * Q with one chain of doublings and the width-4 NAF of
+	// each scalar (Shamir's trick).
+	var tg, tq table
+	tg.oddMultiples(&gen)
+	tq.oddMultiples(&q)
+	var d1, d2 [nafLen]int8
+	n1, n2 := naf(&d1, &u1), naf(&d2, &u2)
+	var acc point
+	for i := max(n1, n2) - 1; i >= 0; i-- {
 		acc.double(&acc)
-		b1, b2 := u1[i/32]>>(i%32)&1, u2[i/32]>>(i%32)&1
-		switch {
-		case b1 == 1 && b2 == 1:
-			acc.add(&acc, &both)
-		case b1 == 1:
-			acc.add(&acc, &gen)
-		case b2 == 1:
-			acc.add(&acc, &q)
-		}
+		acc.addDigit(&tg, d1[i])
+		acc.addDigit(&tq, d2[i])
 	}
 	if acc.z == (nat{}) {
 		return false
@@ -284,4 +270,79 @@ func VerifyECDSA(hash []byte, r, s, qx, qy *[Size]byte) bool {
 		subNat(&x, &x, &nNat)
 	}
 	return x == rn
+}
+
+// nafLen is the most digits of the NAF of a number below 2^384.
+const nafLen = 8*Size + 1
+
+// naf writes the width-4 NAF of k, the least significant digit first, and
+// gives the number of digits. The digits are 0, 1, 3, 5 and 7 and their
+// negatives (Hankerson, Menezes and Vanstone, Guide to Elliptic Curve
+// Cryptography, algorithm 3.35).
+func naf(d *[nafLen]int8, k *nat) int {
+	var v [13]uint32
+	copy(v[:], k[:])
+	n := 0
+	for v != ([13]uint32{}) {
+		var digit int8
+		if v[0]&1 == 1 {
+			digit = int8(v[0] & 15)
+			if digit >= 8 {
+				digit -= 16
+			}
+			// v -= digit, so the next 3 bits are 0.
+			if digit > 0 {
+				c := uint32(digit)
+				for i := range v {
+					w := v[i]
+					v[i] = w - c
+					if w >= c {
+						break
+					}
+					c = 1
+				}
+			} else {
+				c := uint32(-digit)
+				for i := range v {
+					v[i] += c
+					if v[i] >= c {
+						break
+					}
+					c = 1
+				}
+			}
+		}
+		d[n] = digit
+		n++
+		for i := 0; i < len(v)-1; i++ {
+			v[i] = v[i]>>1 | v[i+1]<<31
+		}
+		v[len(v)-1] >>= 1
+	}
+	return n
+}
+
+// table holds p, 3p, 5p and 7p for addDigit.
+type table [4]point
+
+// oddMultiples sets t to p, 3p, 5p and 7p.
+func (t *table) oddMultiples(p *point) {
+	var p2 point
+	p2.double(p)
+	t[0] = *p
+	for i := 1; i < len(t); i++ {
+		t[i].add(&t[i-1], &p2)
+	}
+}
+
+// addDigit adds d times the point of t, for a digit of naf.
+func (q *point) addDigit(t *table, d int8) {
+	switch {
+	case d > 0:
+		q.add(q, &t[d/2])
+	case d < 0:
+		neg := t[-d/2]
+		subP(&neg.y, &nat{}, &neg.y)
+		q.add(q, &neg)
+	}
 }
