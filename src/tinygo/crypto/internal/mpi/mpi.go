@@ -31,20 +31,48 @@ func (k *Modulus) Init(m, rr []uint32) bool {
 	}
 	lastID++
 	*k = Modulus{m: m, rr: rr, inv: -y, id: lastID}
-	// R^2 mod m by doubling. m is public, so this need not be constant time.
-	clear(rr)
-	rr[0] = 1
-	for i := 0; i < 64*n; i++ {
-		top := rr[n-1] >> 31
-		for j := n - 1; j > 0; j-- {
-			rr[j] = rr[j]<<1 | rr[j-1]>>31
-		}
-		rr[0] <<= 1
-		if top == 1 || !less(rr, m) {
-			sub(rr, rr, m)
-		}
+	// m is public, so this need not be constant time. First rr = R mod m,
+	// from 2^(bits-1), which is below m, by doubling.
+	bits := 32*n - 32
+	for top := m[n-1]; top != 0; top >>= 1 {
+		bits++
 	}
+	clear(rr)
+	rr[(bits-1)/32] = 1 << ((bits - 1) % 32)
+	for i := bits - 1; i < 32*n; i++ {
+		double(rr, m)
+	}
+	// With rr = R mod m, Mul gives x*y/R. Then 2^e*R squared is 2^(2e)*R,
+	// and 2^(32n)*R is R^2. 32n is an odd number times a power of two.
+	var vb [MaxWords]uint32
+	v := vb[:n]
+	copy(v, rr)
+	odd, squarings := 32*n, 0
+	for odd%2 == 0 {
+		odd /= 2
+		squarings++
+	}
+	for i := 0; i < odd; i++ {
+		double(v, m)
+	}
+	for i := 0; i < squarings; i++ {
+		k.Mul(v, v, v)
+	}
+	copy(rr, v)
 	return true
+}
+
+// double sets z = 2z mod m, for z below m.
+func double(z, m []uint32) {
+	n := len(z)
+	top := z[n-1] >> 31
+	for j := n - 1; j > 0; j-- {
+		z[j] = z[j]<<1 | z[j-1]>>31
+	}
+	z[0] <<= 1
+	if top == 1 || !less(z, m) {
+		sub(z, z, m)
+	}
 }
 
 // Words gives the length of the modulus in words.
