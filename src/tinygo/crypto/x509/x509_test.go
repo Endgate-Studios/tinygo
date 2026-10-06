@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	stdx509 "crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
@@ -117,4 +118,43 @@ func FuzzParse(f *testing.F) {
 			c.VerifyHostname("example.com")
 		}
 	})
+}
+
+func TestRSA(t *testing.T) {
+	mem, _ := arena.NewHeap(make([]byte, 16<<10))
+	caKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	caTmpl := &stdx509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "RSA CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: stdx509.KeyUsageCertSign, SignatureAlgorithm: stdx509.SHA256WithRSA}
+	caDER := makeCertAny(t, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	leafKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	leafTmpl := &stdx509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "leaf"}, DNSNames: []string{"rsa.example"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), SignatureAlgorithm: stdx509.SHA256WithRSA}
+	leafDER := makeCertAny(t, leafTmpl, caTmpl, &leafKey.PublicKey, caKey)
+	var ca, leaf Certificate
+	if err := Parse(caDER, &ca); err != nil {
+		t.Fatal(err)
+	}
+	if err := Parse(leafDER, &leaf); err != nil {
+		t.Fatal(err)
+	}
+	if !ca.RSA || !leaf.RSA || leaf.SigAlg != SigRSASHA256 || leaf.RSAKey.E != 65537 || len(leaf.RSAKey.N) != 256 {
+		t.Fatalf("RSA %v %v, alg %d, e %d, n %d bytes", ca.RSA, leaf.RSA, leaf.SigAlg, leaf.RSAKey.E, len(leaf.RSAKey.N))
+	}
+	if !leaf.CheckSignatureFrom(mem, &ca) {
+		t.Fatal("the leaf signature of the RSA CA does not verify")
+	}
+	leaf.TBS[len(leaf.TBS)-1] ^= 1
+	if leaf.CheckSignatureFrom(mem, &ca) {
+		t.Error("a changed certificate verifies")
+	}
+}
+
+func makeCertAny(t *testing.T, tmpl, parent *stdx509.Certificate, pub, priv any) []byte {
+	t.Helper()
+	der, err := stdx509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }

@@ -7,9 +7,17 @@ package x509
 import (
 	"time"
 
+	"runtime/memory"
 	"tinygo/crypto/p256"
+	"tinygo/crypto/rsa"
 	"tinygo/crypto/sha256"
 )
+
+// Memory is where the signature checks get their working memory.
+type Memory interface {
+	memory.Allocator
+	memory.Freer
+}
 
 // Error is a string error type, so error values are constants in flash.
 type Error string
@@ -26,6 +34,7 @@ const (
 	SigUnknown = iota
 	SigECDSASHA256
 	SigECDSASHA384
+	SigRSASHA256
 )
 
 // Certificate is a parsed certificate. Its slices refer to the DER bytes.
@@ -42,7 +51,9 @@ type Certificate struct {
 	P256      bool   // the key is an EC key on P-256
 	KeyX      [32]byte
 	KeyY      [32]byte
-	dnsNames  []byte // the content of the SAN extension, or nil
+	RSA       bool          // the key is an RSA key
+	RSAKey    rsa.PublicKey // N refers to the DER bytes
+	dnsNames  []byte        // the content of the SAN extension, or nil
 	IsCA      bool
 }
 
@@ -50,6 +61,8 @@ type Certificate struct {
 var (
 	oidECDSASHA256 = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02}
 	oidECDSASHA384 = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03}
+	oidRSASHA256   = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b}
+	oidRSA         = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01}
 	oidECPublicKey = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01}
 	oidP256        = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07}
 	oidSAN         = []byte{0x55, 0x1d, 0x11}
@@ -129,6 +142,8 @@ func Parse(der []byte, c *Certificate) error {
 		c.SigAlg = SigECDSASHA256
 	case equal(oid, oidECDSASHA384):
 		c.SigAlg = SigECDSASHA384
+	case equal(oid, oidRSASHA256):
+		c.SigAlg = SigRSASHA256
 	}
 	sig, _, _, ok := expect(rest, tagBitString)
 	if !ok || len(sig) < 1 || sig[0] != 0 {
@@ -188,13 +203,17 @@ func parseTBS(b []byte, c *Certificate) error {
 	return nil
 }
 
-// parseKey reads an EC key on P-256 in uncompressed form.
+// parseKey reads an EC key on P-256 in uncompressed form, or an RSA key.
 func parseKey(spki []byte, c *Certificate) {
 	alg, _, rest, ok := expect(spki, tagSequence)
 	if !ok {
 		return
 	}
 	oid, _, params, ok := expect(alg, tagOID)
+	if ok && equal(oid, oidRSA) {
+		parseRSAKey(rest, c)
+		return
+	}
 	if !ok || !equal(oid, oidECPublicKey) {
 		return
 	}
@@ -209,6 +228,38 @@ func parseKey(spki []byte, c *Certificate) {
 	copy(c.KeyX[:], key[2:34])
 	copy(c.KeyY[:], key[34:66])
 	c.P256 = p256.OnCurve(&c.KeyX, &c.KeyY)
+}
+
+// parseRSAKey reads the BIT STRING with SEQUENCE { n INTEGER, e INTEGER }.
+func parseRSAKey(b []byte, c *Certificate) {
+	key, _, _, ok := expect(b, tagBitString)
+	if !ok || len(key) < 1 || key[0] != 0 {
+		return
+	}
+	seq, _, _, ok := expect(key[1:], tagSequence)
+	if !ok {
+		return
+	}
+	n, _, rest, ok := expect(seq, tagInteger)
+	if !ok {
+		return
+	}
+	e, _, _, ok := expect(rest, tagInteger)
+	if !ok || len(e) == 0 || len(e) > 4 || e[0]&0x80 != 0 {
+		return
+	}
+	for len(n) > 0 && n[0] == 0 {
+		n = n[1:]
+	}
+	if len(n) < 128 || len(n)*8 > rsa.MaxBits {
+		return // below 1024 bits, or too large
+	}
+	var ev uint32
+	for _, x := range e {
+		ev = ev<<8 | uint32(x)
+	}
+	c.RSAKey = rsa.PublicKey{N: n, E: ev}
+	c.RSA = true
 }
 
 func parseExtensions(b []byte, c *Certificate) error {
@@ -333,17 +384,33 @@ func matchHost(pattern []byte, host string) bool {
 	return equalFold(pattern, host)
 }
 
-// CheckSignatureFrom reports whether parent signed c with ECDSA P-256 and
-// SHA-256, and parent is a CA.
-func (c *Certificate) CheckSignatureFrom(mem p256.Memory, parent *Certificate) bool {
-	if !parent.P256 || !parent.IsCA || c.SigAlg != SigECDSASHA256 || !equal(c.Issuer, parent.Subject) {
+// CheckSignatureFrom reports whether parent, a CA, signed c with ECDSA P-256
+// and SHA-256 or with RSA PKCS #1 v1.5 and SHA-256.
+func (c *Certificate) CheckSignatureFrom(mem Memory, parent *Certificate) bool {
+	if !parent.IsCA || !equal(c.Issuer, parent.Subject) {
 		return false
 	}
-	return VerifyECDSA(mem, c.TBS, c.Sig, &parent.KeyX, &parent.KeyY)
+	switch {
+	case parent.P256 && c.SigAlg == SigECDSASHA256:
+		return VerifyECDSA(mem, c.TBS, c.Sig, &parent.KeyX, &parent.KeyY)
+	case parent.RSA && c.SigAlg == SigRSASHA256:
+		return VerifyRSA(mem, c.TBS, c.Sig, &parent.RSAKey)
+	}
+	return false
+}
+
+// VerifyRSA checks a PKCS #1 v1.5 signature over the SHA-256 of msg.
+func VerifyRSA(mem Memory, msg, sig []byte, k *rsa.PublicKey) bool {
+	var d sha256.Digest
+	d.Reset(sha256.Init, 0)
+	d.Write(msg)
+	var h [sha256.Size]byte
+	d.Sum(&h)
+	return rsa.VerifyPKCS1v15(mem, k, &h, sig)
 }
 
 // VerifyECDSA checks a DER ECDSA-Sig-Value over the SHA-256 of msg.
-func VerifyECDSA(mem p256.Memory, msg, sig []byte, x, y *[32]byte) bool {
+func VerifyECDSA(mem Memory, msg, sig []byte, x, y *[32]byte) bool {
 	var r, s [32]byte
 	if !parseSig(sig, &r, &s) {
 		return false
