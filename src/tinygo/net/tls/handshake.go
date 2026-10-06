@@ -22,6 +22,7 @@ const (
 	hsCertificate         = 11
 	hsCertificateVerify   = 15
 	hsFinished            = 20
+	hsMessageHash         = 254
 	hsKeyUpdate           = 24
 )
 
@@ -34,6 +35,7 @@ const (
 	sigRSAPKCS1SHA256    = 0x0401 // only for certificates
 	sigECDSAP384SHA384   = 0x0503 // only for certificates
 	maxCerts             = 4
+	maxCookie            = 256
 )
 
 // helloRetry is the random of a HelloRetryRequest (section 4.1.3).
@@ -46,8 +48,12 @@ var helloRetry = [32]byte{
 type hsState struct {
 	priv, pubX, pubY [32]byte
 	xPriv, xPub      [32]byte
+	offer            int // the group of the client key share
 	group            int // the group of the server key share
+	random           [32]byte
 	sessionID        [32]byte
+	cookie           [maxCookie]byte
+	cookieLen        int
 	hsSecret         [sha256.Size]byte
 	cHS, sHS         [sha256.Size]byte
 	certs            [maxCerts]x509.Certificate
@@ -100,28 +106,58 @@ func (c *Conn) Handshake() error {
 
 func (c *Conn) handshake(st *hsState) error {
 	c.transcript.Reset(sha256.Init, 0)
-	if err := p256.GenerateKey(c.mem, c.rng, &st.priv, &st.pubX, &st.pubY); err != nil {
-		return err
+	for _, b := range [][]byte{st.random[:], st.sessionID[:], st.xPriv[:]} {
+		if _, err := io.ReadFull(c.rng, b); err != nil {
+			return err
+		}
 	}
-	if _, err := io.ReadFull(c.rng, st.xPriv[:]); err != nil {
-		return err
-	}
+	// Only an X25519 key share, and secp256r1 after a HelloRetryRequest.
 	x25519.X25519(&st.xPub, &st.xPriv, &x25519.Basepoint)
+	st.offer = groupX25519
 	if err := c.sendClientHello(st); err != nil {
 		return err
 	}
-	typ, body, err := c.readHandshake()
-	if err != nil {
-		return err
-	}
-	if typ != hsServerHello {
-		return ErrHandshake
-	}
 	var peerX, peerY [32]byte
-	if err := parseServerHello(body, st, &peerX, &peerY); err != nil {
-		return err
+	for {
+		typ, body, err := c.readHandshake()
+		if err != nil {
+			return err
+		}
+		if typ != hsServerHello {
+			return ErrHandshake
+		}
+		retry, err := parseServerHello(body, st, &peerX, &peerY)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			c.addTranscript()
+			break
+		}
+		if st.offer != groupX25519 {
+			return ErrRetry // a second HelloRetryRequest (section 4.1.4)
+		}
+		// The transcript starts again with the hash of ClientHello1 in a
+		// message_hash message (section 4.4.1).
+		h := c.hash()
+		c.transcript.Reset(sha256.Init, 0)
+		c.transcript.Write([]byte{hsMessageHash, 0, 0, sha256.Size})
+		c.transcript.Write(h[:])
+		c.addTranscript()
+		if c.hsLen != 0 {
+			return ErrHandshake
+		}
+		if err := p256.GenerateKey(c.mem, c.rng, &st.priv, &st.pubX, &st.pubY); err != nil {
+			return err
+		}
+		st.offer = groupSecp256r1
+		if err := c.sendClientHello(st); err != nil {
+			return err
+		}
 	}
-	c.addTranscript()
+	var typ byte
+	var body []byte
+	var err error
 
 	// The handshake secrets (section 7.1).
 	var shared, early, derived, zero [32]byte
@@ -249,19 +285,13 @@ func (c *Conn) hash() [sha256.Size]byte {
 	return out
 }
 
-// sendClientHello writes the ClientHello into the transcript and sends it.
+// sendClientHello writes the ClientHello with the key share of st.offer into
+// the transcript and sends it.
 func (c *Conn) sendClientHello(st *hsState) error {
-	var random [32]byte
-	if _, err := io.ReadFull(c.rng, random[:]); err != nil {
-		return err
-	}
-	if _, err := io.ReadFull(c.rng, st.sessionID[:]); err != nil {
-		return err
-	}
 	name := c.cfg.ServerName
 	b := c.hs[:0]
 	b = append(b, hsClientHello, 0, 0, 0, 3, 3)
-	b = append(b, random[:]...)
+	b = append(b, st.random[:]...)
 	b = append(b, 32)
 	b = append(b, st.sessionID[:]...)
 	b = append(b, 0, 2, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff, 1, 0)
@@ -277,12 +307,18 @@ func (c *Conn) sendClientHello(st *hsState) error {
 		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff,
 		sigECDSAP384SHA384>>8, sigECDSAP384SHA384&0xff)
 	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
-	// Key shares for X25519 and secp256r1: 36 and 69 bytes.
-	b = append(b, 0, 0x33, 0, 107, 0, 105, groupX25519>>8, groupX25519&0xff, 0, 32)
-	b = append(b, st.xPub[:]...)
-	b = append(b, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
-	b = append(b, st.pubX[:]...)
-	b = append(b, st.pubY[:]...)
+	if st.offer == groupX25519 {
+		b = append(b, 0, 0x33, 0, 38, 0, 36, groupX25519>>8, groupX25519&0xff, 0, 32)
+		b = append(b, st.xPub[:]...)
+	} else {
+		b = append(b, 0, 0x33, 0, 71, 0, 69, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
+		b = append(b, st.pubX[:]...)
+		b = append(b, st.pubY[:]...)
+	}
+	if n := st.cookieLen; n > 0 {
+		b = append(b, 0, 0x2c, byte((n+2)>>8), byte(n+2), byte(n>>8), byte(n))
+		b = append(b, st.cookie[:n]...)
+	}
 	el := len(b) - ext - 2
 	b[ext], b[ext+1] = byte(el>>8), byte(el)
 	l := len(b) - 4
@@ -330,54 +366,65 @@ func (c *Conn) addTranscript() {
 	c.hsLen -= n
 }
 
-func parseServerHello(b []byte, st *hsState, x, y *[32]byte) error {
+// parseServerHello reads a ServerHello, or a HelloRetryRequest, which it
+// reports with retry. A HelloRetryRequest must ask for secp256r1, and its
+// cookie goes into st (section 4.1.4).
+func parseServerHello(b []byte, st *hsState, x, y *[32]byte) (retry bool, err error) {
 	if len(b) < 2+32+1+32+2+1+2 {
-		return ErrHandshake
+		return false, ErrHandshake
 	}
-	if [32]byte(b[2:34]) == helloRetry {
-		return ErrRetry
-	}
+	retry = [32]byte(b[2:34]) == helloRetry
 	if b[34] != 32 || [32]byte(b[35:67]) != st.sessionID {
-		return ErrHandshake
+		return false, ErrHandshake
 	}
 	if int(b[67])<<8|int(b[68]) != suiteAES128GCMSHA256 || b[69] != 0 {
-		return ErrUnsupported
+		return false, ErrUnsupported
 	}
 	ext := b[70:]
 	if len(ext) < 2 || int(ext[0])<<8|int(ext[1]) != len(ext)-2 {
-		return ErrHandshake
+		return false, ErrHandshake
 	}
 	ext = ext[2:]
 	version, key := false, false
+	st.cookieLen = 0
 	for len(ext) >= 4 {
 		typ, n := int(ext[0])<<8|int(ext[1]), int(ext[2])<<8|int(ext[3])
 		if 4+n > len(ext) {
-			return ErrHandshake
+			return false, ErrHandshake
 		}
 		v := ext[4 : 4+n]
 		ext = ext[4+n:]
 		switch typ {
 		case 0x2b: // supported_versions
 			version = n == 2 && v[0] == 3 && v[1] == 4
+		case 0x2c: // cookie
+			if !retry || n < 2 || int(v[0])<<8|int(v[1]) != n-2 || n-2 > maxCookie {
+				return false, ErrUnsupported
+			}
+			st.cookieLen = copy(st.cookie[:], v[2:])
 		case 0x33: // key_share
 			switch {
-			case n == 4+32 && int(v[0])<<8|int(v[1]) == groupX25519 && v[2] == 0 && v[3] == 32:
+			case retry:
+				if n != 2 || int(v[0])<<8|int(v[1]) != groupSecp256r1 {
+					return false, ErrUnsupported
+				}
+			case st.offer == groupX25519 && n == 4+32 && int(v[0])<<8|int(v[1]) == groupX25519 && v[2] == 0 && v[3] == 32:
 				copy(x[:], v[4:36])
 				st.group = groupX25519
-			case n == 4+65 && int(v[0])<<8|int(v[1]) == groupSecp256r1 && v[2] == 0 && v[3] == 65 && v[4] == 4:
+			case st.offer == groupSecp256r1 && n == 4+65 && int(v[0])<<8|int(v[1]) == groupSecp256r1 && v[2] == 0 && v[3] == 65 && v[4] == 4:
 				copy(x[:], v[5:37])
 				copy(y[:], v[37:69])
 				st.group = groupSecp256r1
 			default:
-				return ErrUnsupported
+				return false, ErrUnsupported
 			}
 			key = true
 		}
 	}
 	if !version || !key || len(ext) != 0 {
-		return ErrUnsupported
+		return false, ErrUnsupported
 	}
-	return nil
+	return retry, nil
 }
 
 // parseCertificates reads the chain of the Certificate message.

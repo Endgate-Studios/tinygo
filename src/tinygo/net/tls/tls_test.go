@@ -108,8 +108,29 @@ func serveCurve(t *testing.T, conn net.Conn, ch *chain, curve stdtls.CurveID, do
 	done <- err
 }
 
+// connPair gives the two ends of a TCP connection on the loopback interface.
+// It has buffers, as on the board: after a HelloRetryRequest the server sends
+// ChangeCipherSpec while the client sends the second ClientHello.
+func connPair(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	a, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b
+}
+
 func client(t *testing.T, cfg *Config) (*Conn, net.Conn, *arena.Heap) {
-	a, b := net.Pipe()
+	a, b := connPair(t)
 	t.Cleanup(func() { a.Close(); b.Close() })
 	mem, _ := arena.NewHeap(make([]byte, 48<<10))
 	return Client(pipeConn{a}, mem, rand.Reader, cfg), b, mem
@@ -302,7 +323,7 @@ func (s *slowConn) Read(b []byte) (int, error) {
 // in the middle of the records: the client must go on where it stopped.
 func TestTimeouts(t *testing.T) {
 	ch := newChain(t, "node.example")
-	a, b := net.Pipe()
+	a, b := connPair(t)
 	defer a.Close()
 	defer b.Close()
 	mem, _ := arena.NewHeap(make([]byte, 48<<10))
@@ -355,4 +376,51 @@ func TestX25519(t *testing.T) {
 		t.Fatalf("server: %v", err)
 	}
 	c.Close()
+}
+
+// helloCounter counts the ClientHello records that the client writes.
+type helloCounter struct {
+	pipeConn
+	hellos int
+}
+
+func (h *helloCounter) Write(b []byte) (int, error) {
+	if len(b) > 5 && b[0] == recordHandshake && b[5] == hsClientHello {
+		h.hellos++
+	}
+	return h.pipeConn.Write(b)
+}
+
+// TestHelloRetry checks that the client sends one key share for X25519, and
+// a second ClientHello with secp256r1 when the server asks for it.
+func TestHelloRetry(t *testing.T) {
+	ch := newChain(t, "node.example")
+	for _, tc := range []struct {
+		curve  stdtls.CurveID
+		hellos int
+	}{{stdtls.X25519, 1}, {stdtls.CurveP256, 2}} {
+		a, b := connPair(t)
+		mem, _ := arena.NewHeap(make([]byte, 48<<10))
+		hc := &helloCounter{pipeConn: pipeConn{a}}
+		c := Client(hc, mem, rand.Reader, &Config{ServerName: "node.example", Roots: []PublicKey{key(ch.ca)}})
+		done := make(chan error, 1)
+		go serveCurve(t, b, ch, tc.curve, done)
+		if err := c.Handshake(); err != nil {
+			t.Fatalf("%v: handshake: %v", tc.curve, err)
+		}
+		buf := make([]byte, 64)
+		if n, err := c.Read(buf); err != nil || string(buf[:n]) != "hello client" {
+			t.Fatalf("%v: read %q %v", tc.curve, buf[:n], err)
+		}
+		if hc.hellos != tc.hellos {
+			t.Errorf("%v: %d ClientHello messages, want %d", tc.curve, hc.hellos, tc.hellos)
+		}
+		b.Close()
+		<-done
+		c.Close()
+		a.Close()
+		if mem.Stats().InUse != 0 {
+			t.Errorf("%v: memory in use after Close: %d", tc.curve, mem.Stats().InUse)
+		}
+	}
 }
