@@ -1,12 +1,15 @@
 // Package rsa verifies RSA signatures with SHA-256 (RFC 8017): PKCS #1 v1.5
 // for certificates and PSS for TLS 1.3. The inputs are public, so the code is
-// not constant time. The working numbers come from an injected allocator.
+// not constant time. The working numbers come from an injected allocator, and
+// tinygo/crypto/internal/mpi multiplies, so the RSA accelerator does it on the
+// ESP32-S3.
 package rsa
 
 import (
 	"crypto/subtle"
 
 	"runtime/memory"
+	"tinygo/crypto/internal/mpi"
 	"tinygo/crypto/sha256"
 )
 
@@ -33,100 +36,31 @@ func encrypt(mem Memory, k *PublicKey, sig, em []byte) bool {
 		return false
 	}
 	limbs := (nb + 3) / 4
-	w := memory.MakeSlice[uint32](mem, 6*limbs+2)
+	w := memory.MakeSlice[uint32](mem, 4*limbs)
 	if w == nil {
 		return false
 	}
 	defer memory.FreeSlice(mem, w)
-	n, s, r, acc, t := w[:limbs], w[limbs:2*limbs], w[2*limbs:3*limbs], w[3*limbs:4*limbs], w[4*limbs:6*limbs+2]
+	n, rr, s, acc := w[:limbs], w[limbs:2*limbs], w[2*limbs:3*limbs], w[3*limbs:]
 	fromBytes(n, k.N)
 	fromBytes(s, sig)
-	if !less(s, n) {
+	var mod mpi.Modulus
+	if !less(s, n) || !mod.Init(n, rr) {
 		return false
 	}
-	m := mont{n: n, inv: -inverse32(n[0]), t: t}
-	// r = R^2 mod n, with R = 2^(32*limbs), by doubling.
-	r[0] = 1
-	for i := 0; i < 2*32*limbs; i++ {
-		shiftAddMod(r, n)
-	}
-	// Montgomery form of s, then square and multiply for e.
-	m.mul(acc, s, r) // acc = s * R
-	copy(s, acc)
+	copy(acc, s)
 	top := 31
 	for k.E>>top&1 == 0 {
 		top--
 	}
 	for i := top - 1; i >= 0; i-- {
-		m.mul(acc, acc, acc)
+		mod.Mul(acc, acc, acc)
 		if k.E>>i&1 == 1 {
-			m.mul(acc, acc, s)
+			mod.Mul(acc, acc, s)
 		}
 	}
-	// Out of Montgomery form: multiply by 1.
-	clear(r)
-	r[0] = 1
-	m.mul(acc, acc, r)
 	toBytes(em, acc)
 	return true
-}
-
-// mont is Montgomery multiplication modulo n (Handbook of Applied
-// Cryptography, algorithm 14.36), with 32-bit limbs.
-type mont struct {
-	n   []uint32
-	inv uint32 // -n^-1 mod 2^32
-	t   []uint32
-}
-
-// mul sets z = x * y / R mod n. z can be x or y.
-func (m *mont) mul(z, x, y []uint32) {
-	l := len(m.n)
-	t := m.t[:l+2]
-	clear(t)
-	for i := 0; i < l; i++ {
-		var c uint64
-		for j := 0; j < l; j++ {
-			v := uint64(t[j]) + uint64(x[i])*uint64(y[j]) + c
-			t[j], c = uint32(v), v>>32
-		}
-		v := uint64(t[l]) + c
-		t[l], t[l+1] = uint32(v), uint32(v>>32)
-		u := t[0] * m.inv
-		c = (uint64(t[0]) + uint64(u)*uint64(m.n[0])) >> 32
-		for j := 1; j < l; j++ {
-			v := uint64(t[j]) + uint64(u)*uint64(m.n[j]) + c
-			t[j-1], c = uint32(v), v>>32
-		}
-		v = uint64(t[l]) + c
-		t[l-1] = uint32(v)
-		t[l] = t[l+1] + uint32(v>>32)
-	}
-	if t[l] != 0 || !less(t[:l], m.n) {
-		sub(t[:l], m.n)
-	}
-	copy(z, t[:l])
-}
-
-// inverse32 gives x^-1 mod 2^32 for an odd x, by Newton iteration.
-func inverse32(x uint32) uint32 {
-	y := x
-	for i := 0; i < 5; i++ {
-		y *= 2 - x*y
-	}
-	return y
-}
-
-// shiftAddMod sets r = 2r mod n for r < n.
-func shiftAddMod(r, n []uint32) {
-	top := r[len(r)-1] >> 31
-	for i := len(r) - 1; i > 0; i-- {
-		r[i] = r[i]<<1 | r[i-1]>>31
-	}
-	r[0] <<= 1
-	if top == 1 || !less(r, n) {
-		sub(r, n)
-	}
 }
 
 func less(a, b []uint32) bool {
@@ -136,14 +70,6 @@ func less(a, b []uint32) bool {
 		}
 	}
 	return false
-}
-
-func sub(a, b []uint32) {
-	var borrow uint64
-	for i := range a {
-		v := uint64(a[i]) - uint64(b[i]) - borrow
-		a[i], borrow = uint32(v), (v>>32)&1
-	}
 }
 
 // fromBytes reads big-endian bytes into little-endian limbs.
