@@ -86,15 +86,39 @@ func TestParseAndVerify(t *testing.T) {
 		t.Error("a changed certificate verifies")
 	}
 
-	// A P-384 CA and its SHA-384 signature are known but not supported.
+	// A P-384 CA signs with SHA-384 or SHA-256, and a P-256 CA with SHA-384.
 	k384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	der384 := makeCert(t, caTmpl, caTmpl, &k384.PublicKey, k384)
 	var c384 Certificate
 	if err := Parse(der384, &c384); err != nil {
 		t.Fatal(err)
 	}
-	if c384.P256 || c384.SigAlg != SigECDSASHA384 {
-		t.Errorf("P-384 CA: P256 %v, SigAlg %d", c384.P256, c384.SigAlg)
+	if c384.P256 || !c384.P384 || c384.SigAlg != SigECDSASHA384 {
+		t.Errorf("P-384 CA: P256 %v, P384 %v, SigAlg %d", c384.P256, c384.P384, c384.SigAlg)
+	}
+	if !c384.CheckSignatureFrom(mem, &c384) {
+		t.Error("the P-384 CA does not verify itself")
+	}
+	for _, alg := range []stdx509.SignatureAlgorithm{stdx509.ECDSAWithSHA384, stdx509.ECDSAWithSHA256} {
+		leafTmpl.SignatureAlgorithm = alg
+		var l Certificate
+		if err := Parse(makeCert(t, leafTmpl, caTmpl, &leafKey.PublicKey, k384), &l); err != nil {
+			t.Fatal(err)
+		}
+		if !l.CheckSignatureFrom(mem, &c384) {
+			t.Errorf("%v from the P-384 CA does not verify", alg)
+		}
+		if l.CheckSignatureFrom(mem, &ca) {
+			t.Errorf("%v from the P-384 CA verifies with the P-256 CA", alg)
+		}
+	}
+	leafTmpl.SignatureAlgorithm = stdx509.ECDSAWithSHA384
+	var l384 Certificate
+	if err := Parse(makeCert(t, leafTmpl, caTmpl, &leafKey.PublicKey, caKey), &l384); err != nil {
+		t.Fatal(err)
+	}
+	if !l384.CheckSignatureFrom(mem, &ca) || l384.CheckSignatureFrom(mem, &c384) {
+		t.Error("SHA-384 from the P-256 CA")
 	}
 	if mem.Stats().InUse != 0 {
 		t.Errorf("memory in use: %d", mem.Stats().InUse)
