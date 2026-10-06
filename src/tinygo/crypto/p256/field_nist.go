@@ -60,3 +60,17 @@ func propagate(r *element, acc *[8]int64) int64 {
 	}
 	return carry
 }
+
+// fePow sets r = a^e mod p. The exponent is public, so the square and
+// multiply pattern does not depend on secrets.
+func fePow(r, a, e *element) {
+	x := element{1}
+	for i := 255; i >= 0; i-- {
+		feMul(&x, &x, &x)
+		if e[i/32]>>(i%32)&1 == 1 {
+			feMul(&x, &x, a)
+		}
+	}
+	*r = x
+	clear(x[:])
+}

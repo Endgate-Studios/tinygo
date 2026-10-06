@@ -88,14 +88,7 @@ func (f *field) mul(z, x, y *nat) { f.mod.Mul(z[:], x[:], y[:]) }
 func (f *field) invert(z, x *nat) {
 	e := f.m
 	e[0] -= 2
-	acc := f.one
-	for i := 383; i >= 0; i-- {
-		f.mul(&acc, &acc, &acc)
-		if e[i/32]>>(i%32)&1 == 1 {
-			f.mul(&acc, &acc, x)
-		}
-	}
-	*z = acc
+	f.mod.Exp(z[:], x[:], e[:])
 }
 
 // point is a point in Jacobian coordinates. z == 0 is the point at

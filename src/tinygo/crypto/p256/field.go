@@ -20,20 +20,11 @@ func subtractP(r, s *element, carry uint32) {
 	}
 }
 
-// feInv sets r = a^(p-2) mod p, which is the inverse of a when a is not 0. The exponent is public,
-// so the square and multiply pattern does not depend on secrets.
-func feInv(r, a *element) {
-	e := element{0xfffffffd, 0xffffffff, 0xffffffff, 0, 0, 0, 1, 0xffffffff} // p - 2
-	x := element{1}
-	for i := 255; i >= 0; i-- {
-		feMul(&x, &x, &x)
-		if e[i/32]>>(i%32)&1 == 1 {
-			feMul(&x, &x, a)
-		}
-	}
-	*r = x
-	clear(x[:])
-}
+// pMinus2 is the exponent of feInv.
+var pMinus2 = element{0xfffffffd, 0xffffffff, 0xffffffff, 0, 0, 0, 1, 0xffffffff}
+
+// feInv sets r = a^(p-2) mod p, which is the inverse of a when a is not 0.
+func feInv(r, a *element) { fePow(r, a, &pMinus2) }
 
 // feSelect sets r = a when bit is 1 and r = b when bit is 0, in constant time.
 func feSelect(r, a, b *element, bit uint32) {

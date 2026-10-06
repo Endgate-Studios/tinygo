@@ -58,14 +58,7 @@ func mulModN(r, a, b *scalar) { modN.Mul(r[:], a[:], b[:]) }
 func invModN(r, a *scalar) {
 	e := nScalar
 	e[0] -= 2
-	x := scalar{1}
-	for i := 255; i >= 0; i-- {
-		mulModN(&x, &x, &x)
-		if e[i/32]>>(i%32)&1 == 1 {
-			mulModN(&x, &x, a)
-		}
-	}
-	*r = x
+	modN.Exp(r[:], a[:], e[:])
 }
 
 // VerifyECDSA reports whether (r, s) is a valid signature of hash with the

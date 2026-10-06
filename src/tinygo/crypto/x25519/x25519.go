@@ -54,8 +54,15 @@ func square(z, a *fe, n int) {
 	}
 }
 
-// invert sets z = a^(p-2), with the addition chain of ref10 fe_invert.
+// invert sets z = a^(p-2). Without the hardware, the addition chain of ref10
+// fe_invert needs fewer multiplications than Exp.
 func invert(z, a *fe) {
+	if mpi.HardwareExp {
+		e := p
+		e[0] -= 2
+		modP.Exp(z[:], a[:], e[:])
+		return
+	}
 	var z2, z9, z11, z5, z10, z20, z50, z100, t fe
 	mul(&z2, a, a)
 	square(&t, &z2, 2)

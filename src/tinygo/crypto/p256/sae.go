@@ -11,19 +11,6 @@ var (
 	legendreExp = element{0xffffffff, 0xffffffff, 0x7fffffff, 0x00000000, 0x00000000, 0x80000000, 0x80000000, 0x7fffffff} // (p-1)/2
 )
 
-// fePow sets r = a^e mod p.
-func fePow(r, a, e *element) {
-	x := element{1}
-	for i := 255; i >= 0; i-- {
-		feMul(&x, &x, &x)
-		if e[i/32]>>(i%32)&1 == 1 {
-			feMul(&x, &x, a)
-		}
-	}
-	*r = x
-	clear(x[:])
-}
-
 // BelowP reports whether v is below the prime p.
 func BelowP(v *[32]byte) bool {
 	var e element
