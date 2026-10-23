@@ -23,7 +23,7 @@ import (
 // builder.Library struct but that's hard to do since we want to know the
 // library path in advance in several places).
 var libVersions = map[string]int{
-	"musl":         3,
+	"musl":         4,
 	"bdwgc":        4,
 	"picolibc":     2,
 	"wasmbuiltins": 1,
@@ -57,6 +57,12 @@ func (c *Config) BuildMode() string {
 		return c.Target.BuildMode
 	}
 	return "default"
+}
+
+// SharedLibrary reports whether the build is a Linux shared library
+// (-buildmode=c-shared) that uses the libc of the host process.
+func (c *Config) SharedLibrary() bool {
+	return c.BuildMode() == "c-shared" && c.GOOS() == "linux"
 }
 
 // Features returns a list of features this CPU supports. For example, for a
@@ -336,6 +342,9 @@ func (c *Config) LibraryPath(name string) string {
 	if c.LibcNeedsMalloc() {
 		options += "+malloc"
 	}
+	if c.SharedLibrary() {
+		options += "+pic"
+	}
 
 	// No precompiled library found. Determine the path name that will be used
 	// in the build cache.
@@ -383,6 +392,10 @@ func (c *Config) CFlags(libclang bool) []string {
 		)
 	}
 	cflags = append(cflags, c.LibcCFlags()...)
+	if c.SharedLibrary() {
+		// Hidden C symbols are not exported, so the linker can remove the unused ones.
+		cflags = append(cflags, "-fPIC", "-fvisibility=hidden")
+	}
 	if c.GC() == "boehm" {
 		cflags = append(cflags,
 			"-I"+filepath.Join(goenv.Get("TINYGOROOT"), "lib", "bdwgc", "include"),
@@ -662,6 +675,9 @@ func (c *Config) CodeModel() string {
 func (c *Config) RelocationModel() string {
 	if c.Target.RelocationModel != "" {
 		return c.Target.RelocationModel
+	}
+	if c.SharedLibrary() {
+		return "pic"
 	}
 
 	return "static"

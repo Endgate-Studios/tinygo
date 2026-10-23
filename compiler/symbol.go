@@ -354,9 +354,20 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 		info.wasmName = "_start"
 		info.exported = true
 	}
+	sharedLibrary := c.BuildMode == "c-shared" && c.GOOS == "linux"
+	if info.linkName == "runtime.libraryEntry" && sharedLibrary {
+		info.linkName = "tinygo_init"
+		info.exported = true
+	}
 
 	// Check for //go: pragmas, which may change the link name (among others).
 	c.parsePragmas(&info, f)
+
+	// A shared library leaves main to the host. tinygo_init starts the runtime.
+	if sharedLibrary && info.linkName == "main" && f.Pkg != nil && f.Pkg.Pkg.Path() == "runtime" {
+		info.linkName = "runtime.main"
+		info.exported = false
+	}
 
 	c.functionInfos[f] = info
 	return info

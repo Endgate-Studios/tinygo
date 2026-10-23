@@ -1,6 +1,7 @@
 #ifdef __ELF__
 .section .text.tinygo_scanCurrentStack
 .global tinygo_scanCurrentStack
+.hidden tinygo_scanCurrentStack
 tinygo_scanCurrentStack:
 #else // Darwin
 .global _tinygo_scanCurrentStack
@@ -32,6 +33,7 @@ _tinygo_scanCurrentStack:
 #ifdef __ELF__
 .section .text.tinygo_longjmp
 .global tinygo_longjmp
+.hidden tinygo_longjmp
 tinygo_longjmp:
 #else // Darwin
 .global _tinygo_longjmp

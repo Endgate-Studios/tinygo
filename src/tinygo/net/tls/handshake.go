@@ -59,9 +59,12 @@ type hsState struct {
 	offeredPSK       bool // the ClientHello has the ticket of Config.Session
 	resumed          bool // the server accepted it
 	hsSecret         [sha256.Size]byte
-	cHS, sHS         [sha256.Size]byte
-	certs            [maxCerts]x509.Certificate
-	nCerts           int
+	// shared, early and derived are the secrets of section 7.1. A local
+	// array that is sliced moves to the heap.
+	shared, early, derived [32]byte
+	cHS, sHS               [sha256.Size]byte
+	certs                  [maxCerts]x509.Certificate
+	nCerts                 int
 	// leafN is a copy of the RSA modulus of the leaf: the certificates refer
 	// to the handshake buffer, which addTranscript moves.
 	leafN [rsa.MaxBits / 8]byte
@@ -173,23 +176,23 @@ func (c *Conn) handshake(st *hsState) error {
 	var err error
 
 	// The handshake secrets (section 7.1).
-	var shared, early, derived, zero [32]byte
+	shared, early, derived := &st.shared, &st.early, &st.derived
 	if st.group == groupX25519 {
-		x25519.X25519(&shared, &st.xPriv, &peerX)
-		if shared == zero { // RFC 8446 section 7.4.2
+		x25519.X25519(shared, &st.xPriv, &peerX)
+		if *shared == zeros { // RFC 8446 section 7.4.2
 			return ErrHandshake
 		}
-	} else if err := p256.SharedSecret(c.mem, &st.priv, &peerX, &peerY, &shared); err != nil {
+	} else if err := p256.SharedSecret(c.mem, &st.priv, &peerX, &peerY, shared); err != nil {
 		return ErrHandshake
 	}
 	clear(st.priv[:])
 	clear(st.xPriv[:])
 	if st.resumed {
-		earlySecret(&early, c.cfg.Session.psk[:])
+		earlySecret(early, c.cfg.Session.psk[:])
 	} else {
-		earlySecret(&early, nil)
+		earlySecret(early, nil)
 	}
-	deriveSecret(&derived, early[:], "derived", emptyHash[:])
+	deriveSecret(derived, early[:], "derived", emptyHash[:])
 	hkdf.Extract(&st.hsSecret, derived[:], shared[:])
 	clear(shared[:])
 	th := c.hash()
@@ -261,8 +264,8 @@ func (c *Conn) handshake(st *hsState) error {
 
 	// The application secrets, then the client Finished with the handshake keys.
 	var master [32]byte
-	deriveSecret(&derived, st.hsSecret[:], "derived", emptyHash[:])
-	hkdf.Extract(&master, derived[:], zero[:])
+	deriveSecret(derived, st.hsSecret[:], "derived", emptyHash[:])
+	hkdf.Extract(&master, derived[:], zeros[:])
 	deriveSecret(&c.cAP, master[:], "c ap traffic", th[:])
 	deriveSecret(&c.sAP, master[:], "s ap traffic", th[:])
 	clear(early[:])
@@ -321,59 +324,85 @@ func (c *Conn) hash() [sha256.Size]byte {
 	return out
 }
 
+// put appends p to b but does not grow b, because growth allocates. It gives
+// nil when p does not fit, and nil stays nil.
+func put(b []byte, p ...byte) []byte {
+	n := len(b)
+	if b == nil || n+len(p) > cap(b) {
+		return nil
+	}
+	b = b[:n+len(p)]
+	copy(b[n:], p)
+	return b
+}
+
+// puts is put for a string.
+func puts(b []byte, s string) []byte {
+	n := len(b)
+	if b == nil || n+len(s) > cap(b) {
+		return nil
+	}
+	b = b[:n+len(s)]
+	copy(b[n:], s)
+	return b
+}
+
 // sendClientHello writes the ClientHello with the key share of st.offer into
 // the transcript and sends it.
 func (c *Conn) sendClientHello(st *hsState) error {
 	name := c.cfg.ServerName
 	b := c.hs[:0]
-	b = append(b, hsClientHello, 0, 0, 0, 3, 3)
-	b = append(b, st.random[:]...)
-	b = append(b, 32)
-	b = append(b, st.sessionID[:]...)
-	b = append(b, 0, 2, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff, 1, 0)
+	b = put(b, hsClientHello, 0, 0, 0, 3, 3)
+	b = put(b, st.random[:]...)
+	b = put(b, 32)
+	b = put(b, st.sessionID[:]...)
+	b = put(b, 0, 2, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff, 1, 0)
 	ext := len(b)
-	b = append(b, 0, 0)
+	b = put(b, 0, 0)
 	// No SNI for an IP address (RFC 6066 section 3).
 	if _, isIP := x509.ParseIPv4(name); name != "" && !isIP {
 		n := len(name)
-		b = append(b, 0, 0, byte((n+5)>>8), byte(n+5), byte((n+3)>>8), byte(n+3), 0, byte(n>>8), byte(n))
-		b = append(b, name...)
+		b = put(b, 0, 0, byte((n+5)>>8), byte(n+5), byte((n+3)>>8), byte(n+3), 0, byte(n>>8), byte(n))
+		b = puts(b, name)
 	}
-	b = append(b, 0, 0x0a, 0, 6, 0, 4, groupX25519>>8, groupX25519&0xff, groupSecp256r1>>8, groupSecp256r1&0xff)
-	b = append(b, 0, 0x0d, 0, 10, 0, 8, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
+	b = put(b, 0, 0x0a, 0, 6, 0, 4, groupX25519>>8, groupX25519&0xff, groupSecp256r1>>8, groupSecp256r1&0xff)
+	b = put(b, 0, 0x0d, 0, 10, 0, 8, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
 		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff,
 		sigECDSAP384SHA384>>8, sigECDSAP384SHA384&0xff)
-	b = append(b, 0, 0x2b, 0, 3, 2, 3, 4)
+	b = put(b, 0, 0x2b, 0, 3, 2, 3, 4)
 	if l := c.cfg.RecordSizeLimit; l > 0 {
 		v := min(max(l, minRecordLimit), maxPlain) + 1 // with the content type (RFC 8449 section 4)
-		b = append(b, 0, 0x1c, 0, 2, byte(v>>8), byte(v))
+		b = put(b, 0, 0x1c, 0, 2, byte(v>>8), byte(v))
 		// Also max_fragment_length, which more servers know (RFC 6066
 		// section 4). A server that knows both uses record_size_limit.
 		if code := fragCode(l); code > 0 {
-			b = append(b, 0, 0x01, 0, 1, code)
+			b = put(b, 0, 0x01, 0, 1, code)
 		}
 	}
 	if st.offer == groupX25519 {
-		b = append(b, 0, 0x33, 0, 38, 0, 36, groupX25519>>8, groupX25519&0xff, 0, 32)
-		b = append(b, st.xPub[:]...)
+		b = put(b, 0, 0x33, 0, 38, 0, 36, groupX25519>>8, groupX25519&0xff, 0, 32)
+		b = put(b, st.xPub[:]...)
 	} else {
-		b = append(b, 0, 0x33, 0, 71, 0, 69, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
-		b = append(b, st.pubX[:]...)
-		b = append(b, st.pubY[:]...)
+		b = put(b, 0, 0x33, 0, 71, 0, 69, groupSecp256r1>>8, groupSecp256r1&0xff, 0, 65, 4)
+		b = put(b, st.pubX[:]...)
+		b = put(b, st.pubY[:]...)
 	}
 	if n := st.cookieLen; n > 0 {
-		b = append(b, 0, 0x2c, byte((n+2)>>8), byte(n+2), byte(n>>8), byte(n))
-		b = append(b, st.cookie[:n]...)
+		b = put(b, 0, 0x2c, byte((n+2)>>8), byte(n+2), byte(n>>8), byte(n))
+		b = put(b, st.cookie[:n]...)
 	}
 	// Without psk_key_exchange_modes the server sends no tickets (section
 	// 4.6.1). Only psk_dhe_ke, so each connection has an ECDHE key.
 	if c.cfg.Session != nil {
-		b = append(b, 0, 0x2d, 0, 2, 1, 1)
+		b = put(b, 0, 0x2d, 0, 2, 1, 1)
 	}
 	if age, ok := c.cfg.Session.usable(name); ok {
 		b = c.appendPSK(b, ext, st, age)
-	} else {
+	} else if b != nil {
 		setLengths(b, ext)
+	}
+	if b == nil {
+		return ErrTooLarge
 	}
 	c.transcript.Write(b)
 	return c.writeRecord(recordHandshake, b)

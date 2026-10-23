@@ -293,6 +293,9 @@ func (p *Program) getOriginalPath(path string) string {
 				originalPath = tinygoPath
 			}
 		}
+		if src, ok := filesToOverride(p.config.GoMinorVersion, p.config.SharedLibrary())[filepath.ToSlash(relpath)]; ok {
+			originalPath = filepath.Join(goenv.Get("TINYGOROOT"), "src", src)
+		}
 	}
 	return originalPath
 }

@@ -87,6 +87,56 @@ func link(linker string, flags ...string) error {
 	return nil
 }
 
+// linkSharedLibrary links a shared library. Undefined libc symbols stay for the
+// host. Undefined TinyGo symbols are errors, as they are in a program.
+func linkSharedLibrary(linker string, flags ...string) error {
+	flags = append(flags, "-z", "defs", "--warn-unresolved-symbols")
+	var cmd *exec.Cmd
+	if hasBuiltinTools {
+		cmd = exec.Command(os.Args[0], append([]string{linker}, flags...)...)
+	} else {
+		name, err := LookupCommand(linker)
+		if err != nil {
+			return err
+		}
+		cmd = exec.Command(name, flags...)
+	}
+	var buf bytes.Buffer
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		if buf.Len() == 0 {
+			return fmt.Errorf("failed to run linker: %w", err)
+		}
+		return parseLLDErrors(buf.String())
+	}
+	return parseLLDErrors(internalUndefined(buf.String()))
+}
+
+// internalUndefined keeps the warnings for undefined TinyGo symbols, as errors.
+// Go symbols have a dot in the name, and the runtime's C symbols start with tinygo_.
+func internalUndefined(text string) string {
+	re := regexp.MustCompile(`^ld.lld(-[0-9]+)?: warning: undefined symbol: (.*)$`)
+	var out strings.Builder
+	keep := false
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if m := re.FindStringSubmatch(line); m != nil {
+			keep = strings.Contains(m[2], ".") || strings.HasPrefix(m[2], "tinygo_")
+			if keep {
+				out.WriteString(strings.Replace(line, ": warning: ", ": error: ", 1) + "\n")
+			}
+			continue
+		}
+		if keep && strings.HasPrefix(line, ">>> ") {
+			out.WriteString(line + "\n")
+			continue
+		}
+		keep = false
+	}
+	return out.String()
+}
+
 // Split LLD errors into individual erros (including errors that continue on the
 // next line, using a ">>>" prefix). If possible, replace the raw errors with a
 // more user-friendly version (and one that's more in a Go style).

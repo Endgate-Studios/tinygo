@@ -2,6 +2,10 @@
 .global _tinygo_scanCurrentStack
 _tinygo_scanCurrentStack:
 #else
+#ifdef __ELF__
+.section .text.tinygo_scanCurrentStack
+.hidden tinygo_scanCurrentStack
+#endif
 .global tinygo_scanCurrentStack
 tinygo_scanCurrentStack:
 #endif
@@ -38,6 +42,10 @@ tinygo_scanCurrentStack:
 .global _tinygo_longjmp
 _tinygo_longjmp:
 #else
+#ifdef __ELF__
+.section .text.tinygo_longjmp
+.hidden tinygo_longjmp
+#endif
 .global tinygo_longjmp
 tinygo_longjmp:
 #endif

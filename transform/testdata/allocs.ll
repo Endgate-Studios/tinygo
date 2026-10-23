@@ -85,8 +85,27 @@ define void @testZeroSizedAlloc() {
   ret void
 }
 
+; Call a function that captures only the address (it compares the pointer to
+; nil), which doesn't let the pointer escape.
+define void @testAddressCaptureCall() {
+  %alloc = call align 4 ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %val = call ptr @addressOnlyIntPtr(ptr %alloc)
+  ret void
+}
+
+; Call a function that captures the provenance, which lets it escape.
+define void @testProvenanceCaptureCall() {
+  %alloc = call align 4 ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %val = call ptr @provenanceIntPtr(ptr %alloc)
+  ret void
+}
+
 declare ptr @escapeIntPtr(ptr)
 
 declare ptr @noescapeIntPtr(ptr nocapture)
 
 declare ptr @escapeIntPtrSometimes(ptr nocapture, ptr)
+
+declare ptr @addressOnlyIntPtr(ptr captures(address_is_null))
+
+declare ptr @provenanceIntPtr(ptr captures(address, read_provenance))

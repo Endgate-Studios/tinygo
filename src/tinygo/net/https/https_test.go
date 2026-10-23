@@ -61,7 +61,7 @@ func testClient(t *testing.T, srv *httptest.Server, anchor tls.PublicKey) (*Clie
 	c := &Client{Mem: mem, Rand: rand.Reader, Now: time.Now,
 		TLS: tls.Config{Roots: []tls.PublicKey{anchor}, Session: &tls.Session{}}}
 	addr := srv.Listener.Addr().String()
-	c.dial = func(host string, port uint16, timeout time.Duration) (tls.RawConn, error) {
+	c.Dial = func(host string, port uint16, timeout time.Duration) (tls.RawConn, error) {
 		if host != "example.test" || port != 8443 {
 			t.Errorf("dial %s %d", host, port)
 		}

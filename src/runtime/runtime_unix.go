@@ -101,6 +101,24 @@ func main(argc int32, argv *unsafe.Pointer) int {
 	return 0
 }
 
+// libraryEntry is tinygo_init, the entry point of -buildmode=c-shared. It does
+// not install signal handlers, because they would also catch host crashes.
+func libraryEntry() {
+	if libraryInitialized {
+		return
+	}
+	libraryInitialized = true
+	if needsStaticHeap {
+		allocateHeap()
+	}
+	stackTop = getCurrentStackPointer()
+	initRand()
+	initHeap()
+	initAll()
+}
+
+var libraryInitialized bool
+
 var (
 	main_argc int32
 	main_argv *unsafe.Pointer
@@ -214,17 +232,17 @@ func syscall_runtime_envs() []string {
 	}
 
 	// Create a string slice of all environment variables.
-	// This requires just a single heap allocation.
+	// This requires just a single heap allocation, or none with -gc=none.
 	env = environ
-	envs := make([]string, 0, numEnvs)
-	for *env != nil {
+	envs := makeEnvs(numEnvs)
+	for i := range envs {
 		ptr := *env
 		length := strlen(ptr)
 		s := _string{
 			ptr:    (*byte)(ptr),
 			length: length,
 		}
-		envs = append(envs, *(*string)(unsafe.Pointer(&s)))
+		envs[i] = *(*string)(unsafe.Pointer(&s))
 		env = (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(env), unsafe.Sizeof(environ)))
 	}
 

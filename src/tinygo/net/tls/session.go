@@ -93,11 +93,14 @@ func (c *Conn) appendPSK(b []byte, ext int, st *hsState, age uint32) []byte {
 	s := c.cfg.Session
 	tl := s.ticketLen
 	n := 2 + 2 + tl + 4 + binderLen
-	b = append(b, 0, 0x29, byte(n>>8), byte(n), byte((tl+6)>>8), byte(tl+6), byte(tl>>8), byte(tl))
-	b = append(b, s.ticket[:tl]...)
-	b = append(b, byte(age>>24), byte(age>>16), byte(age>>8), byte(age))
-	b = append(b, 0, 1+sha256.Size, sha256.Size)
-	b = append(b, make([]byte, sha256.Size)...)
+	b = put(b, 0, 0x29, byte(n>>8), byte(n), byte((tl+6)>>8), byte(tl+6), byte(tl>>8), byte(tl))
+	b = put(b, s.ticket[:tl]...)
+	b = put(b, byte(age>>24), byte(age>>16), byte(age>>8), byte(age))
+	b = put(b, 0, 1+sha256.Size, sha256.Size)
+	b = put(b, zeros[:]...)
+	if b == nil {
+		return nil
+	}
 	setLengths(b, ext)
 
 	var early, binderKey, fin, th [sha256.Size]byte
@@ -130,9 +133,12 @@ func setLengths(b []byte, ext int) {
 // earlySecret is HKDF-Extract with a zero salt and the PSK, or zeros without
 // one.
 func earlySecret(out *[sha256.Size]byte, psk []byte) {
-	var zero [sha256.Size]byte
 	if psk == nil {
-		psk = zero[:]
+		psk = zeros[:]
 	}
 	hkdf.Extract(out, nil, psk)
 }
+
+// zeros is the PSK of a full handshake and the empty binder. A local array
+// here is allocated on the heap.
+var zeros [sha256.Size]byte
