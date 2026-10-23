@@ -75,10 +75,13 @@ type PublicKey struct {
 	X, Y [32]byte
 	RSA  rsa.PublicKey
 	P384 []byte // x and y, 48 bytes each
+	// Subject is the DER name of the CA. When it is set, the handshake
+	// checks only the certificates that this name issued.
+	Subject []byte
 }
 
 // AnchorFromCertificate gives the key of a CA certificate in DER, for
-// Config.Roots. An RSA or P-384 key refers to der, so der must stay.
+// Config.Roots. The key refers to der, so der must stay.
 func AnchorFromCertificate(der []byte) (PublicKey, error) {
 	var c x509.Certificate
 	if err := x509.Parse(der, &c); err != nil {
@@ -86,11 +89,11 @@ func AnchorFromCertificate(der []byte) (PublicKey, error) {
 	}
 	switch {
 	case c.P256:
-		return PublicKey{X: c.KeyX, Y: c.KeyY}, nil
+		return PublicKey{X: c.KeyX, Y: c.KeyY, Subject: c.Subject}, nil
 	case c.RSA:
-		return PublicKey{RSA: c.RSAKey}, nil
+		return PublicKey{RSA: c.RSAKey, Subject: c.Subject}, nil
 	case c.P384:
-		return PublicKey{P384: c.Key384}, nil
+		return PublicKey{P384: c.Key384, Subject: c.Subject}, nil
 	}
 	return PublicKey{}, ErrUnsupported
 }

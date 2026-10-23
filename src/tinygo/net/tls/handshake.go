@@ -634,6 +634,10 @@ func (c *Conn) checkChain(st *hsState) error {
 		}
 		for k := range c.cfg.Roots {
 			r := &c.cfg.Roots[k]
+			// A root can sign only certificates that name it as the issuer.
+			if r.Subject != nil && !sameBytes(r.Subject, cert.Issuer) {
+				continue
+			}
 			switch {
 			case r.P384 != nil:
 				if x509.VerifyECDSA384(cert.SigAlg, cert.TBS, cert.Sig, r.P384) {
@@ -755,4 +759,17 @@ func next(secret *[sha256.Size]byte) {
 	expandLabel(n[:], secret[:], "traffic upd", nil)
 	*secret = n
 	clear(n[:])
+}
+
+// sameBytes reports whether a and b hold the same bytes.
+func sameBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
