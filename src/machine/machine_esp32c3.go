@@ -151,6 +151,15 @@ func inFunc(signal uint32) *volatile.Register32 {
 	return (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_IN_SEL_CFG), uintptr(signal)*4))
 }
 
+// pullUp enables the internal pull-up of the pad, leaving everything else as it is.
+//
+// For I2C: the bus is driven low and released high, so without a pull-up somewhere the line never
+// comes back up. Boards that carry their own resistors do not need this and are not harmed by it -
+// an internal pull-up is about 45 kOhm and an external one of a few kOhm dominates it.
+func (p Pin) pullUp() {
+	p.mux().SetBits(esp.IO_MUX_GPIO_FUN_WPU)
+}
+
 // mux returns the I/O mux configuration register corresponding to the given
 // GPIO pin.
 func (p Pin) mux() *volatile.Register32 {

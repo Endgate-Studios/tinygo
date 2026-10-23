@@ -74,13 +74,24 @@ func (i2c *I2C) initNoiseFilter() {
 
 //go:inline
 func (i2c *I2C) initPins(config I2CConfig) {
+	// Internal pull-ups on both lines, as ESP-IDF's enable_internal_pullup does.
+	//
+	// configure() writes the whole IO MUX register, so the pull-up has to be set after it and cannot
+	// be arranged by the caller beforehand. Without it, a board with no external resistors has both
+	// lines sitting low, and resetMaster below then spins forever on SCL_RST_SLV_EN waiting for a
+	// clock pulse that cannot happen - a hang in Configure, before any transaction, with nothing to
+	// show for it. Measured on a Waveshare ESP32-S3-RLCD-4.2, whose ES7210 bus has no external
+	// pull-ups: both pins read low as plain inputs at boot, and ESP-IDF drives the same bus with its
+	// internal ones on.
 	config.SDA.configure(PinConfig{Mode: PinOutput}, i2c.funcSDA)
+	config.SDA.pullUp()
 	inFunc(i2c.funcSDA).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDA)<<esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos)
 	config.SDA.Set(true)
 	config.SDA.pinReg().SetBits(esp.GPIO_PIN_PAD_DRIVER)
 	i2c.Bus.SetCTR_SDA_FORCE_OUT(1)
 
 	config.SCL.configure(PinConfig{Mode: PinOutput}, i2c.funcSCL)
+	config.SCL.pullUp()
 	inFunc(i2c.funcSCL).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SCL)<<esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos)
 	config.SCL.Set(true)
 	// Configure the pad with the given IO mux configuration.
@@ -135,6 +146,13 @@ func (i2c *I2C) startMaster() {
 	i2c.resetMaster()
 }
 
+// i2cResetTries bounds the wait for the bus-clear pulses in resetMaster.
+//
+// Nine SCL pulses at the slowest supported rate take well under a millisecond, and each pass of the
+// loop is a peripheral register read, so this is several times longer than the hardware can
+// legitimately need.
+const i2cResetTries = 100000
+
 //go:inline
 func (i2c *I2C) resetMaster() {
 	// reset FSM
@@ -145,8 +163,18 @@ func (i2c *I2C) resetMaster() {
 	i2c.Bus.SetSCL_STRETCH_CONF_SLAVE_SCL_STRETCH_EN(1)
 	i2c.Bus.SetCTR_CONF_UPGATE(1)
 	i2c.Bus.FILTER_CFG.Set(0x377)
-	// wait for SCL_RST_SLV_EN
-	for i2c.Bus.GetSCL_SP_CONF_SCL_RST_SLV_EN() != 0 {
+	// Wait for SCL_RST_SLV_EN, but not forever.
+	//
+	// The hardware clears this bit once it has clocked out the nine pulses that free a stuck slave,
+	// and it can only do that if SCL is able to rise. On a bus held low - no pull-up, a shorted line,
+	// an unpowered device - it never clears, and an unbounded wait here hangs Configure before any
+	// transaction, which on a cooperative scheduler takes the whole program with it and reports
+	// nothing. Giving up instead leaves the peripheral configured, so the first Tx returns a timeout
+	// error and the caller can say which bus is dead.
+	//
+	// The bound is a count rather than a deadline because this runs during Configure, which board
+	// setup may call before the scheduler and its clock are up.
+	for i := 0; i < i2cResetTries && i2c.Bus.GetSCL_SP_CONF_SCL_RST_SLV_EN() != 0; i++ {
 	}
 	i2c.Bus.SetSCL_SP_CONF_SCL_RST_SLV_NUM(0)
 }
