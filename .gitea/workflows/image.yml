@@ -1,8 +1,8 @@
-# Builds the TinyGo compiler image of this branch into the gitea container
-# registry, for builds that need the fork (pg_oidc_validator's
-# libpgov_tinygo.so).
+# Builds the TinyGo compiler image of the release branch into the gitea
+# container registry, for builds that need the fork (pg_oidc_validator's
+# libpgov_tinygo.so). Merge into release to publish a new compiler.
 #
-#   push to linux-c-shared   <image>:linux-c-shared, <image>:<sha8>
+#   push to release   <image>:release, <image>:<sha8>
 #
 # under gitea.escapepod.app/endgate-studios/tinygo. The LLVM is the prebuilt
 # image of tinygo-org (tools/llvm-image-tag.sh), so the runner builds only
@@ -16,7 +16,7 @@ name: image
 
 on:
   push:
-    branches: [linux-c-shared]
+    branches: [release]
   workflow_dispatch:
 
 env:
@@ -56,5 +56,5 @@ jobs:
             -f src/Dockerfile \
             --build-arg LLVM_IMAGE="ghcr.io/tinygo-org/llvm-22:$llvm" \
             --build-arg GO_IMAGE="$GO_IMAGE" \
-            -t "$IMAGE:linux-c-shared" -t "$IMAGE:$sha8" \
+            -t "$IMAGE:release" -t "$IMAGE:$sha8" \
             --push src
