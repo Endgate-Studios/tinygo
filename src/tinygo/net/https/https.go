@@ -46,8 +46,9 @@ type Client struct {
 	// Timeout is for the DNS lookup, the TCP connection, the handshake and
 	// each read. The default is 10 seconds.
 	Timeout time.Duration
-
-	dial func(host string, port uint16, timeout time.Duration) (tls.RawConn, error) // for tests
+	// Dial, when not nil, makes the connection instead of Stack, for example
+	// with tinygo/net/socket. Do closes a connection that is an io.Closer.
+	Dial func(host string, port uint16, timeout time.Duration) (tls.RawConn, error)
 }
 
 // Get sends GET path to host and copies the body of the response to body.
@@ -104,8 +105,8 @@ func (c *Client) Do(method, host, path, header string, data []byte, body io.Writ
 }
 
 func (c *Client) connect(name string, port uint16, timeout time.Duration) (tls.RawConn, error) {
-	if c.dial != nil {
-		return c.dial(name, port, timeout)
+	if c.Dial != nil {
+		return c.Dial(name, port, timeout)
 	}
 	addr, err := c.Stack.LookupHost(name, timeout)
 	if err != nil {

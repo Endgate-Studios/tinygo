@@ -147,7 +147,15 @@ type Conn struct {
 // Client makes a client on raw. rng gives the random values, for example
 // the hardware random number generator. Call Handshake first.
 func Client(raw RawConn, mem Memory, rng io.Reader, cfg *Config) *Conn {
-	return &Conn{raw: raw, mem: mem, rng: rng, cfg: cfg}
+	c := &Conn{}
+	c.Init(raw, mem, rng, cfg)
+	return c
+}
+
+// Init is Client without an allocation, for -gc=none. c is memory that the
+// caller owns, for example a global.
+func (c *Conn) Init(raw RawConn, mem Memory, rng io.Reader, cfg *Config) {
+	*c = Conn{raw: raw, mem: mem, rng: rng, cfg: cfg}
 }
 
 // RecordLimit gives the record_size_limit that the server agreed to, or 0.

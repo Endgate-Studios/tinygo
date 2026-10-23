@@ -1,0 +1,60 @@
+# Builds the TinyGo compiler image of the release branch into the gitea
+# container registry, for builds that need the fork (pg_oidc_validator's
+# libpgov_tinygo.so). Merge into release to publish a new compiler.
+#
+#   push to release   <image>:release, <image>:<sha8>
+#
+# under gitea.escapepod.app/endgate-studios/tinygo. The LLVM is the prebuilt
+# image of tinygo-org (tools/llvm-image-tag.sh), so the runner builds only
+# the compiler. A change to the LLVM recipe needs that image built first.
+#
+# Runs on an act_runner with the `docker` label. Plain shell steps, no
+# marketplace actions. Repo secrets:
+#   REGISTRY_USER    gitea user that pushes images
+#   REGISTRY_TOKEN   that user's token: package read/write
+name: image
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+env:
+  REGISTRY: gitea.escapepod.app
+  IMAGE: gitea.escapepod.app/endgate-studios/tinygo
+  # The GOROOT of the image. It must match src/syscall/goroot.
+  GO_IMAGE: golang:1.26
+
+jobs:
+  build:
+    runs-on: docker
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - name: checkout
+        env:
+          TOKEN: ${{ gitea.token }}
+        run: |
+          apk add --no-cache git
+          git init -q src
+          git -C src fetch -q --depth 1 "https://oauth2:${TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C src checkout -q FETCH_HEAD
+
+      - name: login
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+
+      - name: build and push
+        run: |
+          llvm=$(sh src/tools/llvm-image-tag.sh)
+          sha8=$(echo "$GITHUB_SHA" | cut -c1-8)
+          echo "LLVM image ghcr.io/tinygo-org/llvm-22:$llvm"
+          docker buildx build \
+            -f src/Dockerfile \
+            --build-arg LLVM_IMAGE="ghcr.io/tinygo-org/llvm-22:$llvm" \
+            --build-arg GO_IMAGE="$GO_IMAGE" \
+            -t "$IMAGE:release" -t "$IMAGE:$sha8" \
+            --push src

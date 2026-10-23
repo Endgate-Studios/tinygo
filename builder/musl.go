@@ -146,7 +146,9 @@ var libMusl = Library{
 			"math/*.c",
 			"misc/*.c",
 			"multibyte/*.c",
+			"network/*.c", // getaddrinfo and sockets for tinygo/net/socket
 			"sched/*.c",
+			"select/*.c", // poll
 			"signal/" + arch + "/*.s",
 			"signal/*.c",
 			"stdio/*.c",

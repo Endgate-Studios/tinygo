@@ -46,8 +46,7 @@ type Heap struct {
 	spans    [MaxSpans]span
 	nspans   int
 	freeList uintptr // first free block, 0 if none
-	locker   sync.Locker
-	poison   bool
+	heapOptions
 }
 
 type span struct {
@@ -87,21 +86,26 @@ func WithPoison(on bool) HeapOption {
 // NewHeap makes a Heap over mem. The Heap owns mem, and mem must stay alive
 // while the Heap is in use.
 func NewHeap(mem []byte, opts ...HeapOption) (*Heap, error) {
-	o := heapOptions{locker: noLock{}, poison: debugPoison}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			return nil, err
-		}
-	}
-	if len(mem) == 0 {
-		return nil, ErrArenaTooSmall
-	}
-
-	h := &Heap{locker: o.locker, poison: o.poison}
-	if err := h.addSpan(mem); err != nil {
+	h := &Heap{}
+	if err := h.Init(mem, opts...); err != nil {
 		return nil, err
 	}
 	return h, nil
+}
+
+// Init is NewHeap without an allocation, for -gc=none. h is memory that the
+// caller owns, for example a global. Call Init before you use h.
+func (h *Heap) Init(mem []byte, opts ...HeapOption) error {
+	*h = Heap{heapOptions: heapOptions{locker: noLock{}, poison: debugPoison}}
+	for _, opt := range opts {
+		if err := opt(&h.heapOptions); err != nil {
+			return err
+		}
+	}
+	if len(mem) == 0 {
+		return ErrArenaTooSmall
+	}
+	return h.addSpan(mem)
 }
 
 // Grow adds mem to the heap as a new span. The Heap owns mem, and mem must stay

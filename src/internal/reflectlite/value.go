@@ -672,6 +672,12 @@ func (v Value) String() string {
 	}
 }
 
+// RawString returns the string of a value of Kind String. It does not
+// allocate, because it does not have the fallback of String.
+func (v Value) RawString() string {
+	return *(*string)(v.value)
+}
+
 func (v Value) Bytes() []byte {
 	switch v.Kind() {
 	case Slice:

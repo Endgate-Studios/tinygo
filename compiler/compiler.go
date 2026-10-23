@@ -1217,6 +1217,12 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 		b.llvmFn.SetUnnamedAddr(true)
 	}
+	if b.info.exported && b.BuildMode == "c-shared" && b.GOOS == "linux" && b.info.linkName != "tinygo_init" && b.fn.Pkg != nil {
+		// A shared library exports only the functions of the program and tinygo_init.
+		if path := b.fn.Pkg.Pkg.Path(); path == "runtime" || strings.HasPrefix(path, "internal/") {
+			b.llvmFn.SetVisibility(llvm.HiddenVisibility)
+		}
+	}
 	if b.info.section != "" {
 		b.llvmFn.SetSection(b.info.section)
 	}

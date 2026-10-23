@@ -6,11 +6,13 @@ import "tinygo/crypto/sha256"
 // Size is the length of a pseudorandom key.
 const Size = sha256.Size
 
+// zeros is the empty salt. A local array here is allocated on the heap.
+var zeros [Size]byte
+
 // Extract sets prk = HMAC-SHA256(salt, ikm). An empty salt is Size zeros.
 func Extract(prk *[Size]byte, salt, ikm []byte) {
-	var zero [Size]byte
 	if len(salt) == 0 {
-		salt = zero[:]
+		salt = zeros[:]
 	}
 	var h sha256.HMAC
 	h.Init(salt)

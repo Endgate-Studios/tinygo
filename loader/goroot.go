@@ -10,12 +10,15 @@ package loader
 // with all the maintenance burden that results in. Only allowing to replace
 // packages as a whole avoids this as packages are already designed to have a
 // public (backwards-compatible) API.
+//
+// Some builds replace single GOROOT files (see filesToOverride). Keep that list short.
 
 import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -24,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/tinygo-org/tinygo/compileopts"
@@ -46,14 +50,16 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 
 	// Find the overrides needed for the goroot.
 	overrides := pathsToOverride(config.GoMinorVersion, needsSyscallPackage(config.BuildTags()))
+	files := filesToOverride(config.GoMinorVersion, config.SharedLibrary())
 
 	// Resolve the merge links within the goroot.
-	merge, err := listGorootMergeLinks(goroot, tinygoroot, overrides)
+	merge, err := listGorootMergeLinks(goroot, tinygoroot, overrides, files)
 	if err != nil {
 		return "", err
 	}
 
 	// Hash the merge links to create a cache key.
+	// The file overrides are part of the key because they change the links.
 	data, err := json.Marshal(merge)
 	if err != nil {
 		return "", err
@@ -101,6 +107,9 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 				dirs = append(dirs, filepath.Join(tmpgoroot, "src", dir))
 			}
 		}
+		for dir := range fileOverrideDirs(files) {
+			dirs = append(dirs, filepath.Join(tmpgoroot, "src", dir))
+		}
 		sort.Strings(dirs)
 
 		for _, dir := range dirs {
@@ -143,10 +152,11 @@ func GetCachedGoroot(config *compileopts.Config) (string, error) {
 }
 
 // listGorootMergeLinks searches goroot and tinygoroot for all symlinks that must be created within the merged goroot.
-func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) (map[string]string, error) {
+func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool, files map[string]string) (map[string]string, error) {
 	goSrc := filepath.Join(goroot, "src")
 	tinygoSrc := filepath.Join(tinygoroot, "src")
 	merges := make(map[string]string)
+	fileDirs := fileOverrideDirs(files)
 	for dir, merge := range overrides {
 		if !merge {
 			// Use the TinyGo version.
@@ -195,10 +205,49 @@ func listGorootMergeLinks(goroot, tinygoroot string, overrides map[string]bool) 
 				// It has/will be merged elsewhere.
 				continue
 			}
+			if fileDirs[path.Join(dir, name)+"/"] {
+				// The loop below links this directory file by file.
+				continue
+			}
 
 			// Add a link to this entry
 			merges[filepath.Join("src", dir, name)] = filepath.Join(goDir, name)
 		}
+	}
+
+	// Link the GOROOT directories that have file overrides file by file.
+	for dir := range fileDirs {
+		if _, ok := overrides[dir]; ok {
+			return nil, fmt.Errorf("goroot: %s has a directory override and file overrides", dir)
+		}
+		parent := path.Dir(strings.TrimSuffix(dir, "/")) + "/"
+		if parent == "./" {
+			parent = ""
+		}
+		if !overrides[parent] {
+			return nil, fmt.Errorf("goroot: the parent of %s is not merged", dir)
+		}
+		goDir := filepath.Join(goSrc, dir)
+		goEntries, err := os.ReadDir(goDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range goEntries {
+			name := e.Name()
+			if _, ok := files[path.Join(dir, name)]; ok {
+				continue
+			}
+			if _, ok := overrides[path.Join(dir, name)+"/"]; ok {
+				continue
+			}
+			merges[filepath.Join("src", dir, name)] = filepath.Join(goDir, name)
+		}
+	}
+	for name, src := range files {
+		if _, err := os.Stat(filepath.Join(goSrc, name)); err != nil {
+			return nil, fmt.Errorf("goroot: cannot override %s: %w", name, err)
+		}
+		merges[filepath.Join("src", name)] = filepath.Join(tinygoSrc, src)
 	}
 
 	// Merge the special directories from goroot.
@@ -295,6 +344,28 @@ func pathsToOverride(goMinor int, needsSyscallPackage bool) map[string]bool {
 	}
 
 	return paths
+}
+
+// filesToOverride returns the GOROOT files that TinyGo replaces, as a map from
+// the GOROOT path to the TinyGo path. Both paths are relative to src.
+func filesToOverride(goMinor int, sharedLibrary bool) map[string]string {
+	files := map[string]string{}
+	if sharedLibrary && goMinor >= 26 {
+		// The init of syscall/rlimit.go changes RLIMIT_NOFILE of the process.
+		// A library must not do that to its host, see https://go.dev/issue/46279.
+		files["syscall/rlimit.go"] = "syscall/goroot/rlimit.go"
+	}
+	return files
+}
+
+// fileOverrideDirs returns the directories of the file overrides, with a
+// slash at the end as in pathsToOverride.
+func fileOverrideDirs(files map[string]string) map[string]bool {
+	dirs := map[string]bool{}
+	for name := range files {
+		dirs[path.Dir(name)+"/"] = true
+	}
+	return dirs
 }
 
 // symlink creates a symlink or something similar. On Unix-like systems, it

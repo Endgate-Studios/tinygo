@@ -376,28 +376,37 @@ var ErrBadBody = errors.New("web: bad chunked body")
 // arrives. The body ends at its Content-Length, at the last chunk of a
 // chunked body, or when the server closes. It gives the status code.
 func Do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []byte, body io.Writer) (int, error) {
-	req := buf[:0]
+	// Copy into buf instead of append, because append links slice growth,
+	// which allocates.
+	n := 0
 	for _, part := range [...]string{method, " ", path, " HTTP/1.1\r\nHost: ", host, "\r\nConnection: close\r\n", header} {
-		if len(req)+len(part) > len(buf) {
+		if n+len(part) > len(buf) {
 			return 0, ErrHeadTooLarge
 		}
-		req = append(req, part...)
+		n += copy(buf[n:], part)
 	}
 	if reqBody != nil {
-		var num [20]byte
-		n := strconv.AppendInt(num[:0], int64(len(reqBody)), 10)
-		if len(req)+len("Content-Length: \r\n")+len(n) > len(buf) {
+		// Write the digits into buf. AppendInt on a local array moves the
+		// array to the heap.
+		digits := 1
+		for x := len(reqBody); x >= 10; x /= 10 {
+			digits++
+		}
+		if n+len("Content-Length: \r\n")+digits > len(buf) {
 			return 0, ErrHeadTooLarge
 		}
-		req = append(req, "Content-Length: "...)
-		req = append(req, n...)
-		req = append(req, "\r\n"...)
+		n += copy(buf[n:], "Content-Length: ")
+		for i, x := n+digits-1, len(reqBody); i >= n; i, x = i-1, x/10 {
+			buf[i] = byte('0' + x%10)
+		}
+		n += digits
+		n += copy(buf[n:], "\r\n")
 	}
-	if len(req)+2 > len(buf) {
+	if n+2 > len(buf) {
 		return 0, ErrHeadTooLarge
 	}
-	req = append(req, "\r\n"...)
-	if _, err := conn.Write(req); err != nil {
+	n += copy(buf[n:], "\r\n")
+	if _, err := conn.Write(buf[:n]); err != nil {
 		return 0, err
 	}
 	if len(reqBody) > 0 {
