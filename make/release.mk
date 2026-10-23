@@ -58,7 +58,9 @@ endif
 	@cp -rp lib/musl/src/math            build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/misc            build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/multibyte       build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/network         build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/sched           build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/select          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/signal          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/stdio           build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/stdlib          build/release/tinygo/lib/musl/src
