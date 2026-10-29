@@ -12,6 +12,9 @@ import (
 // gcHeap is internal DRAM first and mapped PSRAM second. NOTES.md (PSRAM in the GC heap) has the risks.
 type gcHeap = collector.Set
 
+// allocFirst allocates from internal DRAM only.
+func allocFirst(size uintptr) unsafe.Pointer { return shim.heap.AllocPrimary(size) }
+
 // heapSpans holds the two collectors. It is in shim, so markRoots skips their counters.
 type heapSpans struct {
 	dram, psram collector.Collector

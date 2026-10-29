@@ -16,8 +16,15 @@ var shim struct {
 	heap       gcHeap
 	pauses     pauseStats
 	allocCount uintptr
+	allocated  uintptr  // bytes allocated since the last collection
 	lock       heapLock // locks the heap across cores, does nothing on one core
 }
+
+// spillAfter is how much must be allocated since the last collection before
+// a full first span collects rather than spill into the next (PSRAM, which
+// is slower and which DMA can't reach). Without it, a first span full of
+// live data would collect at every allocation.
+const spillAfter = 64 << 10
 
 type pauseStats struct {
 	last, max, total uint64
@@ -47,7 +54,16 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			collect()
 		}
 	}
-	p := shim.heap.Alloc(size)
+	p := allocFirst(size)
+	if p == nil && shim.allocated >= spillAfter {
+		// The first span is full, mostly of garbage by now: collect before
+		// spilling into the next one, or it fills with garbage too.
+		collect()
+		p = allocFirst(size)
+	}
+	if p == nil {
+		p = shim.heap.Alloc(size)
+	}
 	if p == nil {
 		collect()
 		for p = shim.heap.Alloc(size); p == nil; p = shim.heap.Alloc(size) {
@@ -57,6 +73,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			}
 		}
 	}
+	shim.allocated += size
 	shim.lock.Unlock()
 	return p
 }
@@ -99,6 +116,7 @@ func GC() {
 // because the sweep changes only heap metadata and they cannot allocate without the lock.
 func collect() {
 	t0 := nanotime()
+	shim.allocated = 0
 	shim.heap.BeginCycle()
 	markAllRoots()
 	shim.heap.FinishMark()

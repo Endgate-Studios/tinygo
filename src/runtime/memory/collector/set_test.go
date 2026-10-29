@@ -116,6 +116,27 @@ func TestSetAllocSpillsToSecondary(t *testing.T) {
 	}
 }
 
+func TestSetAllocPrimaryNeverSpills(t *testing.T) {
+	ts := newTestSet(t, 64<<10, 128<<10, 16)
+	n := 0
+	for ; ; n++ {
+		p := ts.s.AllocPrimary(48)
+		if p == nil {
+			break
+		}
+		if ts.b.c.Contains(p) {
+			t.Fatalf("AllocPrimary %d came from the secondary span", n)
+		}
+	}
+	if n == 0 {
+		t.Fatal("AllocPrimary gave nothing from an empty primary span")
+	}
+	// The secondary span is still there for Alloc.
+	if p := ts.s.Alloc(48); p == nil || !ts.b.c.Contains(p) {
+		t.Fatalf("Alloc after AllocPrimary filled the primary = %v, want the secondary span", p)
+	}
+}
+
 func TestSetCrossSpanReferences(t *testing.T) {
 	tests := []struct {
 		name     string

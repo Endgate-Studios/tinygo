@@ -49,6 +49,11 @@ func (s *Set) Alloc(size uintptr) unsafe.Pointer {
 	return s.secondary.Alloc(size)
 }
 
+// AllocPrimary tries the primary span only.
+func (s *Set) AllocPrimary(size uintptr) unsafe.Pointer {
+	return s.primary.Alloc(size)
+}
+
 // Free gives the object to the span that holds it. See Collector.Free.
 func (s *Set) Free(p unsafe.Pointer) bool {
 	if s.inSecondary(uintptr(p)) {
