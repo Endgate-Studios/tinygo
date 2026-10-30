@@ -23,8 +23,12 @@ var shim struct {
 // spillAfter is how much must be allocated since the last collection before
 // a full first span collects rather than spill into the next (PSRAM, which
 // is slower and which DMA can't reach). Without it, a first span full of
-// live data would collect at every allocation.
-const spillAfter = 64 << 10
+// live data would collect at every allocation. Each collection stops every
+// core for the mark, which takes as long as the live data does, not the
+// garbage: so rarely is better, while PSRAM has room. At 64 KB a UI that
+// rebuilt a few times a second collected more than once a second, and its
+// animations stuttered.
+const spillAfter = 1 << 20
 
 type pauseStats struct {
 	last, max, total uint64
@@ -54,6 +58,11 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 			collect()
 		}
 	}
+	if p := scopeAlloc(size); p != nil {
+		countAlloc(size)
+		shim.lock.Unlock()
+		return p
+	}
 	p := allocFirst(size)
 	if p == nil && shim.allocated >= spillAfter {
 		// The first span is full, mostly of garbage by now: collect before
@@ -74,6 +83,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		}
 	}
 	shim.allocated += size
+	countAlloc(size)
 	shim.lock.Unlock()
 	return p
 }
@@ -119,6 +129,7 @@ func collect() {
 	shim.allocated = 0
 	shim.heap.BeginCycle()
 	markAllRoots()
+	markScopes()
 	shim.heap.FinishMark()
 	resumeWorld()
 	shim.heap.Sweep()

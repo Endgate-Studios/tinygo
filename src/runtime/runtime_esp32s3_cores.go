@@ -271,21 +271,40 @@ var (
 	printLock     spinLock
 )
 
+// spinLock is Peterson's lock for the two cores: plain loads and stores,
+// ordered by memw, and no compare-and-swap. The atomics of the program are
+// calls (the target leaves out s32c1i: S32C1I isn't atomic on PSRAM, which
+// ESP-IDF's esp_cpu_compare_and_set says too), and those calls take
+// atomicsLock, a spinLock: one built on atomics would call itself.
+//
+// The locks are globals, so in internal RAM, which the cores reach without
+// a cache. Each core holds a lock with its interrupts disabled.
 type spinLock struct {
-	atomic.Uint32
+	want  [numCPU]volatile.Register32 // 1 while that core wants or holds it
+	turn  volatile.Register32         // the core that waits, when both want it
+	owner volatile.Register32         // the core that holds it
 }
 
 func (l *spinLock) Lock() {
-	for !l.Uint32.CompareAndSwap(0, 1) {
+	me := currentCPU()
+	other := 1 - me
+	l.want[me].Set(1)
+	device.Asm("memw")
+	l.turn.Set(other)
+	device.Asm("memw")
+	for l.want[other].Get() == 1 && l.turn.Get() == other {
 		spinLoopWait()
 	}
+	l.owner.Set(me)
 }
 
 func (l *spinLock) Unlock() {
-	if schedulerAsserts && l.Uint32.Load() != 1 {
+	owner := l.owner.Get()
+	if schedulerAsserts && l.want[owner].Get() != 1 {
 		runtimeFatal("unlock of unlocked spinlock")
 	}
-	l.Uint32.Store(0)
+	device.Asm("memw") // what was done holding it, before it's let go
+	l.want[owner].Set(0)
 }
 
 func spinLoopWait() {

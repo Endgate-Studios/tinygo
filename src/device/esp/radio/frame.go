@@ -17,8 +17,10 @@ import (
 // 1514 bytes.
 const FrameSize = 1536
 
-// framePool is the number of received frames that wait for the reader.
-const framePool = 8
+// framePool is the number of received frames that wait for the reader:
+// enough to ride out the reader being busy for a while (a card write, say)
+// at full speed, rather than drop frames for TCP to send again.
+const framePool = 32
 
 // ifAP is WIFI_IF_AP of esp_wifi_types_generic.h.
 const ifAP = 1

@@ -275,3 +275,138 @@ func tcpSlotsInUse(s *Stack) int {
 	}
 	return n
 }
+
+// accepted opens a connection from the peer, with pISS as its ISS, and gives
+// it and our ISS.
+func accepted(t *testing.T, s *Stack, l *fakeLink, ring int, pISS uint32) (*TCPConn, uint32) {
+	t.Helper()
+	s.arp.update(peerIP, peerMAC)
+	lis, err := s.ListenTCP(80, ring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Input(tcpFrame(peerIP, myIP, seg{5555, 80, pISS, 0, tcpSYN, 4096, nil}))
+	iss := readSeg(t, l).seq
+	s.Input(tcpFrame(peerIP, myIP, seg{5555, 80, pISS + 1, iss + 1, tcpACK, 4096, nil}))
+	c, err := lis.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, iss
+}
+
+func TestTCPOutOfOrderKept(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	const p = 1000
+	c, iss := accepted(t, s, l, 256, p)
+	send := func(off int, data string) seg {
+		t.Helper()
+		s.Input(tcpFrame(peerIP, myIP, seg{5555, 80, p + 1 + uint32(off), iss + 1, tcpACK, 4096, []byte(data)}))
+		return readSeg(t, l)
+	}
+	stream := "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeee"
+	part := func(i int) string { return stream[i*10 : i*10+10] }
+
+	if a := send(0, part(0)); a.ack != p+11 {
+		t.Fatalf("ACK of a: %+v", a)
+	}
+	// c, e and d come before b: each is ACKed as a duplicate.
+	for _, i := range []int{2, 4, 3} {
+		if a := send(i*10, part(i)); a.ack != p+11 || a.wnd != 256-10 {
+			t.Fatalf("ACK of %c: %+v", stream[i*10], a)
+		}
+	}
+	if c.nHeld != 1 || c.held[0] != (span{p + 21, p + 51}) {
+		t.Fatalf("held %v", c.held[:c.nHeld])
+	}
+	// b comes again from inside a: all of it is in now.
+	if a := send(5, stream[5:20]); a.ack != p+51 || a.wnd != 256-50 {
+		t.Fatalf("ACK after the gap filled: %+v", a)
+	}
+	buf := make([]byte, 64)
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != stream {
+		t.Fatalf("Read %q %v", buf[:n], err)
+	}
+	if s.stats.TCPOutOfOrder != 3 || s.stats.TCPOutOfOrderDropped != 0 || s.stats.TCPBytesIn != 50 {
+		t.Errorf("stats %+v", s.stats)
+	}
+
+	// Past the window, or a fifth gap, is dropped.
+	at := 50
+	send(at+300, "x")
+	for i := 1; i <= maxHeld+1; i++ {
+		send(at+i*10, "y")
+	}
+	if s.stats.TCPOutOfOrderDropped != 2 || c.nHeld != maxHeld {
+		t.Errorf("dropped %d, held %d", s.stats.TCPOutOfOrderDropped, c.nHeld)
+	}
+}
+
+// TestTCPOutOfOrderStream sends a stream through a small ring in segments
+// that come in any order within the window, some twice and some overlapping,
+// reading as it goes: what Read gives must be the stream.
+func TestTCPOutOfOrderStream(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	const p = 0xfffff000 // the sequence numbers wrap
+	c, iss := accepted(t, s, l, 200, p)
+	stream := make([]byte, 20000)
+	rng := uint32(1)
+	rand := func(n int) int {
+		rng = rng*1103515245 + 12345
+		return int(rng>>8) % n
+	}
+	for i := range stream {
+		stream[i] = byte(rand(256))
+	}
+	var got []byte
+	acked, wnd := 0, 200
+	buf := make([]byte, 100)
+	for len(got) < len(stream) {
+		if acked < len(stream) && wnd > 0 {
+			off := acked + rand(wnd)
+			n := min(1+rand(40), len(stream)-off, acked+wnd-off)
+			if n > 0 {
+				s.Input(tcpFrame(peerIP, myIP, seg{5555, 80, p + 1 + uint32(off), iss + 1, tcpACK, 4096, stream[off : off+n]}))
+				a := readSeg(t, l)
+				acked, wnd = int(a.ack-(p+1)), int(a.wnd)
+			}
+		}
+		s.mu.Lock()
+		ready := c.rcvLen > 0
+		s.mu.Unlock()
+		if wnd == 0 && !ready && acked < len(stream) {
+			// The window opened, but less than a segment: the stack doesn't
+			// say so, and a peer probes, a byte at a time.
+			s.Input(tcpFrame(peerIP, myIP, seg{5555, 80, p + 1 + uint32(acked), iss + 1, tcpACK, 4096, stream[acked : acked+1]}))
+			a := readSeg(t, l)
+			acked, wnd = int(a.ack-(p+1)), int(a.wnd)
+		}
+		if rand(3) == 0 || wnd == 0 {
+			if ready {
+				n, err := c.Read(buf[:1+rand(len(buf))])
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, buf[:n]...)
+				for len(l.sent) > 0 { // a window update
+					a := readSeg(t, l)
+					acked, wnd = int(a.ack-(p+1)), int(a.wnd)
+				}
+			}
+		}
+	}
+	if !bytes.Equal(got, stream) {
+		t.Fatalf("Read differs from the stream from byte %d", func() int {
+			for i := range got {
+				if got[i] != stream[i] {
+					return i
+				}
+			}
+			return len(got)
+		}())
+	}
+	if s.stats.TCPOutOfOrder == 0 {
+		t.Error("no segment came out of order")
+	}
+	t.Logf("%+v", s.stats)
+}

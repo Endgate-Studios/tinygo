@@ -21,12 +21,61 @@ func romDelayUs(us uint32)
 //export rom_i2c_writeReg_Mask
 func romI2CWriteRegMask(block, hostID, reg, msb, lsb, data uint8)
 
+//export rom_i2c_readReg_Mask
+func romI2CReadRegMask(block, hostID, reg, msb, lsb uint8) uint8
+
 // The LDO registers of ESP-IDF v5.3.2 soc/esp32s3/include/soc/regi2c_dig_reg.h.
 const (
 	i2cDigReg           = 0x6D
 	i2cDigRegExtRTCDreg = 4
 	i2cDigRegExtDigDreg = 6
 )
+
+// The bandgap registers of ESP-IDF v5.3.2 soc/esp32s3/include/soc/regi2c_ulp.h
+// and regi2c_lp_bias.h.
+const (
+	i2cULP            = 0x61
+	i2cULPIRResetB    = 0 // bit 0
+	i2cULPDoneFlags   = 3 // O_DONE_FLAG bit 0, BG_O_DONE_FLAG bit 3
+	i2cULPIRForceCode = 5 // bit 6
+	i2cULPExtCode     = 6 // bits 7:0
+)
+
+// rtcInit does what ESP-IDF v5.3.2 esp_rtc_init (esp_system/port/soc/esp32s3/clk.c)
+// and rtc_init (esp_hw_support/port/esp32s3/rtc_init.c) do for the radio
+// at power on, which an image the ROM starts directly doesn't get: the
+// bandgap calibration (O-code), which every LDO voltage is set against, the
+// SAR I2C's protection from a low RTC LDO, and the SAR power under the
+// FSM. Without them the PHY's first calibration and transmit brought the
+// chip down. It runs on the XTAL clock, before the PLL, as calibrate_ocode
+// wants.
+func rtcInit() {
+	// "open sar_i2c protect function to avoid sar_i2c reset when rtc_ldo is
+	// low." (machine.InitADC sets it too, but only for the ADC.)
+	esp.RTC_CNTL.SetANA_CONF_I2C_RESET_POR_FORCE_PD(0)
+
+	// The O-code: from the eFuse with BLK_VERSION_MAJOR 1, as
+	// set_ocode_by_efuse, or else calibrated by the hardware, as
+	// calibrate_ocode, waiting up to 10 ms for both done flags.
+	if efuse(0x6C)&3 == 1 {
+		romI2CWriteRegMask(i2cULP, 1, i2cULPExtCode, 7, 0, uint8(efuse(0x6C)>>13))
+		romI2CWriteRegMask(i2cULP, 1, i2cULPIRForceCode, 6, 6, 1)
+	} else {
+		romI2CWriteRegMask(i2cULP, 1, i2cULPIRResetB, 0, 0, 0)
+		romI2CWriteRegMask(i2cULP, 1, i2cULPIRResetB, 0, 0, 1)
+		for range 1000 {
+			if romI2CReadRegMask(i2cULP, 1, i2cULPDoneFlags, 0, 0) != 0 &&
+				romI2CReadRegMask(i2cULP, 1, i2cULPDoneFlags, 3, 3) != 0 {
+				break
+			}
+			romDelayUs(10)
+		}
+	}
+
+	// sar_periph_ctrl_init: SAR power under the FSM.
+	esp.SENS.SetSAR_PERI_CLK_GATE_CONF_SARADC_CLK_EN(1)
+	esp.SENS.SetSAR_POWER_XPD_SAR_FORCE_XPD_SAR(0)
+}
 
 // dbias240 gives the LDO values for 240 MHz, as rtc_set_stored_dbias of ESP-IDF
 // v5.3.2 esp_hw_support/port/esp32s3/rtc_init.c, from the eFuse BLOCK1 fields.
@@ -103,6 +152,8 @@ func main() {
 	esp.RTC_CNTL.SWD_WPROTECT.Set(0x8F1D312A)
 	esp.RTC_CNTL.SWD_CONF.Set(esp.RTC_CNTL_SWD_CONF_SWD_DISABLE)
 	esp.RTC_CNTL.SWD_WPROTECT.Set(0x0) // Re-enable write protect
+
+	rtcInit()
 
 	// Raise the core voltage for 240 MHz first, as ESP-IDF v5.3.2
 	// esp_hw_support/port/esp32s3/rtc_clk.c rtc_clk_cpu_freq_to_pll_mhz does.

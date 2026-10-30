@@ -15,3 +15,11 @@ func allocFirst(size uintptr) unsafe.Pointer { return shim.heap.Alloc(size) }
 
 // heapSpans is empty, because shim.heap holds the only collector.
 type heapSpans struct{}
+
+// SpanStats returns the one span's counters as the first, and zero for the
+// second, which this build does not have.
+func SpanStats() (first, second collector.Stats) {
+	shim.lock.Lock()
+	defer shim.lock.Unlock()
+	return shim.heap.Stats(), collector.Stats{}
+}

@@ -174,6 +174,7 @@ void phy_close_rf(void);
 void phy_xpd_tsens(void);
 void phy_param_track_tot(bool en_wifi, bool en_ble_154);
 char *get_phy_version_str(void);
+void phy_bbpll_en_usb(bool en);
 
 extern const esp_phy_init_data_t seam_phy_init_data;
 

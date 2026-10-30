@@ -124,6 +124,10 @@ func calibratePhy() {
 	}
 	mac := MAC()
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&cal.mac[0])), len(mac)), mac[:])
+	// Keep USB on, as CONFIG_ESP_PHY_ENABLE_USB (default y on the ESP32-S3)
+	// does in esp_phy_load_cal_and_init: otherwise libphy turns the USB PHY
+	// off to calibrate, and USB-Serial-JTAG drops off the bus for good.
+	C.phy_bbpll_en_usb(true)
 	C.register_chipv7_phy(&C.seam_phy_init_data, cal, C.PHY_RF_CAL_FULL)
 	memory.Free(blobHeap, cal)
 }

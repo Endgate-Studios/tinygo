@@ -95,3 +95,11 @@ func psramMappedEnd() uintptr {
 	}
 	return start + n*mmuPageSize
 }
+
+// SpanStats returns the counters of each span: internal DRAM, and PSRAM (zero
+// if PSRAM did not come up). ReadStats sums them.
+func SpanStats() (dram, psram collector.Stats) {
+	shim.lock.Lock()
+	defer shim.lock.Unlock()
+	return shim.spans.dram.Stats(), shim.spans.psram.Stats()
+}

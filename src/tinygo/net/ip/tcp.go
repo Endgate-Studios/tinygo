@@ -7,14 +7,18 @@ import (
 	"runtime/memory"
 )
 
-// TCP of RFC 9293. Out-of-order segments are dropped, and the window is not
-// scaled. Retransmission is go-back-N with a doubling timeout.
+// TCP of RFC 9293. Segments past a gap are kept in the receive ring, where
+// they will go, for up to maxHeld ranges, and join the data once the gap is
+// filled; the peer resends the one lost segment, not all after it. The window
+// is not scaled, and there is no SACK. Retransmission is go-back-N with a
+// doubling timeout.
 
 const (
 	protoTCP     = 6
 	tcpHdrLen    = 20
 	tcpMSS       = mtu - ipLen - tcpHdrLen
 	maxTCPConns  = 8
+	maxHeld      = 4 // ranges of data past a gap that a connection keeps
 	tcpTick      = 50 * time.Millisecond
 	rtoInitial   = time.Second
 	rtoMax       = 16 * time.Second
@@ -78,6 +82,8 @@ type TCPConn struct {
 	rcv       []byte
 	rcvHead   int
 	rcvLen    int
+	held      [maxHeld]span // data past a gap, in rcv already; sorted, apart
+	nHeld     int
 	wndClosed bool // the last ACK told a window of 0
 
 	finQueued, finSent bool
@@ -108,6 +114,9 @@ func (c *TCPConn) SetWriteDeadline(t time.Time) {
 	c.writeDeadline = t
 	c.s.mu.Unlock()
 }
+
+// span is the sequence numbers [start, end).
+type span struct{ start, end uint32 }
 
 // TCPListener accepts connections on a local port.
 type TCPListener struct {
@@ -737,21 +746,28 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 
 	// The data and the FIN.
 	needACK := len(data) > 0 || flags&tcpFIN != 0
-	if len(data) > 0 && seqLT(c.rcvNxt, seq) {
+	if seqLT(seq, c.rcvNxt) && seqLT(c.rcvNxt, seq+uint32(len(data))) {
+		// Resent with some we have: the rest is new.
+		data = data[c.rcvNxt-seq:]
+		seq = c.rcvNxt
+	}
+	if len(data) > 0 && seqLT(c.rcvNxt, seq) && !c.peerFin {
 		s.stats.TCPOutOfOrder++
+		if !s.hold(c, seq, data) {
+			s.stats.TCPOutOfOrderDropped++
+		}
 	}
 	if seq == c.rcvNxt && !c.peerFin {
 		n := min(len(data), len(c.rcv)-c.rcvLen)
 		if n > 0 {
-			i := (c.rcvHead + c.rcvLen) % len(c.rcv)
-			m := copy(c.rcv[i:], data[:n])
-			copy(c.rcv, data[m:n])
+			c.put(0, data[:n])
 			c.rcvLen += n
 			c.rcvNxt += uint32(n)
 			s.stats.TCPBytesIn += uint32(n)
+			s.joinHeld(c)
 			c.wake()
 		}
-		if flags&tcpFIN != 0 && n == len(data) {
+		if flags&tcpFIN != 0 && n == len(data) && c.nHeld == 0 {
 			c.rcvNxt++
 			c.peerFin = true
 			switch c.state {
@@ -771,6 +787,65 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 	s.tcpOutput(c)
 }
 
+// put copies data into the receive ring at off bytes past rcvNxt.
+func (c *TCPConn) put(off int, data []byte) {
+	i := (c.rcvHead + c.rcvLen + off) % len(c.rcv)
+	m := copy(c.rcv[i:], data)
+	copy(c.rcv, data[m:])
+}
+
+// hold keeps data that came past a gap, at seq, in the receive ring where it
+// will go, if it is all in the window and there is a range to note it in. Its
+// bytes are the same as any already held there. The caller holds s.mu.
+func (s *Stack) hold(c *TCPConn, seq uint32, data []byte) bool {
+	off := int(seq - c.rcvNxt)
+	if off+len(data) > len(c.rcv)-c.rcvLen {
+		return false // past the window
+	}
+	r := span{seq, seq + uint32(len(data))}
+	// Where it goes in the list, and the ranges it overlaps or touches.
+	i := 0
+	for i < c.nHeld && seqLT(c.held[i].end, r.start) {
+		i++
+	}
+	j := i
+	for j < c.nHeld && !seqLT(r.end, c.held[j].start) {
+		if seqLT(c.held[j].start, r.start) {
+			r.start = c.held[j].start
+		}
+		if seqLT(r.end, c.held[j].end) {
+			r.end = c.held[j].end
+		}
+		j++
+	}
+	if j == i && c.nHeld == maxHeld {
+		return false // a new range, and no room for it
+	}
+	c.put(off, data)
+	// Ranges i to j-1 become r.
+	copy(c.held[i+1:], c.held[j:c.nHeld])
+	c.nHeld += 1 - (j - i)
+	c.held[i] = r
+	return true
+}
+
+// joinHeld adds the held data that rcvNxt has reached to the data. The
+// caller holds s.mu.
+func (s *Stack) joinHeld(c *TCPConn) {
+	k := 0
+	for k < c.nHeld && !seqLT(c.rcvNxt, c.held[k].start) {
+		if r := c.held[k]; seqLT(c.rcvNxt, r.end) {
+			n := int(r.end - c.rcvNxt)
+			c.rcvLen += n
+			c.rcvNxt = r.end
+			s.stats.TCPBytesIn += uint32(n)
+		}
+		k++
+	}
+	copy(c.held[:], c.held[k:c.nHeld])
+	c.nHeld -= k
+}
+
 // enterTimeWait starts TIME-WAIT. Only Close sends our FIN, so the user is
 // done, and TIME-WAIT sends no data: the rings go back to the allocator now,
 // and only the slot waits.
@@ -787,7 +862,7 @@ func (s *Stack) freeRings(c *TCPConn) {
 		memory.FreeSlice(s.mem, c.snd)
 		memory.FreeSlice(s.mem, c.rcv)
 		c.snd, c.rcv = nil, nil
-		c.sndLen, c.rcvLen, c.sent = 0, 0, 0
+		c.sndLen, c.rcvLen, c.sent, c.nHeld = 0, 0, 0, 0
 	}
 }
 
