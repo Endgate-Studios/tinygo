@@ -7,9 +7,10 @@ import (
 	"unsafe"
 )
 
-// Free releases the object that p points to.
+// Free releases the object that p points to. Without a real free it does nothing: runtime.free
+// of the built-in collectors accepts only manual allocations (src/runtime/gc_blocks.go).
 func Free[T any](p *T) {
-	if p == nil {
+	if p == nil || !realFree {
 		return
 	}
 	runtimeFree(unsafe.Pointer(p))
@@ -17,7 +18,7 @@ func Free[T any](p *T) {
 
 // FreeSlice releases the backing array of s.
 func FreeSlice[T any](s []T) {
-	if cap(s) == 0 {
+	if cap(s) == 0 || !realFree {
 		return
 	}
 	runtimeFree(unsafe.Pointer(unsafe.SliceData(s)))
@@ -52,7 +53,7 @@ type Runtime struct{}
 
 // Free releases p through runtime.free.
 func (Runtime) Free(p unsafe.Pointer) {
-	if p == nil {
+	if p == nil || !realFree {
 		return
 	}
 	runtimeFree(p)
