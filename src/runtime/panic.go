@@ -130,17 +130,12 @@ func runtimePanicAt(addr unsafe.Pointer, err Error) {
 	if startPanicUnwind(err, panicTrue) {
 		return
 	}
-	if hasReturnAddr {
-		// Note: the string "panic: runtime error at " is also used in
-		// runtime_cortexm_hardfault.go. It is kept the same so that the string
-		// can be deduplicated by the compiler.
-		printstring("panic: runtime error at ")
-		printptr(uintptr(addr) - callInstSize)
-		printstring(": ")
-	} else {
-		printstring("panic: runtime error: ")
-	}
+	printstring("panic: ")
 	printstring(err.Error())
+	if hasReturnAddr {
+		printstring(" at ")
+		printptr(uintptr(addr) - callInstSize)
+	}
 	printnl()
 	abort()
 }
@@ -150,7 +145,6 @@ func runtimePanicSchedulerDisabled() {
 }
 
 //go:inline
-//go:nobounds
 func currentDeferFrame() *deferFrame {
 	currentTask := task.Current()
 	if currentTask == nil {
@@ -165,7 +159,6 @@ func currentDeferFrame() *deferFrame {
 // that will be used.
 //
 //go:inline
-//go:nobounds
 func setupDeferFrame(frame *deferFrame, jumpSP unsafe.Pointer) {
 	if interrupt.In() {
 		// Defer is not currently allowed in interrupts.
@@ -186,7 +179,6 @@ func setupDeferFrame(frame *deferFrame, jumpSP unsafe.Pointer) {
 // still panicking.
 //
 //go:inline
-//go:nobounds
 func destroyDeferFrame(frame *deferFrame) {
 	task.Current().DeferFrame = unsafe.Pointer(frame.Previous)
 	if frame.PanicState&panicTrue != 0 {

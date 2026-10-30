@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -14,6 +15,12 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/tinygo-org/tinygo/goenv"
+)
+
+// Go minor version range supported by TinyGo.
+const (
+	MinimumGoMinorVersion = 25
+	MaximumGoMinorVersion = 27
 )
 
 // Library versions. Whenever an existing library is changed, this number should
@@ -27,6 +34,7 @@ var libVersions = map[string]int{
 	"bdwgc":        4,
 	"picolibc":     2,
 	"wasmbuiltins": 1,
+	"compiler-rt":  1,
 }
 
 // Config keeps all configuration affecting the build in a single struct.
@@ -63,6 +71,26 @@ func (c *Config) BuildMode() string {
 // (-buildmode=c-shared) that uses the libc of the host process.
 func (c *Config) SharedLibrary() bool {
 	return c.BuildMode() == "c-shared" && c.GOOS() == "linux"
+}
+
+// TrimPath reports whether local file system paths must be removed from the
+// output.
+func (c *Config) TrimPath() bool {
+	return c.Options.TrimPath
+}
+
+const (
+	CSourcePathRoot        = "/_"
+	CSourcePathRootWindows = "//_/_"
+)
+
+// CSourcePath avoids relative DWARF paths being joined to DW_AT_comp_dir.
+// See go.dev/src/cmd/go/internal/work/exec.go (Builder.ccompile).
+func (c *Config) CSourcePath(filename string) string {
+	if c.GOOS() == "windows" {
+		return "/" + path.Join(CSourcePathRootWindows, filepath.ToSlash(filename))
+	}
+	return path.Join(CSourcePathRoot, filepath.ToSlash(filename))
 }
 
 // Features returns a list of features this CPU supports. For example, for a
@@ -212,16 +240,21 @@ func (c *Config) PanicStrategy() string {
 }
 
 // PanicUnwind returns the mechanism used to unwind panics and Goexit. Asyncify
-// provides unwinding whenever that scheduler is selected. Explicit
-// return-based unwinding must be requested by the command line or target
-// specification.
+// provides unwinding whenever that scheduler is selected, unless unwinding is
+// turned off with "none". Explicit return-based unwinding must be requested by
+// the command line or target specification.
 func (c *Config) PanicUnwind() string {
-	if c.Scheduler() == "asyncify" {
-		return "asyncify"
-	}
 	requested := c.Target.PanicUnwind
 	if c.Options.PanicUnwind != "" {
 		requested = c.Options.PanicUnwind
+	}
+	if requested == "none" {
+		// Without unwinding, recover never stops a panic and Goexit cannot run
+		// deferred calls, but calls need no code to propagate an unwind.
+		return "none"
+	}
+	if c.Scheduler() == "asyncify" {
+		return "asyncify"
 	}
 	if requested == "explicit" {
 		return "explicit"
@@ -345,6 +378,9 @@ func (c *Config) LibraryPath(name string) string {
 	if c.SharedLibrary() {
 		options += "+pic"
 	}
+	if c.TrimPath() {
+		options += "+trimpath-v1"
+	}
 
 	// No precompiled library found. Determine the path name that will be used
 	// in the build cache.
@@ -381,7 +417,7 @@ func (c *Config) CFlags(libclang bool) []string {
 	for _, flag := range c.Target.CFlags {
 		cflags = append(cflags, strings.ReplaceAll(flag, "{root}", goenv.Get("TINYGOROOT")))
 	}
-	resourceDir := goenv.ClangResourceDir(libclang)
+	resourceDir := goenv.ClangResourceDir(libclang || c.TrimPath())
 	if resourceDir != "" {
 		// The resource directory contains the built-in clang headers like
 		// stdbool.h, stdint.h, float.h, etc.
@@ -400,6 +436,17 @@ func (c *Config) CFlags(libclang bool) []string {
 		cflags = append(cflags,
 			"-I"+filepath.Join(goenv.Get("TINYGOROOT"), "lib", "bdwgc", "include"),
 		)
+	}
+	if c.TrimPath() {
+		cflags = append(cflags,
+			"-ffile-prefix-map="+goenv.Get("TINYGOROOT")+"="+c.CSourcePath("github.com/tinygo-org/tinygo"),
+			"-ffile-prefix-map="+goenv.Get("GOCACHE")+"="+c.CSourcePath("tinygo-cache"),
+			"-fdebug-compilation-dir=.",
+			"-gno-record-command-line",
+		)
+		if resourceDir != "" {
+			cflags = append(cflags, "-ffile-prefix-map="+resourceDir+"="+c.CSourcePath("clang"))
+		}
 	}
 	// Always emit debug information. It is optionally stripped at link time.
 	cflags = append(cflags, "-gdwarf-4")
@@ -726,6 +773,7 @@ func (c *Config) Emulator(format, binary string) ([]string, error) {
 
 type TestConfig struct {
 	CompileTestBinary bool
+	StandardPackage   bool
 	CompileOnly       bool
 	Verbose           bool
 	Short             bool

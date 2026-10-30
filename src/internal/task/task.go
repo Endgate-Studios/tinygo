@@ -36,7 +36,8 @@ type Task struct {
 	// SynctestBlocked is set while this task is durably blocked.
 	SynctestBlocked bool
 
-	// Affinity is the core pinning of the cores scheduler. It is empty otherwise.
+	// Affinity is the assigned core used by the cores scheduler.
+	// It fits in the padding before DeferFrame, and is empty for other schedulers.
 	Affinity Affinity
 
 	// DeferFrame stores a pointer to the (stack allocated) defer frame of the
@@ -90,6 +91,9 @@ func runtime_freeTaskStack(ptr uintptr)
 //go:linkname scheduleTask runtime.scheduleTask
 func scheduleTask(*Task)
 
+//go:linkname scheduleTaskNoWake runtime.scheduleTaskNoWake
+func scheduleTaskNoWake(*Task)
+
 func inheritSynctest(t *Task) {
 	if !synctestIsEnabled() {
 		return
@@ -117,6 +121,9 @@ func synctestTaskCreated(*Task)
 
 //go:linkname synctestTaskExited runtime.synctestTaskExited
 func synctestTaskExited(*Task)
+
+//go:linkname synctestTaskWake runtime.synctestTaskWake
+func synctestTaskWake(*Task)
 
 //go:linkname synctestIsEnabled runtime.synctestIsEnabled
 func synctestIsEnabled() bool

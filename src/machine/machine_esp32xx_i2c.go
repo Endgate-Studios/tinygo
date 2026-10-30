@@ -44,6 +44,7 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 
 	i2c.initClock(config)
 	i2c.initNoiseFilter()
+	i2c.clearBus(config)
 	i2c.initPins(config)
 	i2c.initFrequency(config)
 	i2c.startMaster()
@@ -72,17 +73,40 @@ func (i2c *I2C) initNoiseFilter() {
 	i2c.Bus.FILTER_CFG.Set(0x377)
 }
 
+// clearBus clocks SCL until SDA is released and then sends a STOP, both as GPIOs.
+// Same as ESP-IDF https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L579
+func (i2c *I2C) clearBus(config I2CConfig) {
+	const halfPeriodNS = 5000
+	wait := func() {
+		end := nanotime() + halfPeriodNS
+		for nanotime() < end {
+		}
+	}
+	scl, sda := config.SCL, config.SDA
+	scl.Configure(PinConfig{Mode: PinOutput})
+	scl.pinReg().SetBits(esp.GPIO_PIN_PAD_DRIVER)
+	sda.Configure(PinConfig{Mode: PinOutput})
+	sda.pinReg().SetBits(esp.GPIO_PIN_PAD_DRIVER)
+	scl.Low()
+	sda.High()
+	wait()
+	for i := 0; i < 9 && !sda.Get(); i++ {
+		scl.High()
+		wait()
+		scl.Low()
+		wait()
+	}
+	sda.Low()
+	scl.High()
+	wait()
+	sda.High()
+	wait()
+}
+
 //go:inline
 func (i2c *I2C) initPins(config I2CConfig) {
-	// Internal pull-ups on both lines, as ESP-IDF's enable_internal_pullup does.
-	//
-	// configure() writes the whole IO MUX register, so the pull-up has to be set after it and cannot
-	// be arranged by the caller beforehand. Without it, a board with no external resistors has both
-	// lines sitting low, and resetMaster below then spins forever on SCL_RST_SLV_EN waiting for a
-	// clock pulse that cannot happen - a hang in Configure, before any transaction, with nothing to
-	// show for it. Measured on a Waveshare ESP32-S3-RLCD-4.2, whose ES7210 bus has no external
-	// pull-ups: both pins read low as plain inputs at boot, and ESP-IDF drives the same bus with its
-	// internal ones on.
+	// Internal pull-ups, as enable_internal_pullup in ESP-IDF i2c.c. configure() writes the whole
+	// IO MUX register, so set them after it.
 	config.SDA.configure(PinConfig{Mode: PinOutput}, i2c.funcSDA)
 	config.SDA.pullUp()
 	inFunc(i2c.funcSDA).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDA)<<esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos)
@@ -146,47 +170,25 @@ func (i2c *I2C) startMaster() {
 	i2c.resetMaster()
 }
 
-// i2cResetTries bounds the wait for the bus-clear pulses in resetMaster.
-//
-// Nine SCL pulses at the slowest supported rate take well under a millisecond, and each pass of the
-// loop is a peripheral register read, so this is several times longer than the hardware can
-// legitimately need.
-const i2cResetTries = 100000
-
 //go:inline
 func (i2c *I2C) resetMaster() {
 	// reset FSM
 	i2c.Bus.SetCTR_FSM_RST(1)
-	// clear the bus
-	i2c.Bus.SetSCL_SP_CONF_SCL_RST_SLV_NUM(9)
-	i2c.Bus.SetSCL_SP_CONF_SCL_RST_SLV_EN(1)
 	i2c.Bus.SetSCL_STRETCH_CONF_SLAVE_SCL_STRETCH_EN(1)
 	i2c.Bus.SetCTR_CONF_UPGATE(1)
 	i2c.Bus.FILTER_CFG.Set(0x377)
-	// Wait for SCL_RST_SLV_EN, but not forever.
-	//
-	// The hardware clears this bit once it has clocked out the nine pulses that free a stuck slave,
-	// and it can only do that if SCL is able to rise. On a bus held low - no pull-up, a shorted line,
-	// an unpowered device - it never clears, and an unbounded wait here hangs Configure before any
-	// transaction, which on a cooperative scheduler takes the whole program with it and reports
-	// nothing. Giving up instead leaves the peripheral configured, so the first Tx returns a timeout
-	// error and the caller can say which bus is dead.
-	//
-	// The bound is a count rather than a deadline because this runs during Configure, which board
-	// setup may call before the scheduler and its clock are up.
-	for i := 0; i < i2cResetTries && i2c.Bus.GetSCL_SP_CONF_SCL_RST_SLV_EN() != 0; i++ {
-	}
-	i2c.Bus.SetSCL_SP_CONF_SCL_RST_SLV_NUM(0)
 }
 
 type i2cCommandType = uint32
 type i2cAck = uint32
 
+// READ commands have no ack_check_en, with it a successful read raises NACK_INT.
+// Same as ESP-IDF https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L1227
 const (
 	i2cCMD_RSTART   i2cCommandType = 6 << 11
-	i2cCMD_WRITE    i2cCommandType = 1<<11 | 1<<8 // WRITE + ack_check_en
-	i2cCMD_READ     i2cCommandType = 3<<11 | 1<<8 // READ + ack_check_en
-	i2cCMD_READLAST i2cCommandType = 3<<11 | 5<<8 // READ + ack_check_en + NACK
+	i2cCMD_WRITE    i2cCommandType = 1<<11 | 1<<8  // WRITE + ack_check_en
+	i2cCMD_READ     i2cCommandType = 3 << 11       // READ
+	i2cCMD_READLAST i2cCommandType = 3<<11 | 1<<10 // READ + NACK
 	i2cCMD_STOP     i2cCommandType = 2 << 11
 	i2cCMD_END      i2cCommandType = 4 << 11
 )
@@ -200,21 +202,42 @@ type i2cCommand struct {
 //go:linkname nanotime runtime.nanotime
 func nanotime() int64
 
+const i2cIntMask = esp.I2C_INT_STATUS_END_DETECT_INT_ST_Msk | esp.I2C_INT_STATUS_TRANS_COMPLETE_INT_ST_Msk | esp.I2C_INT_STATUS_TIME_OUT_INT_ST_Msk | esp.I2C_INT_STATUS_NACK_INT_ST_Msk
+
 func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
-	const intMask = esp.I2C_INT_STATUS_END_DETECT_INT_ST_Msk | esp.I2C_INT_STATUS_TRANS_COMPLETE_INT_ST_Msk | esp.I2C_INT_STATUS_TIME_OUT_INT_ST_Msk | esp.I2C_INT_STATUS_NACK_INT_ST_Msk
-	i2c.Bus.INT_CLR.SetBits(intMask)
-	i2c.Bus.INT_ENA.SetBits(intMask)
+	// After a NACK the controller keeps the bus busy for some microseconds.
+	// A start in this time does not complete and gives a timeout.
+	end := nanotime() + int64(timeoutMS)*1000000
+	for i2c.Bus.GetSR_BUS_BUSY() != 0 {
+		if nanotime() > end {
+			// Reset the FSM so a later call can recover, same as ESP-IDF
+			// https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L1451
+			i2c.resetMaster()
+			return errI2CBusReadyTimeout
+		}
+	}
+
+	// Reset the FIFOs, bytes left after a NACK would go out in the next transaction.
+	// Same as ESP-IDF https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L1456
+	i2c.Bus.SetFIFO_CONF_TX_FIFO_RST(1)
+	i2c.Bus.SetFIFO_CONF_TX_FIFO_RST(0)
+	i2c.Bus.SetFIFO_CONF_RX_FIFO_RST(1)
+	i2c.Bus.SetFIFO_CONF_RX_FIFO_RST(0)
+	i2c.Bus.INT_CLR.SetBits(i2cIntMask)
+	i2c.Bus.INT_ENA.SetBits(i2cIntMask)
 	i2c.Bus.SetCTR_CONF_UPGATE(1)
 
-	defer func() {
-		i2c.Bus.INT_CLR.SetBits(intMask)
-		i2c.Bus.INT_ENA.ClearBits(intMask)
-	}()
+	// No defer here, since a deferred closure allocates on every transaction.
+	err := i2c.runCommands(addr, cmd, timeoutMS)
+	i2c.Bus.INT_CLR.SetBits(i2cIntMask)
+	i2c.Bus.INT_ENA.ClearBits(i2cIntMask)
+	return err
+}
 
+func (i2c *I2C) runCommands(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 	timeoutNS := int64(timeoutMS) * 1000000
 	needAddress := true
 	needRestart := false
-	readLast := false
 	var readTo []byte
 	for cmdIdx, reg := 0, &i2c.Bus.COMD0; cmdIdx < len(cmd); {
 		c := &cmd[cmdIdx]
@@ -228,11 +251,16 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 		case i2cCMD_WRITE:
 			count := 32
 			if needAddress {
+				// Own WRITE plus END for the address, else an address NACK hangs the controller.
+				// Same as ESP-IDF https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L1296
 				needAddress = false
 				i2c.Bus.SetDATA_FIFO_RDATA((uint32(addr) & 0x7f) << 1)
-				count--
 				i2c.Bus.SLAVE_ADDR.Set(uint32(addr))
-				i2c.Bus.SetCTR_CONF_UPGATE(1)
+				reg.Set(i2cCMD_WRITE | 1)
+				reg = nextAddress(reg)
+				reg.Set(i2cCMD_END)
+				reg = nil
+				break
 			}
 			for ; count > 0 && c.head < len(c.data); count, c.head = count-1, c.head+1 {
 				i2c.Bus.SetDATA_FIFO_RDATA(uint32(c.data[c.head]))
@@ -250,11 +278,15 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 
 		case i2cCMD_READ:
 			if needAddress {
+				// Own WRITE plus END for the address, see i2cCMD_WRITE above.
 				needAddress = false
 				i2c.Bus.SetDATA_FIFO_RDATA((uint32(addr)&0x7f)<<1 | 1)
 				i2c.Bus.SLAVE_ADDR.Set(uint32(addr))
 				reg.Set(i2cCMD_WRITE | 1)
 				reg = nextAddress(reg)
+				reg.Set(i2cCMD_END)
+				reg = nil
+				break
 			}
 			if needRestart {
 				// We need to send RESTART again after i2cCMD_WRITE.
@@ -277,12 +309,21 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 			if bytes > 32 {
 				bytes = 32
 			}
+			if split && bytes > 0 {
+				// Last byte in its own segment, else 64 and 96 byte reads time out.
+				// Same as ESP-IDF https://github.com/espressif/esp-idf/blob/v4.4.8/components/driver/i2c.c#L1259
+				reg.Set(i2cCMD_READ | uint32(bytes))
+				reg = nextAddress(reg)
+				reg.Set(i2cCMD_END)
+				readTo = c.data[c.head : c.head+bytes]
+				reg = nil
+				break
+			}
 			if bytes > 0 {
 				reg.Set(i2cCMD_READ | uint32(bytes))
 				reg = nextAddress(reg)
 			}
 			if split {
-				readLast = true
 				reg.Set(i2cCMD_READLAST | 1)
 				reg = nextAddress(reg)
 				readTo = c.data[c.head : c.head+bytes+1] // read bytes + 1 last byte
@@ -304,7 +345,7 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 			i2c.Bus.SetCTR_TRANS_START(1)
 			end := nanotime() + timeoutNS
 			var mask uint32
-			for mask = i2c.Bus.INT_STATUS.Get(); mask&intMask == 0; mask = i2c.Bus.INT_STATUS.Get() {
+			for mask = i2c.Bus.INT_STATUS.Get(); mask&i2cIntMask == 0; mask = i2c.Bus.INT_STATUS.Get() {
 				if nanotime() > end {
 					if readTo != nil {
 						return errI2CReadTimeout
@@ -313,7 +354,7 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 				}
 			}
 			switch {
-			case mask&esp.I2C_INT_STATUS_NACK_INT_ST_Msk != 0 && !readLast:
+			case mask&esp.I2C_INT_STATUS_NACK_INT_ST_Msk != 0:
 				return errI2CAckExpected
 			case mask&esp.I2C_INT_STATUS_TIME_OUT_INT_ST_Msk != 0:
 				if readTo != nil {
@@ -321,7 +362,7 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 				}
 				return errI2CWriteTimeout
 			}
-			i2c.Bus.INT_CLR.SetBits(intMask)
+			i2c.Bus.INT_CLR.SetBits(i2cIntMask)
 			for i := 0; i < len(readTo); i++ {
 				readTo[i] = byte(i2c.Bus.GetDATA_FIFO_RDATA() & 0xff)
 				c.head++

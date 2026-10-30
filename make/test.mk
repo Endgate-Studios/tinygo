@@ -52,6 +52,7 @@ TEST_PACKAGES_FAST = \
 	image \
 	internal/itoa \
 	internal/profile \
+	internal/reflectlite \
 	math \
 	math/cmplx \
 	net/http/internal/ascii \
@@ -91,22 +92,34 @@ TEST_PACKAGES_FAST = \
 # Additional standard library packages that pass tests on individual platforms
 TEST_PACKAGES_LINUX := \
 	archive/zip \
+	bytes \
 	compress/flate \
 	context \
 	crypto/aes \
 	crypto/ecdh \
+	crypto/mldsa \
 	debug/dwarf \
+	debug/gosym \
 	debug/plan9obj \
 	encoding/xml \
+	go/build/constraint \
+	go/parser \
 	go/printer \
 	io/ioutil \
+	iter \
 	mime \
 	mime/multipart \
 	mime/quotedprintable \
 	net \
 	net/mail \
+	net/netip \
 	net/textproto \
 	os/user \
+	path/filepath \
+	regexp \
+	slices \
+	strings \
+	testing/cryptotest \
 	testing/fstest \
 	$(nil)
 
@@ -184,35 +197,74 @@ report-stdlib-tests-pass:
 	@rm $(jointmp).*
 
 # Standard library packages that pass tests quickly on the current platform
+TEST_PACKAGES_HOST_FULL_ONLY := internal/synctest testing/synctest
 ifeq ($(uname),Darwin)
 TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_DARWIN)
-TEST_IOFS := true
-TEST_ENCODING_XML := true
+TEST_PACKAGES_HOST_FULL_ONLY += io/fs
 endif
 ifeq ($(uname),Linux)
 TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_LINUX)
-TEST_IOFS := true
-TEST_ENCODING_XML := true
+TEST_PACKAGES_HOST_FULL_ONLY += io/fs
 endif
 ifeq ($(OS),Windows_NT)
 TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_WINDOWS)
-TEST_IOFS := false
 endif
 
 TEST_SKIP_FLAG := -skip='TestExtraMethods|TestAsValidation|TestUnmarshalNestingLimitSlice|TestUnmarshalNestingLimitStruct'
 TEST_ADDITIONAL_FLAGS ?=
 
-# These packages spend almost all of their test time in a few tests that Go
-# marks as long running. -short omits those tests and keeps the rest.
-# encoding/xml gets the same treatment on its own line below.
-# See https://github.com/tinygo-org/tinygo/issues/5659
-TEST_PACKAGES_SHORT = \
-	archive/zip \
-	index/suffixarray \
-	$(nil)
+TEST_OPTIONS_crypto/sha256 := -skip='^(TestExtraMethods|TestAllocations|TestAllocatonsWithTypeAsserts)$$'
+TEST_OPTIONS_crypto/sha512 := -skip='^(TestExtraMethods|TestAllocations|TestAllocatonsWithTypeAsserts)$$'
+TEST_OPTIONS_strconv := -skip='^(TestCountMallocs|TestAllocationsFromBytes)$$'
+TEST_OPTIONS_unicode/utf16 := -skip='^(TestAllocationsDecode|TestRuneCountNonASCIIAllocation)$$'
+TEST_OPTIONS_unicode/utf8 := -skip='^(TestAllocationsDecode|TestRuneCountNonASCIIAllocation)$$'
+TEST_OPTIONS_context := -skip='^TestAllocs$$'
+TEST_OPTIONS_mime := -skip='^TestLookupMallocs$$'
+TEST_OPTIONS_net/textproto := -skip='^TestCommonHeaders$$'
+TEST_OPTIONS_reflect := -skip='^(TestMapIterSet|TestDeepEqualAllocs)$$'
+TEST_OPTIONS_bytes := -skip='^(TestNewBufferShallow|TestEqual|TestIndex|TestLastIndex|TestReplace)$$'
+TEST_OPTIONS_slices := -skip='^(TestGrow|TestInsert|TestConcat)$$'
+TEST_OPTIONS_strings := -skip='^(TestBuilderAllocs|TestBuilderGrow|TestBuilderGrowSizeclasses|TestIndexRune|TestReplace)$$'
+TEST_OPTIONS_crypto/mldsa := -short -stack-size=1MB -skip='^TestAllocations$$'
 
-TEST_PACKAGES_SHORT_HOST := $(filter $(TEST_PACKAGES_SHORT),$(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW))
-TEST_PACKAGES_PRINTER_HOST := $(filter go/printer,$(TEST_PACKAGES_HOST))
+tinygo-test tinygo-test-fast: TEST_OPTIONS_go/printer := -stack-size=1MB
+tinygo-test tinygo-test-fast: TEST_OPTIONS_go/build/constraint = $(HOST_TEST_STACK_SKIP_FLAG) -stack-size=1MB
+tinygo-test tinygo-test-fast: TEST_OPTIONS_regexp = $(HOST_TEST_STACK_SKIP_FLAG) -stack-size=1MB
+tinygo-test tinygo-test-fast: TEST_OPTIONS_path/filepath = $(HOST_TEST_STACK_SKIP_FLAG) -stack-size=4MB
+tinygo-test tinygo-test-fast: TEST_OPTIONS_go/parser = $(HOST_TEST_STACK_SKIP_FLAG) -stack-size=256MB
+tinygo-test tinygo-test-fast: TEST_OPTIONS_encoding/xml = $(TEST_SKIP_FLAG) -short -stack-size=16MB
+tinygo-test: TEST_OPTIONS_archive/zip = $(TEST_SKIP_FLAG) -short
+tinygo-test: TEST_OPTIONS_index/suffixarray = $(TEST_SKIP_FLAG) -short
+tinygo-test: TEST_OPTIONS_net/netip := -skip='^TestAddrStringAllocs$$|^TestNoAllocs$$/^(Addr.IsGlobalUnicast|Addr.IsInterfaceLocalMulticast|Addr.IsLinkLocalMulticast|Addr.IsLinkLocalUnicast|Addr.IsPrivate)$$'
+tinygo-test: TEST_OPTIONS_io/fs := -stack-size=6MB
+tinygo-test: TEST_OPTIONS_internal/synctest = -skip='^(TestReflectFuncOf|TestChannelMovedOutOfBubble|TestTimerFromInsideBubble|TestWaitGroupMovedIntoBubble|TestWaitGroupMovedOutOfBubble|TestWaitGroupMovedBetweenBubblesWithNonZeroCount$(TEST_SYNCTEST_THREAD_LIMIT_SKIP))$$'
+tinygo-test: TEST_OPTIONS_testing/synctest := -skip='^(TestFatal|TestError|TestVerboseError|TestSkip|TestVerboseSkip|TestHelper|TestHTTPTransport100Continue)$$'
+tinygo-test-fast: HOST_TEST_STACK_SKIP_FLAG = $(TEST_SKIP_FLAG)
+
+tinygo-test-baremetal: TEST_OPTIONS_strconv := -skip='TestCountMallocs|TestAllocationsFromBytes'
+tinygo-test-baremetal: TEST_OPTIONS_unicode/utf16 := -skip='TestAllocationsDecode|TestRuneCountNonASCIIAllocation'
+tinygo-test-baremetal: TEST_OPTIONS_unicode/utf8 := -skip='TestAllocationsDecode|TestRuneCountNonASCIIAllocation'
+tinygo-test-baremetal: TEST_OPTIONS_reflect := -skip='TestMapIterSet|TestDeepEqualAllocs'
+
+# Explicit options replace default flags, even when empty.
+# https://www.gnu.org/software/make/manual/html_node/Origin-Function.html
+test-packages-with-options = $(foreach package,$(1),$(if $(filter undefined,$(origin TEST_OPTIONS_$(package))),,$(package)))
+
+define run-tinygo-test-package
+$(3) $(TINYGO) test $(2) $(TEST_OPTIONS_$(1)) $(1)
+
+endef
+
+define run-tinygo-tests
+$(if $(strip $(filter-out $(call test-packages-with-options,$(1)),$(1))),$(4) $(TINYGO) test $(2) $(3) $(filter-out $(call test-packages-with-options,$(1)),$(1)))
+$(foreach package,$(call test-packages-with-options,$(1)),$(call run-tinygo-test-package,$(package),$(2),$(4)))
+endef
+
+# https://go.dev/src/internal/synctest/synctest_test.go creates 100 x 100
+# goroutines, which can exceed macOS's thread limit with the threads scheduler.
+ifeq ($(uname),Darwin)
+TEST_SYNCTEST_THREAD_LIMIT_SKIP := |TestWaitGroupManyBubbles
+endif
 
 # Test known-working standard library packages.
 # TODO: parallelize, and only show failing tests (no implied -v flag).
@@ -221,27 +273,10 @@ tinygo-test:
 	@# TestExtraMethods: used by many crypto packages and uses reflect.Type.Method which is not implemented.
 	@# TestUnmarshalNestingLimit{Slice,Struct}: encoding/asn1 nesting limit added in
 	@# https://github.com/golang/go/commit/6a6d115f9a7422b2fa081ba6f567eefb4a099462
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) $(TEST_SKIP_FLAG) $(filter-out encoding/xml $(TEST_PACKAGES_SHORT) $(TEST_PACKAGES_PRINTER_HOST),$(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW))
-ifneq ($(TEST_PACKAGES_SHORT_HOST),)
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) $(TEST_SKIP_FLAG) -short $(TEST_PACKAGES_SHORT_HOST)
-endif
-ifneq ($(TEST_PACKAGES_PRINTER_HOST),)
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) -stack-size=1MB $(TEST_PACKAGES_PRINTER_HOST)
-endif
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) -skip='^(TestReflectFuncOf|TestChannelMovedOutOfBubble|TestTimerFromInsideBubble|TestWaitGroupMovedIntoBubble|TestWaitGroupMovedOutOfBubble|TestWaitGroupMovedBetweenBubblesWithNonZeroCount)$$' internal/synctest
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) -skip='^(TestFatal|TestError|TestVerboseError|TestSkip|TestVerboseSkip|TestHelper|TestHTTPTransport100Continue)$$' testing/synctest
+	$(call run-tinygo-tests,$(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW) $(TEST_PACKAGES_HOST_FULL_ONLY),$(TEST_ADDITIONAL_FLAGS),$(TEST_SKIP_FLAG))
 	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) -run='^TestSynctestMarshal$$' encoding/json
-ifeq ($(TEST_ENCODING_XML),true)
-	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) $(TEST_SKIP_FLAG) -short -stack-size=16MB encoding/xml
-endif
-	@# io/fs requires os.ReadDir, not yet supported on windows or wasi. It also
-	@# requires a large stack-size. Hence, io/fs is only run conditionally.
-	@# For more details, see the comments on issue #3143.
-ifeq ($(TEST_IOFS),true)
-	$(TINYGO) test -stack-size=6MB io/fs
-endif
 tinygo-test-fast:
-	$(TINYGO) test $(TEST_SKIP_FLAG) $(TEST_PACKAGES_HOST)
+	$(call run-tinygo-tests,$(TEST_PACKAGES_HOST),,$(TEST_SKIP_FLAG))
 tinygo-bench:
 	$(TINYGO) test -bench . $(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW)
 tinygo-bench-fast:
@@ -249,18 +284,18 @@ tinygo-bench-fast:
 
 # Same thing, except for wasi rather than the current platform.
 tinygo-test-wasm:
-	$(TINYGO) test -target wasm $(TEST_SKIP_FLAG) $(TEST_PACKAGES_WASM)
+	$(call run-tinygo-tests,$(TEST_PACKAGES_WASM),-target wasm,$(TEST_SKIP_FLAG))
 tinygo-test-wasi:
-	$(TINYGO) test -target wasip1 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
+	$(call run-tinygo-tests,$(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi,-target wasip1,$(TEST_SKIP_FLAG))
 tinygo-test-wasip1:
-	GOOS=wasip1 GOARCH=wasm $(TINYGO) test $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
+	$(call run-tinygo-tests,$(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi,,$(TEST_SKIP_FLAG),GOOS=wasip1 GOARCH=wasm)
 tinygo-test-wasip1-fast:
-	$(TINYGO) test -target=wasip1 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST_WASI) ./tests/runtime_wasi
+	$(call run-tinygo-tests,$(TEST_PACKAGES_FAST_WASI) ./tests/runtime_wasi,-target=wasip1,$(TEST_SKIP_FLAG))
 
 tinygo-test-wasip2-slow:
-	$(TINYGO) test -target=wasip2 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_SLOW)
+	$(call run-tinygo-tests,$(TEST_PACKAGES_SLOW),-target=wasip2,$(TEST_SKIP_FLAG))
 tinygo-test-wasip2-fast:
-	$(TINYGO) test -target=wasip2 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST_WASIP2) ./tests/runtime_wasi
+	$(call run-tinygo-tests,$(TEST_PACKAGES_FAST_WASIP2) ./tests/runtime_wasi,-target=wasip2,$(TEST_SKIP_FLAG))
 
 tinygo-test-wasip2-sum-slow:
 	TINYGO=$(TINYGO) \
@@ -286,7 +321,7 @@ tinygo-bench-wasip2-fast:
 
 # Run tests on riscv-qemu since that one provides a large amount of memory.
 tinygo-test-baremetal:
-	$(TINYGO) test -target riscv-qemu $(TEST_SKIP_FLAG) $(TEST_PACKAGES_BAREMETAL)
+	$(call run-tinygo-tests,$(TEST_PACKAGES_BAREMETAL),-target riscv-qemu,$(TEST_SKIP_FLAG))
 
 # Test external packages in a large corpus.
 test-corpus:

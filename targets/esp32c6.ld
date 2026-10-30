@@ -99,9 +99,8 @@ SECTIONS
         . = ALIGN(4);
     } > SRAM
 
-    /* Heap starts after IRAM. Goroutine stacks come from the heap, and the
-     * RISC-V psABI needs a 16 byte aligned stack pointer.
-     */
+    /* Heap starts after IRAM. Goroutine stacks come from the heap and need
+     * 16 byte alignment (RISC-V ELF psABI, integer calling convention). */
     . = ALIGN(16);
     _heap_start = ABSOLUTE(.);
     _heap_end = ORIGIN(SRAM) + LENGTH(SRAM);
@@ -127,6 +126,8 @@ SECTIONS
     .text : ALIGN(4)
     {
         *(.text .text.*)
+        /* Put the .rodata data at a 16-byte aligned flash offset, the same as its address. */
+        . = ALIGN(. + 0x8, 16) - 0x8;
     } > IROM
 
     /* === DROM sections (flash-mapped read-only data) === */
@@ -152,6 +153,9 @@ SECTIONS
         *(.rodata*)
         . = ALIGN (4);
     } >DROM
+
+    ASSERT(ADDR(.text) == ADDR(.irom_dummy) + SIZEOF(.irom_dummy), ".text address does not match its flash offset")
+    ASSERT(ADDR(.rodata) == ADDR(.rodata_dummy) + SIZEOF(.rodata_dummy), ".rodata address does not match its flash offset")
 
     /DISCARD/ :
     {

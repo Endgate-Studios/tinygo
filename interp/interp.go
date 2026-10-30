@@ -36,7 +36,8 @@ type runner struct {
 	timeout           time.Duration
 	maxLoopIterations int
 	callsExecuted     uint64
-	interpErr         error // set by Uint/Int when they encounter pointer data
+	xorshift32State   uint32 // state for runtime.fastrand
+	xorshift64State   uint64 // state for runtime.fastrand64
 }
 
 func newRunner(mod llvm.Module, timeout time.Duration, maxLoopIterations int, debug bool) *runner {
@@ -51,6 +52,8 @@ func newRunner(mod llvm.Module, timeout time.Duration, maxLoopIterations int, de
 		start:             time.Now(),
 		timeout:           timeout,
 		maxLoopIterations: maxLoopIterations,
+		xorshift32State:   1,
+		xorshift64State:   1,
 	}
 	r.pointerSize = uint32(r.targetData.PointerSize())
 	r.dataPtrType = llvm.PointerType(mod.Context().Int8Type(), 0)
@@ -84,6 +87,9 @@ func Run(mod llvm.Module, timeout time.Duration, maxLoopIterations int, debug bo
 	// instruction (init call) that we are removing after successful
 	// interpretation.
 	r.builder.SetInsertPointBefore(bb.FirstInstruction())
+	if subprogram := initAll.Subprogram(); !subprogram.IsNil() {
+		r.builder.SetCurrentDebugLocation(subprogram.SubprogramLine(), 0, subprogram, llvm.Metadata{})
+	}
 	dummy := r.builder.CreateAlloca(r.mod.Context().Int8Type(), "dummy")
 	r.builder.SetInsertPointBefore(dummy)
 	defer dummy.EraseFromParentAsInstruction()
@@ -143,7 +149,7 @@ func Run(mod llvm.Module, timeout time.Duration, maxLoopIterations int, debug bo
 				}
 				continue
 			}
-			return callErr
+			return callErr.materialize()
 		}
 		for index, obj := range mem.objects {
 			r.objects[index] = obj
@@ -251,7 +257,7 @@ func RunFunc(fn llvm.Value, timeout time.Duration, maxLoopIterations int, debug 
 			newFn.EraseFromParentAsFunction()
 			return nil
 		}
-		return callErr
+		return callErr.materialize()
 	}
 	for index, obj := range pkgMem.objects {
 		r.objects[index] = obj
@@ -319,4 +325,20 @@ func (r *runner) markExternalLoad(llvmValue llvm.Value) error {
 		}
 	}
 	return nil
+}
+
+// These must stay the same as the generators in src/runtime/algorithm.go, so
+// that interp gives the same values as the runtime.
+func xorshift32(x uint32) uint32 {
+	x ^= x << 7
+	x ^= x >> 1
+	x ^= x << 9
+	return x
+}
+
+func xorshiftMult64(x uint64) uint64 {
+	x ^= x >> 12
+	x ^= x << 25
+	x ^= x >> 27
+	return x * 2685821657736338717
 }

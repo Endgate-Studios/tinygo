@@ -23,12 +23,11 @@
  * one whole 64KB page past the end of .text (.rodata_dummy pads for this),
  * so DROM takes the entries right after IROM.
  *
- * Virtual pages are NOT tied to flash pages. The image builder
- * (builder/esp.go) keeps DROM/IROM out of the ROM-loaded segment table --
- * the ROM bootloader rejects images with a DROM segment over 1MB -- and
- * appends them at 64KB-aligned flash offsets after the RAM image, patching
- * those offsets into _irom_flash_addr/_drom_flash_addr. The startup code
- * (esp32s3.S) programs the MMU entries from them.
+ * The MMU maps 64KB pages, so the low 16 bits of each virtual address must
+ * match its flash offset. Dummy sections handle this. The image builder
+ * (builder/esp.go) patches the physical offsets into _irom_flash_addr and
+ * _drom_flash_addr, and the startup code (esp32s3.S) programs the MMU
+ * entries from them.
  */
 
 MEMORY
@@ -67,13 +66,9 @@ SECTIONS
         . = ALIGN(16);
         . += _stack_size;
         _stack_top = .;
-    } >DRAM
-
-    /* System stack of core 1, only present with the cores scheduler. */
-    .stack1 (NOLOAD) :
-    {
         . = ALIGN(16);
-        *(.stack1)
+        . += DEFINED(__num_stacks) && __num_stacks >= 2 ? _stack_size : 0;
+        _stack1_top = .;
     } >DRAM
 
     /* Global variables that are mutable and zero-initialized. */
@@ -110,7 +105,6 @@ SECTIONS
     .iram_dummy (NOLOAD): ALIGN(4)
     {
         . += SIZEOF(.stack);
-        . += SIZEOF(.stack1);
         . += SIZEOF(.bss);
         . += SIZEOF(.data);
     } > IRAM
@@ -149,6 +143,27 @@ SECTIONS
         _iram_end = .;
     } >IRAM
 
+    /* Size of the RAM part of the image. Header, segments, padding to 16 bytes
+     * and the SHA-256 digest, as written by builder/esp.go. */
+    _ram_image_payload_size =
+        0x18 +
+        SIZEOF(.data) +
+        ((SIZEOF(.data) != 0) ? 0x08 : 0) +
+        SIZEOF(.iram) +
+        ((SIZEOF(.iram) != 0) ? 0x08 : 0);
+
+    _ram_image_size =
+        _ram_image_payload_size +
+        16 - (_ram_image_payload_size % 16) +
+        0x20;
+
+    /* The MMU maps 64 KB pages, so the low 16 bits of the IROM VMA must match
+     * its flash offset. IROM follows the RAM part of the image. */
+    .text_dummy (NOLOAD): ALIGN(4)
+    {
+        . += _ram_image_size % 0x10000;
+    } >IROM
+
     /* IROM occupies the first entries in the shared flash MMU table. */
     .text : ALIGN(4)
     {
@@ -158,13 +173,21 @@ SECTIONS
         *(.wifislprxiram* .wifiextrairam* .wifislpiram* .wifiorslpiram*)
         *(.literal .text)
         *(.literal.* .text.*)
+        . = ALIGN(4);
         _irom_end = .;
     } >IROM
 
-    /* DROM starts after all MMU pages reserved for IROM. */
+    /* DROM uses the MMU entries after IROM, with the same low 16 bit rule. */
+    _irom_mmu_pages =
+        ((_irom_end - ORIGIN(IROM) + 0xFFFF) / 0x10000);
+
+    _drom_flash_offset =
+        _ram_image_size + SIZEOF(.text);
+
     .rodata_dummy (NOLOAD): ALIGN(4)
     {
-        . += ((SIZEOF(.text) + 0xFFFF) / 0x10000) * 0x10000;
+        . += _irom_mmu_pages * 0x10000;
+        . += _drom_flash_offset % 0x10000;
     } >DROM
 
     .rodata : ALIGN(4)
@@ -174,14 +197,6 @@ SECTIONS
         . = ALIGN(4);
         _drom_end = .;
     } >DROM
-
-    /* The MMU mapping loops in esp32s3.S compute a page count as
-     * ((end - start - 1) >> 16) + 1, which underflows to 65536 pages for an
-     * empty region and would scribble over the whole MMU window. The image
-     * builder also requires exactly one segment per region.
-     */
-    ASSERT(_irom_end > _irom_start, "IROM (.text) must not be empty")
-    ASSERT(_drom_end > _drom_start, "DROM (.rodata) must not be empty")
 
     .psram (NOLOAD) : ALIGN(4)
     {
@@ -210,9 +225,8 @@ _psram_end = ORIGIN(PSRAM) + LENGTH(PSRAM);
  */
 _globals_start = _sbss;
 _globals_end = _edata;
-/* Goroutine stacks come from the heap and the windowed ABI needs a 16 byte
- * aligned stack pointer, see the Xtensa ISA Reference Manual section 8.1.
- */
+/* Goroutine stacks come from the heap and need 16 byte alignment
+ * (GCC gcc/config/xtensa/xtensa.h STACK_BOUNDARY). */
 _heap_start = ALIGN(_iram_end - 0x6F0000 - (__init_end - __init_start), 16);
 /* Stop the heap before the ROM BSS/data region.
  * ESP-IDF defines SOC_ROM_STACK_START = 0x3fceb710 as the top of the ROM boot
@@ -231,10 +245,23 @@ _heap_end = 0x3fceb710;
 
 PROVIDE( g_rom_spiflash_dummy_len_plus = 0x3fcefffd );
 
-/* From ESP-IDF components/esp_rom/esp32s3/ld/esp32s3.rom.ld */
-PROVIDE( ets_set_appcpu_boot_addr = 0x40000720 );
-
 _stack_size = 4K;
+
+/* MMU entries for esp32s3.S. DROM follows IROM in the shared table, and the
+ * machine.Flash area follows DROM. It starts at the first 4K sector after DROM. */
+_drom_mmu_index = (_drom_start - 0x3C000000) / 0x10000;
+_drom_mmu_pages = (_drom_end - 0x3C000000 + 0xFFFF) / 0x10000 - _drom_mmu_index;
+_drom_flash_start = _drom_flash_offset - _drom_flash_offset % 0x10000 + _drom_start % 0x10000;
+_drom_flash_end = (_drom_flash_start < _drom_flash_offset ? _drom_flash_start + 0x10000 : _drom_flash_start) + (_drom_end - _drom_start);
+__flash_data_phys = ALIGN(_drom_flash_end, 4096);
+_flash_data_phys_end = MAX(__flash_data_phys, 4M);
+_flash_data_mmu_index = _drom_mmu_index + _drom_mmu_pages;
+_flash_data_mmu_pages = (_flash_data_phys_end + 0xFFFF) / 0x10000 - __flash_data_phys / 0x10000;
+PROVIDE(__flash_data_start = 0x3C000000 + _flash_data_mmu_index * 0x10000 + __flash_data_phys % 0x10000);
+PROVIDE(__flash_data_end = __flash_data_start + (_flash_data_phys_end - __flash_data_phys));
+
+/* PSRAM uses MMU entries 256 to 511, see runtime_esp32_psram.go. */
+ASSERT(_flash_data_mmu_index + _flash_data_mmu_pages <= 256, "flash mapping overlaps the PSRAM window")
 
 /* From ESP-IDF:
  * components/esp_rom/esp32/ld/esp32.rom.newlib-funcs.ld
@@ -377,6 +404,7 @@ PROVIDE( Cache_Dbus_MMU_Set = 0x400019b0 );
 PROVIDE( rom_spi_flash_disable_cache = 0x40000c0c );
 PROVIDE( rom_spi_flash_restore_cache = 0x40000c18 );
 ets_get_stack_info = 0x4000060c;
+ets_set_appcpu_boot_addr = 0x40000720;
 ets_install_lock = 0x40000618;
 ets_backup_dma_copy = 0x40000624;
 ets_apb_backup_init_lock_func = 0x40000630;
@@ -399,6 +427,14 @@ assist_debug_clock_enable = 0x400006f0;
 assist_debug_record_enable = 0x400006fc;
 clear_super_wdt_reset_flag = 0x40000708;
 disable_default_watchdog = 0x40000714;
+
+/* SPI flash */
+esp_rom_spiflash_erase_sector = 0x400009fc;
+esp_rom_spiflash_write = 0x40000a14;
+esp_rom_spiflash_read = 0x40000a20;
+esp_rom_spiflash_unlock = 0x40000a2c;
+rom_spiflash_legacy_data = 0x3fceffe4;
+Cache_Invalidate_Addr = 0x400016b0;
 
 /* Interrupt handling */
 intr_matrix_set = 0x40001b54;

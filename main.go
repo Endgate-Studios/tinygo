@@ -215,10 +215,11 @@ func Build(pkgName, outpath string, config *compileopts.Config) error {
 
 // Test runs the tests in the given package. Returns whether the test passed and
 // possibly an error if the test failed to run.
-func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options, outpath string) (bool, error) {
+func Test(pkgName string, standardPackage bool, stdout, stderr io.Writer, options *compileopts.Options, outpath string) (bool, error) {
 	optionsCopy := *options
 	options = &optionsCopy
 	options.TestConfig.CompileTestBinary = true
+	options.TestConfig.StandardPackage = standardPackage
 	config, err := builder.NewConfig(options)
 	if err != nil {
 		return false, err
@@ -1173,10 +1174,6 @@ func flashBinUsingEsp32(port, resetMode, tmppath string, options *compileopts.Op
 		return err
 	}
 
-	if err := flasher.EraseFlash(progressFunc); err != nil {
-		return fmt.Errorf("erase failed: %v", err)
-	}
-
 	// Flash with progress reporting
 	err = flasher.FlashImage(data, offset, progressFunc)
 	if err != nil {
@@ -1577,6 +1574,7 @@ commands:
 		ports:		list available serial ports
 		env:		list environment variables used during build
 		list:		run go list using the TinyGo root
+		fix:		apply Go fix analyzers using the TinyGo loader
 		clean:		empty cache directory (%s)
 		targets:	list targets
 		info:		show info for specified target
@@ -1587,6 +1585,7 @@ commands:
 var (
 	commandHelp = map[string]string{
 		"build":   usageBuild,
+		"fix":     usageFix,
 		"run":     usageRun,
 		"flash":   usageFlash,
 		"monitor": usageMonitor,
@@ -1718,31 +1717,34 @@ func (m globalValuesFlag) Set(value string) error {
 
 // parseGoLinkFlag parses the -ldflags parameter. Its primary purpose right now
 // is the -X flag, for setting the value of global string variables.
-func parseGoLinkFlag(flagsString string) (map[string]map[string]string, string, error) {
+func parseGoLinkFlag(flagsString string) (map[string]map[string]string, []string, error) {
 	set := flag.NewFlagSet("link", flag.ExitOnError)
 	globalVarValues := make(globalValuesFlag)
 	set.Var(globalVarValues, "X", "Set the value of the string variable to the given value.")
 	extLDFlags := set.String("extldflags", "", "additional flags to pass to external linker")
-	flags, err := shlex.Split(flagsString)
+	flags, err := goenv.SplitFlags(flagsString)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	err = set.Parse(flags)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	return map[string]map[string]string(globalVarValues), *extLDFlags, nil
+	externalFlags, err := goenv.SplitFlags(*extLDFlags)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not parse -extldflags: %w", err)
+	}
+	return map[string]map[string]string(globalVarValues), externalFlags, nil
 }
 
 // getListOfPackages returns a standard list of packages for a given list that might
 // include wildards using `go list`.
-// For example [./...] => ["pkg1", "pkg1/pkg12", "pkg2"]
-func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, error) {
+func getListOfPackages(pkgs []string, options *compileopts.Options) ([]loader.PackageJSON, error) {
 	config, err := builder.NewConfig(options)
 	if err != nil {
 		return nil, err
 	}
-	cmd, err := loader.List(config, nil, pkgs)
+	cmd, err := loader.List(config, []string{"-json"}, pkgs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run `go list`: %w", err)
 	}
@@ -1754,13 +1756,17 @@ func getListOfPackages(pkgs []string, options *compileopts.Options) ([]string, e
 		return nil, err
 	}
 
-	var pkgNames []string
-	sc := bufio.NewScanner(outputBuf)
-	for sc.Scan() {
-		pkgNames = append(pkgNames, sc.Text())
+	var packages []loader.PackageJSON
+	decoder := json.NewDecoder(outputBuf)
+	for {
+		var pkg loader.PackageJSON
+		if err := decoder.Decode(&pkg); err == io.EOF {
+			return packages, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to decode go list output: %w", err)
+		}
+		packages = append(packages, pkg)
 	}
-
-	return pkgNames, nil
 }
 
 func main() {
@@ -1774,7 +1780,7 @@ func main() {
 	opt := flag.String("opt", "z", "optimization level: 0, 1, 2, s, z")
 	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, custom, precise, boehm)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
-	panicUnwind := flag.String("panic-unwind", "", "panic unwind strategy (auto, explicit)")
+	panicUnwind := flag.String("panic-unwind", "", "panic unwind strategy (auto, explicit, none)")
 	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks, cores, threads, asyncify)")
 	serial := flag.String("serial", "", "which serial output to use (none, uart, usb, rtt)")
 	work := flag.Bool("work", false, "print the name of the temporary build directory and do not delete this directory on exit")
@@ -1784,6 +1790,8 @@ func main() {
 	flag.Var(&tags, "tags", "a space-separated list of extra build tags")
 	target := flag.String("target", "", "chip/board name or JSON target specification file")
 	buildMode := flag.String("buildmode", "", "build mode to use (default, c-shared, wasi-legacy)")
+	buildVCS := flag.String("buildvcs", "auto", "whether to stamp version control information (true, false, auto)")
+	trimPath := flag.Bool("trimpath", false, "remove all file system paths from the resulting executable")
 	var stackSize uint64
 	flag.Func("stack-size", "goroutine stack size (if unknown at compile time)", func(s string) error {
 		size, err := bytesize.Parse(s)
@@ -1864,6 +1872,8 @@ func main() {
 	// library.
 	handleChdirFlag()
 	switch command {
+	case "fix":
+		os.Exit(runFix(os.Args[2:], os.Stdout, os.Stderr))
 	case "clang", "ld.lld", "wasm-ld":
 		err := builder.RunTool(command, os.Args[2:]...)
 		if err != nil {
@@ -1918,6 +1928,8 @@ func main() {
 		GOMIPS:                  goenv.Get("GOMIPS"),
 		Target:                  *target,
 		BuildMode:               *buildMode,
+		BuildVCS:                *buildVCS,
+		TrimPath:                *trimPath,
 		StackSize:               stackSize,
 		Opt:                     *opt,
 		GC:                      *gc,
@@ -1942,6 +1954,7 @@ func main() {
 		Tags:                    []string(tags),
 		TestConfig:              testConfig,
 		GlobalValues:            globalVarValues,
+		ExtLDFlags:              extLDFlags,
 		Programmer:              *programmer,
 		OpenOCDCommands:         ocdCommands,
 		LLVMFeatures:            *llvmFeatures,
@@ -1954,14 +1967,6 @@ func main() {
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand
-	}
-
-	if extLDFlags != "" {
-		options.ExtLDFlags, err = shlex.Split(extLDFlags)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "could not parse -extldflags:", err)
-			os.Exit(1)
-		}
 	}
 
 	err = options.Verify()
@@ -2054,10 +2059,7 @@ func main() {
 			bufs[i].done = make(chan struct{})
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			// Flush the output one test at a time.
 			// This ensures that outputs from different tests are not mixed together.
 			for i := range bufs {
@@ -2070,22 +2072,20 @@ func main() {
 					}
 				}
 			}
-		}()
+		})
 
 		// Build and run the tests concurrently.
 		// This uses an additional semaphore to reduce the memory usage.
 		testSema := make(chan struct{}, cap(options.Semaphore))
-		for i, pkgName := range explicitPkgNames {
+		for i, pkg := range explicitPkgNames {
 			buf := &bufs[i]
 			testSema <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				defer func() { <-testSema }()
 				defer close(buf.done)
 				stdout := (*testStdout)(buf)
 				stderr := (*testStderr)(buf)
-				passed, err := Test(pkgName, stdout, stderr, options, outpath)
+				passed, err := Test(pkg.ImportPath, pkg.Standard, stdout, stderr, options, outpath)
 				if err != nil {
 					wd, getwdErr := os.Getwd()
 					if getwdErr != nil {
@@ -2100,7 +2100,7 @@ func main() {
 					default:
 					}
 				}
-			}()
+			})
 		}
 
 		// Wait for all tests to finish.

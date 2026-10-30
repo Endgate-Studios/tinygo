@@ -25,6 +25,20 @@ import (
 // src/internal/reflectlite/type.go.
 const numMethodHasMethodSet = 0x8000
 
+func reflectTypeName(typ *types.Named) string {
+	name := typ.Obj().Name()
+	if typ.TypeArgs().Len() == 0 {
+		return name
+	}
+	qualified := types.TypeString(typ, func(pkg *types.Package) string {
+		return pkg.Name()
+	})
+	if pkg := typ.Obj().Pkg(); pkg != nil {
+		return strings.TrimPrefix(qualified, pkg.Name()+".")
+	}
+	return qualified
+}
+
 // Type kinds for basic types.
 // They must match the constants for the Kind type in src/reflect/type.go.
 var basicTypes = [...]uint8{
@@ -236,7 +250,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				types.NewVar(token.NoPos, nil, "ptrTo", types.Typ[types.UnsafePointer]),
 			)
 		case *types.Named:
-			name := typ.Obj().Name()
+			name := reflectTypeName(typ)
 			var pkgname string
 			if pkg := typ.Obj().Pkg(); pkg != nil {
 				pkgname = pkg.Name()
@@ -343,7 +357,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			metabyte |= 1 << 6
 		}
 
-		if hashmapIsBinaryKey(typ) {
+		if isBinaryComparable(typ) {
 			metabyte |= 1 << 7
 		}
 
@@ -351,7 +365,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 		case *types.Basic:
 			typeFields = []llvm.Value{c.getTypeCode(types.NewPointer(typ))}
 		case *types.Named:
-			name := typ.Obj().Name()
+			name := reflectTypeName(typ)
 			var pkgpath string
 			var pkgname string
 			if pkg := typ.Obj().Pkg(); pkg != nil {
@@ -482,10 +496,9 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 
 				data := string(flags) + string(offsBytes[:offLen]) + field.Name() + "\x00"
 				if typ.Tag(i) != "" {
-					if len(typ.Tag(i)) > 0xff {
-						c.addError(field.Pos(), fmt.Sprintf("struct tag is %d bytes which is too long, max is 255", len(typ.Tag(i))))
-					}
-					data += string([]byte{byte(len(typ.Tag(i)))}) + typ.Tag(i)
+					var tagBytes [binary.MaxVarintLen64]byte
+					tagLen := binary.PutUvarint(tagBytes[:], uint64(len(typ.Tag(i))))
+					data += string(tagBytes[:tagLen]) + typ.Tag(i)
 				}
 				dataInitializer := c.ctx.ConstString(data, false)
 				dataGlobal := llvm.AddGlobal(c.mod, dataInitializer.Type(), globalName+"."+field.Name())
@@ -729,15 +742,20 @@ func (c *compilerContext) getTypeCodeName(t types.Type) (name string, isLocal bo
 		elems := make([]string, t.NumFields())
 		isLocal := false
 		for i := 0; i < t.NumFields(); i++ {
+			field := t.Field(i)
 			embedded := ""
-			if t.Field(i).Embedded() {
+			if field.Embedded() {
 				embedded = "#"
 			}
-			s, local := c.getTypeCodeName(t.Field(i).Type())
+			s, local := c.getTypeCodeName(field.Type())
 			if local {
 				isLocal = true
 			}
-			elems[i] = embedded + t.Field(i).Name() + ":" + s
+			name := field.Name()
+			if !field.Exported() && field.Pkg() != nil {
+				name = field.Pkg().Path() + "." + name
+			}
+			elems[i] = embedded + name + ":" + s
 			if t.Tag(i) != "" {
 				elems[i] += "`" + t.Tag(i) + "`"
 			}

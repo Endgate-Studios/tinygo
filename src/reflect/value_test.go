@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestTinyIndirectPointers(t *testing.T) {
@@ -39,9 +40,94 @@ func TestTinyIndirectPointers(t *testing.T) {
 	}
 }
 
+func TestSetPointer(t *testing.T) {
+	type pointer unsafe.Pointer
+	var p pointer
+	value := ValueOf(&p).Elem()
+	object := new(int)
+	*object = 17
+	value.SetPointer(unsafe.Pointer(object))
+	runtime.GC()
+	if got := *(*int)(unsafe.Pointer(p)); got != 17 {
+		t.Fatalf("SetPointer stored %d, want 17", got)
+	}
+	value.SetPointer(nil)
+	if p != nil {
+		t.Fatal("SetPointer(nil) did not clear the pointer")
+	}
+	fields := struct{ pointer unsafe.Pointer }{unsafe.Pointer(object)}
+	for _, tc := range []struct {
+		name string
+		fn   func()
+	}{
+		{"Unaddressable", func() { ValueOf(p).SetPointer(nil) }},
+		{"WrongKind", func() { ValueOf(new(*int)).Elem().SetPointer(nil) }},
+		{"ZeroValue", func() { Value{}.SetPointer(nil) }},
+		{"UnexportedField", func() { ValueOf(&fields).Elem().Field(0).SetPointer(nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("SetPointer did not panic")
+				}
+			}()
+			tc.fn()
+		})
+	}
+	if fields.pointer != unsafe.Pointer(object) {
+		t.Fatal("SetPointer changed an unexported field")
+	}
+}
+
 func TestTinyInvalidValueString(t *testing.T) {
 	if got := (Value{}).String(); got != "<invalid Value>" {
 		t.Errorf("Value{}.String() = %q, want %q", got, "<invalid Value>")
+	}
+}
+
+func TestNewAt(t *testing.T) {
+	value := 42
+	v := NewAt(TypeOf(value), unsafe.Pointer(&value))
+	if got, want := v.Type(), TypeOf((*int)(nil)); got != want {
+		t.Fatalf("NewAt type = %v, want %v", got, want)
+	}
+	if got := v.Interface().(*int); got != &value {
+		t.Fatalf("NewAt pointer = %p, want %p", got, &value)
+	}
+	v.Elem().SetInt(23)
+	if value != 23 {
+		t.Fatalf("NewAt value = %d, want 23", value)
+	}
+	if !v.Elem().CanAddr() || !v.Elem().CanSet() {
+		t.Fatal("NewAt element is not addressable and settable")
+	}
+	if got := v.Elem().Addr().Interface(); got != v.Interface() {
+		t.Fatalf("address of NewAt element = %v, want %v", got, v.Interface())
+	}
+
+	type composite struct {
+		Value   int
+		Pointer *int
+	}
+	pointed := 1
+	compositeValue := composite{Value: 42, Pointer: &pointed}
+	compositePointer := NewAt(TypeOf(compositeValue), unsafe.Pointer(&compositeValue))
+	compositePointer.Elem().Field(0).SetInt(23)
+	if compositeValue.Value != 23 {
+		t.Fatalf("NewAt struct field = %d, want 23", compositeValue.Value)
+	}
+	other := 2
+	compositePointer.Elem().Field(1).Set(ValueOf(&other))
+	if compositeValue.Pointer != &other {
+		t.Fatalf("NewAt pointer field = %p, want %p", compositeValue.Pointer, &other)
+	}
+
+	nilValue := NewAt(TypeOf(value), nil)
+	if !nilValue.IsNil() {
+		t.Fatal("NewAt with nil pointer is not nil")
+	}
+	if nilValue.Elem().IsValid() {
+		t.Fatal("Elem of NewAt with nil pointer is valid")
 	}
 }
 
@@ -364,6 +450,98 @@ func TestTinySlice(t *testing.T) {
 	if len(s) != refs.Len() || cap(s) != refs.Cap() {
 		t.Errorf("len(s)=%v refs.Len()=%v cap(s)=%v refs.Cap()=%v", len(s), refs.Len(), cap(s), refs.Cap())
 	}
+}
+
+func TestTinySlice3(t *testing.T) {
+	slice := make([]int, 3, 6)
+	for i := range cap(slice) {
+		slice[:cap(slice)][i] = i
+	}
+
+	value := ValueOf(slice)
+	sliced := value.Slice3(4, 5, 6).Interface().([]int)
+	if len(sliced) != 1 || cap(sliced) != 2 || sliced[0] != 4 {
+		t.Fatalf("Slice3(4, 5, 6) = %v with cap %d, want [4] with cap 2", sliced, cap(sliced))
+	}
+
+	first := value.Slice3(2, 4, 6)
+	empty := first.Slice3(4, 4, 4)
+	if got, want := empty.UnsafePointer(), first.UnsafePointer(); got != want {
+		t.Fatalf("empty Slice3 pointer = %p, want %p", got, want)
+	}
+
+	array := [4]int{1, 2, 3, 4}
+	arraySlice := ValueOf(&array).Elem().Slice3(1, 2, 3).Interface().([]int)
+	if len(arraySlice) != 1 || cap(arraySlice) != 2 || arraySlice[0] != 2 {
+		t.Fatalf("array Slice3(1, 2, 3) = %v with cap %d, want [2] with cap 2", arraySlice, cap(arraySlice))
+	}
+
+	checkPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s did not panic", name)
+			}
+		}()
+		fn()
+	}
+	checkPanic("Slice3 with reversed indexes", func() {
+		value.Slice3(2, 1, 3)
+	})
+	checkPanic("Slice3 with negative index", func() {
+		value.Slice3(-1, 1, 2)
+	})
+	checkPanic("Slice3 beyond capacity", func() {
+		value.Slice3(0, 3, 7)
+	})
+	checkPanic("Slice3 on unaddressable array", func() {
+		ValueOf(array).Slice3(0, 1, 2)
+	})
+	checkPanic("Slice3 on unsupported kind", func() {
+		ValueOf("abc").Slice3(0, 1, 2)
+	})
+}
+
+func TestTinySetCap(t *testing.T) {
+	slice := make([]int, 3, 6)
+	settable := ValueOf(&slice).Elem()
+	settable.SetCap(5)
+	if len(slice) != 3 || cap(slice) != 5 {
+		t.Fatalf("after SetCap(5), len, cap = %d, %d, want 3, 5", len(slice), cap(slice))
+	}
+	settable.SetLen(5)
+	settable.SetCap(5)
+
+	checkPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s did not panic", name)
+			}
+		}()
+		fn()
+	}
+	checkPanic("SetCap below length", func() {
+		settable.SetCap(4)
+	})
+	checkPanic("SetCap above capacity", func() {
+		settable.SetCap(6)
+	})
+	checkPanic("SetCap with negative capacity", func() {
+		settable.SetCap(-1)
+	})
+	checkPanic("SetCap on non-slice", func() {
+		ValueOf(new(string)).Elem().SetCap(0)
+	})
+	checkPanic("SetCap on unaddressable slice", func() {
+		ValueOf(slice).SetCap(5)
+	})
+	checkPanic("SetCap on read-only slice", func() {
+		value := ValueOf(&struct {
+			slice []int
+		}{slice}).Elem().Field(0)
+		value.SetCap(5)
+	})
 }
 
 func TestTinyBytes(t *testing.T) {
@@ -1115,6 +1293,45 @@ func TestTinyMakeChan(t *testing.T) {
 		MakeChan(TypeOf(recvOnly), 0)
 		t.Fatalf("MakeChan did not panic on a unidirectional channel type")
 	})
+}
+
+func TestTinyDeepEqualInterfaceVisits(t *testing.T) {
+	type pair struct {
+		First, Second any
+	}
+	for _, tc := range []struct {
+		name string
+		x, y any
+		want bool
+	}{
+		{"equal slice", []any{1, 2}, []any{1, 2}, true},
+		{"unequal slice", []any{1, 2}, []any{1, 3}, false},
+		{"unequal array", &[2]any{1, 2}, &[2]any{1, 3}, false},
+		{"equal fields", &pair{1, 2}, &pair{1, 2}, true},
+		{"unequal fields", &pair{1, 2}, &pair{1, 3}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DeepEqual(tc.x, tc.y); got != tc.want {
+				t.Errorf("DeepEqual(%v, %v) = %v, want %v", tc.x, tc.y, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTinyDeepEqualSliceVisits(t *testing.T) {
+	type pair struct {
+		First, Second []int
+	}
+	left, right := []int{1, 2, 3}, []int{1, 2, 3}
+	x := &pair{left[:1], left[:2]}
+	y := &pair{right[:1], right[:3]}
+	if DeepEqual(x, y) {
+		t.Error("DeepEqual conflated slices with different lengths")
+	}
+	y.Second = right[:2]
+	if !DeepEqual(x, y) {
+		t.Error("DeepEqual rejected equal slices")
+	}
 }
 
 // Functions needed by all_test.go

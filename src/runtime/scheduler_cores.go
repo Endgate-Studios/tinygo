@@ -15,8 +15,13 @@ const hasParallelism = true
 
 var mainExited atomic.Uint32
 
-// True after the secondary cores have started.
-var secondaryCoresStarted bool
+// Non-zero when secondary cores may enter the scheduler.
+var secondaryCoresReady atomic.Uint32
+
+func waitForSecondaryCoresReady() {
+	for secondaryCoresReady.Load() == 0 {
+	}
+}
 
 // Which task is running on a given core (or nil if there is no task running on
 // the core).
@@ -53,6 +58,11 @@ func scheduleTask(t *task.Task) {
 		interruptSleepFromInterrupt()
 		return
 	}
+	synctestTaskWake(t)
+	scheduleTaskNoWake(t)
+}
+
+func scheduleTaskNoWake(t *task.Task) {
 	schedulerLock.Lock()
 	scheduleTaskLocked(t)
 	schedulerLock.Unlock()
@@ -68,6 +78,7 @@ func takeInterruptWakes(core uint32) {
 	for t != nil {
 		next := t.Next
 		t.Next = nil
+		synctestTaskWake(t)
 		scheduleTaskLocked(t)
 		t = next
 	}
@@ -75,7 +86,6 @@ func takeInterruptWakes(core uint32) {
 
 // Must be called with the scheduler lock held.
 func scheduleTaskLocked(t *task.Task) {
-	synctestTaskWake(t)
 	switch t.RunState {
 	case task.RunStatePaused:
 		// Paused, state is saved on the stack.
@@ -83,7 +93,7 @@ func scheduleTaskLocked(t *task.Task) {
 		runqueue.Push(t)
 		// ...and wake up a sleeping core, if there is one.
 		// (If all cores are already busy, this is a no-op).
-		schedulerWakeFor(t)
+		schedulerWakeTask(t)
 	case task.RunStateRunning:
 		// Not yet paused (probably going to pause very soon), so let the
 		// Pause() function know it can resume immediately.
@@ -127,40 +137,10 @@ func Gosched() {
 	schedulerLock.Lock()
 	t := task.Current()
 	runqueue.Push(t)
-	if core, pinned := t.PinnedCore(); pinned && core != currentCPU() {
+	if core, assigned := t.AssignedCore(); assigned && core != currentCPU() {
 		schedulerWakeCore(core)
 	}
 	task.PauseLocked()
-}
-
-// Wake a core that can run t. Must be called with the scheduler lock held.
-func schedulerWakeFor(t *task.Task) {
-	if core, pinned := t.PinnedCore(); pinned {
-		schedulerWakeCore(core)
-	} else {
-		schedulerWake()
-	}
-}
-
-// Implementation of machine.LockCore. It returns false for an invalid core.
-func machineLockCore(core int) bool {
-	if core < 0 || core >= numCPU {
-		return false
-	}
-	schedulerLock.Lock()
-	task.Current().SetPin(uint32(core))
-	schedulerLock.Unlock()
-	if uint32(core) != currentCPU() {
-		Gosched()
-	}
-	return true
-}
-
-// Implementation of machine.UnlockCore.
-func machineUnlockCore() {
-	schedulerLock.Lock()
-	task.Current().ClearPin()
-	schedulerLock.Unlock()
 }
 
 // procPin saves one interrupt state per core.
@@ -185,6 +165,40 @@ func unlockOSThread() {
 // NumCPU returns the number of CPU cores on this system.
 func NumCPU() int {
 	return numCPU
+}
+
+// Wake a core that may run the given task.
+// Must be called with the scheduler lock held.
+func schedulerWakeTask(t *task.Task) {
+	if core, assigned := t.AssignedCore(); assigned {
+		schedulerWakeCore(core)
+	} else {
+		schedulerWake()
+	}
+}
+
+//go:linkname assignCore machine.assignCore
+func assignCore(core int) {
+	if core < 0 || core >= numCPU {
+		panic("machine: core out of range")
+	}
+	t := task.Current()
+	if t.Affinity.Core != 0 {
+		panic("machine: AssignCore called twice")
+	}
+	if core != int(currentCPU()) && secondaryCoresReady.Load() == 0 {
+		panic("machine: AssignCore called before all cores have started")
+	}
+	t.Affinity.Core = uint8(core) + 1
+	if core == int(currentCPU()) {
+		return
+	}
+
+	// Move to the target core.
+	schedulerLock.Lock()
+	runqueue.Push(t)
+	schedulerWakeCore(uint32(core))
+	task.PauseLocked()
 }
 
 func addTimer(tn *timerNode) {
@@ -274,7 +288,7 @@ func run() {
 
 		// After package initializers have finished, start all the other cores.
 		startSecondaryCores()
-		secondaryCoresStarted = true
+		secondaryCoresReady.Store(1)
 
 		// Run main.main.
 		callMain()
@@ -303,13 +317,15 @@ func scheduler(_ bool) {
 				sleepQueue = sleepQueue.Next
 				sleepingTask.Next = nil
 
-				if !sleepingTask.RunsOn(core) {
+				if !sleepingTask.CanRunOn(core) {
+					// Assigned to another core, so hand it over.
 					runqueue.Push(sleepingTask)
-					schedulerWakeFor(sleepingTask)
+					schedulerWakeTask(sleepingTask)
 					continue
 				}
 
 				// Run it now.
+				schedulerHandOffClock()
 				setCurrentTask(sleepingTask)
 				sleepingTask.RunState = task.RunStateRunning
 				schedulerLock.Unlock() // unlock before resuming, Pause() will lock again
@@ -332,6 +348,7 @@ func scheduler(_ bool) {
 				firingTimersAdd(tn)
 
 				// Run the callback stored in this timer node.
+				schedulerHandOffClock()
 				schedulerLock.Unlock()
 				tn.callback(tn, delay)
 				schedulerLock.Lock()
@@ -340,8 +357,9 @@ func scheduler(_ bool) {
 		}
 
 		// Check for ready-to-run tasks.
-		if runnable := runqueue.PopFor(core); runnable != nil {
+		if runnable := runqueue.PopCore(core); runnable != nil {
 			// Resume it now.
+			schedulerHandOffClock()
 			setCurrentTask(runnable)
 			runnable.RunState = task.RunStateRunning
 			schedulerLock.Unlock() // unlock before resuming, Pause() will lock again
@@ -388,6 +406,14 @@ func scheduler(_ bool) {
 		// do.
 		// Wait until something happens (like an interrupt).
 		schedulerUnlockAndWait()
+	}
+}
+
+// This core stops watching the clock while it runs a task, so wake a waiting core
+// to watch it if tasks sleep or timers wait. Call with the scheduler lock held.
+func schedulerHandOffClock() {
+	if (sleepQueue != nil || timerQueue != nil) && !hasSleepingCore() {
+		schedulerWake()
 	}
 }
 
@@ -492,6 +518,11 @@ func gcMarkInterruptWakes() (heads [numCPU]*task.Task) {
 	}
 	interrupt.Restore(mask)
 	return heads
+}
+
+// hasInterruptWakes reports whether interrupts on the given core woke tasks.
+func hasInterruptWakes(core uint32) bool {
+	return interruptWakes[core] != nil
 }
 
 // interruptWakesChanged reports whether an interrupt added a task after

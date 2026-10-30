@@ -62,6 +62,12 @@ func ReadMemStats(ms *MemStats)
 // stack. Only gc_stack_cores.go calls it, so only scheduler.cores needs it.
 func markCurrentGoroutineStack(sp uintptr)
 
+func mallocs() uint64 {
+	var stats MemStats
+	ReadMemStats(&stats)
+	return stats.Mallocs
+}
+
 func setHeapEnd(newHeapEnd uintptr) {
 	// Heap is in custom GC so ignore for when called from wasm initialization.
 }

@@ -2,21 +2,13 @@
 
 package machine
 
-// LockCore pins the calling goroutine to the given core and moves it there.
-// A pinned goroutine waits for its core, also when another core is idle.
-func LockCore(core int) {
-	if !lockCore(core) {
-		panic("machine: core out of range")
-	}
+// AssignCore assigns the calling goroutine to core until it exits, and returns
+// once it runs there. It panics if the goroutine is already assigned.
+// Like any blocking call, it must not be called with interrupts disabled.
+//
+// Experimental: this API may change or be removed in a future release.
+func AssignCore(core int) {
+	assignCore(core)
 }
 
-// UnlockCore lets the calling goroutine run on any core again.
-func UnlockCore() {
-	unlockCore()
-}
-
-//go:linkname lockCore runtime.machineLockCore
-func lockCore(core int) bool
-
-//go:linkname unlockCore runtime.machineUnlockCore
-func unlockCore()
+func assignCore(core int)

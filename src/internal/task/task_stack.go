@@ -33,7 +33,7 @@ const hasReleasableStack = false
 
 //export tinygo_task_exit
 func taskExit() {
-	exit(false)
+	exit(false, nil)
 }
 
 // initialize the state and prepare to call the specified function with the specified argument bundle.
@@ -77,3 +77,6 @@ func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	t.state.initialize(fn, args, stackSize)
 	scheduleTask(t)
 }
+
+// unlinkStack does nothing here, since only asyncify keeps a list of stacks.
+func unlinkStack(t *Task) {}

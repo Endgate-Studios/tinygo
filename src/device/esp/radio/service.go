@@ -35,7 +35,7 @@ func startService() {
 	}
 	serviceStarted = true
 	go func() {
-		machine.LockCore(0) // see core.go
+		machine.AssignCore(0) // see core.go
 		// The timer node is used again at each Reset, see resetTimer in
 		// src/runtime/time.go, so the wait allocates nothing.
 		wait := time.NewTimer(servicePoll)

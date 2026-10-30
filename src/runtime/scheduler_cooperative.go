@@ -77,6 +77,7 @@ func wasmExportExit() {
 	if finalizerIdleGC != nil {
 		task.MarkFinishing()
 	}
+	task.DetachStack()
 
 	task.Pause()
 
@@ -91,6 +92,10 @@ func goexit() {
 // Add this task to the end of the run queue.
 func scheduleTask(t *task.Task) {
 	synctestTaskWake(t)
+	scheduleTaskNoWake(t)
+}
+
+func scheduleTaskNoWake(t *task.Task) {
 	runqueue.Push(t)
 }
 

@@ -2,19 +2,25 @@ package msc
 
 import (
 	"errors"
+	"machine"
+	"machine/usb"
 	"machine/usb/msc/csw"
 	"machine/usb/msc/scsi"
 )
 
-var invalidWriteError = errors.New("invalid write offset or length")
+var (
+	invalidWriteError = errors.New("invalid write offset or length")
+	errBlockNotCached = errors.New("block not cached")
+)
 
 func (m *msc) scsiCmdReadWrite(cmd scsi.Cmd) {
+	m.cachedBlock = -1
 	status := m.validateScsiReadWrite(cmd)
 	if status != csw.StatusPassed {
 		m.sendScsiError(status, scsi.SenseIllegalRequest, scsi.SenseCodeInvalidCmdOpCode)
 	} else if m.transferBytes > 0 {
 		if cmd.CmdType() == scsi.CmdRead {
-			m.scsiRead(cmd)
+			m.scsiReadNext(cmd)
 		} else {
 			// WRITE(10) and UNMAP commands don't take any action until the data stage begins
 		}
@@ -71,34 +77,88 @@ func (m *msc) readBlock(b []byte, lba, offset uint32) (n int, err error) {
 	// Convert the emulated block address to the underlying hardware block's start and offset
 	blockStart, blockOffset := m.usbToRawOffset(lba, offset)
 
-	// Read a full block from the underlying device into the block cache
-	n, err = m.dev.ReadAt(m.blockCache, blockStart)
-	n -= int(blockOffset)
+	if blockStart != m.cachedBlock {
+		return 0, errBlockNotCached
+	}
+	n = len(m.blockCache) - int(blockOffset)
 	if n > len(b) {
 		n = len(b)
 	}
 
 	copy(b, m.blockCache[blockOffset:])
 
-	return n, err
+	return n, nil
+}
+
+// fillBlockCache reads the block for the next READ(10) packet. It runs in
+// processTasks, and the block is only kept if the command is still current.
+func (m *msc) fillBlockCache(gen uint32) {
+	state := m.mu.lock()
+	if gen != m.cmdGen {
+		m.mu.unlock(state)
+		return
+	}
+	cmd := m.cbw.SCSICmd()
+	blockStart, _ := m.usbToRawOffset(cmd.LBA(), m.sentBytes)
+	if blockStart == m.cachedBlock {
+		m.mu.unlock(state)
+		return
+	}
+	m.cachedBlock = -1
+	m.mu.unlock(state)
+
+	n, err := m.dev.ReadAt(m.blockCache, blockStart)
+
+	state = m.mu.lock()
+	if err == nil && n == len(m.blockCache) && gen == m.cmdGen {
+		m.cachedBlock = blockStart
+	}
+	m.mu.unlock(state)
 }
 
 func (m *msc) writeBlock(b []byte, lba, offset uint32) (n int, err error) {
-	// Convert the emulated block address to the underlying hardware block's start and offset
-	blockStart, blockOffset := m.usbToRawOffset(lba, offset)
+	// A queued write can start in the middle of a raw block and run into the
+	// next one, so write it one raw block at a time.
+	for n < len(b) {
+		// Convert the emulated block address to the underlying hardware block's start and offset
+		blockStart, blockOffset := m.usbToRawOffset(lba, offset+uint32(n))
+		chunk := b[n:]
+		if room := int(m.blockSizeRaw) - int(blockOffset); len(chunk) > room {
+			chunk = chunk[:room]
+		}
 
-	if blockOffset != 0 || len(b) != int(m.blockSizeRaw) {
-		return 0, invalidWriteError
+		if blockOffset == 0 && len(chunk) == int(m.blockSizeRaw) {
+			// Fast path: writing a full aligned block
+			if _, err = m.dev.WriteAt(chunk, blockStart); err != nil {
+				return n, err
+			}
+		} else {
+			// Read-modify-write for unaligned/partial blocks
+			m.cachedBlock = -1
+			if _, err = m.dev.ReadAt(m.blockCache, blockStart); err != nil {
+				return n, err
+			}
+			copy(m.blockCache[blockOffset:], chunk)
+			if _, err = m.dev.WriteAt(m.blockCache, blockStart); err != nil {
+				return n, err
+			}
+		}
+		n += len(chunk)
 	}
+	return n, nil
+}
 
-	// Write the full block to the underlying device
-	n, err = m.dev.WriteAt(b, blockStart)
-	n -= int(blockOffset)
-	if n > len(b) {
-		n = len(b)
+// scsiReadNext sends the next packet from the block cache, or leaves the
+// device read to processTasks so BlockDevice.ReadAt never runs in an interrupt.
+func (m *msc) scsiReadNext(cmd scsi.Cmd) {
+	blockStart, _ := m.usbToRawOffset(cmd.LBA(), m.sentBytes)
+	if blockStart == m.cachedBlock {
+		m.scsiRead(cmd)
+	} else {
+		m.taskCmd = scsi.CmdRead
+		m.taskGen = m.cmdGen
+		m.taskQueued = true
 	}
-
-	return n, err
 }
 
 func (m *msc) scsiRead(cmd scsi.Cmd) {
@@ -121,22 +181,46 @@ func (m *msc) scsiRead(cmd scsi.Cmd) {
 	m.sendUSBPacket(m.buf)
 }
 
-func (m *msc) scsiWrite(cmd scsi.Cmd, b []byte) {
-	if m.readOnly {
-		m.sendScsiError(csw.StatusFailed, scsi.SenseDataProtect, scsi.SenseCodeWriteProtected)
+// scsiWrite runs in processTasks. It drops the write if a reset or a new
+// CBW replaced the command it was queued for.
+func (m *msc) scsiWrite(b []byte, gen uint32) {
+	state := m.mu.lock()
+	if gen != m.cmdGen {
+		m.mu.unlock(state)
 		return
 	}
+	if m.readOnly {
+		m.sendScsiError(csw.StatusFailed, scsi.SenseDataProtect, scsi.SenseCodeWriteProtected)
+		m.mu.unlock(state)
+		return
+	}
+	cmd := m.cbw.SCSICmd()
+	lba, offset := cmd.LBA(), m.sentBytes
+	m.mu.unlock(state)
 
 	// Write data to the block device
-	n, err := m.writeBlock(b, cmd.LBA(), m.sentBytes)
-	if err != nil || n < len(b) {
-		m.sentBytes += uint32(n)
-		m.sendScsiError(csw.StatusFailed, scsi.SenseNotReady, scsi.SenseCodeMediumNotPresent)
-	} else {
-		m.sentBytes += uint32(len(b))
+	n, err := m.writeBlock(b, lba, offset)
+	state = m.mu.lock()
+	defer m.mu.unlock(state)
+	if gen != m.cmdGen {
+		return
 	}
+	if err != nil || n < len(b) {
+		m.sendScsiError(csw.StatusFailed, scsi.SenseNotReady, scsi.SenseCodeMediumNotPresent)
+		m.sentBytes += uint32(n)
+		m.run([]byte{}, true)
+		return
+	}
+	m.sentBytes += uint32(len(b))
 
 	if m.sentBytes >= m.transferBytes {
+		// Acknowledge the received data from the host
+		m.queuedBytes = 0
+		if m.rxPending {
+			m.rxPending = false
+			machine.AckUsbOutTransfer(usb.MSC_ENDPOINT_OUT)
+		}
+
 		// Data transfer is complete, send CSW
 		m.state = mscStateStatus
 		m.run([]byte{}, true)

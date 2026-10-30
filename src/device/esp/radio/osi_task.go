@@ -29,7 +29,7 @@ func osiTaskCreatePinnedToCore(fn unsafe.Pointer, name *byte, stack uint32, para
 func osiTaskCreate(fn unsafe.Pointer, name *byte, stack uint32, param unsafe.Pointer, prio uint32, handle unsafe.Pointer) int32 {
 	started := make(chan unsafe.Pointer)
 	go func() {
-		machine.LockCore(0) // see core.go
+		machine.AssignCore(0) // see core.go
 		started <- currentTask()
 		C.seam_call(fn, param)
 	}()

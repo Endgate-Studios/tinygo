@@ -10,7 +10,7 @@ import (
 
 // Version of TinyGo.
 // Update this value before release of new version of software.
-const version = "0.43.0-dev"
+const version = "0.44.0"
 
 // Return TinyGo version, either in the form 0.30.0 or as a development version
 // (like 0.30.0-dev-abcd012).
@@ -50,9 +50,6 @@ func GetGorootVersion() (major, minor int, err error) {
 // major, minor, and patch version: 1, 3, and 2 in this example.
 // If there is an error, (0, 0, 0) and an error will be returned.
 func Parse(version string) (major, minor, patch int, err error) {
-	if strings.HasPrefix(version, "devel ") {
-		version = strings.Split(strings.TrimPrefix(version, "devel "), version)[0]
-	}
 	if version == "" || version[:2] != "go" {
 		return 0, 0, 0, errors.New("could not parse Go version: version does not start with 'go' prefix")
 	}

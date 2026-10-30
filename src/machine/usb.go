@@ -1,4 +1,4 @@
-//go:build sam || nrf52840 || rp2040 || rp2350 || stm32f4 || stm32f7 || stm32h7
+//go:build sam || nrf52840 || rp2040 || rp2350 || stm32f4 || stm32f7 || stm32h7 || mimxrt1062 || (esp32s3 && usbotg)
 
 package machine
 
@@ -41,6 +41,9 @@ func initUSB() {
 //
 //go:linkname enableUSBCDC machine/usb/cdc.EnableUSBCDC
 func enableUSBCDC()
+
+//go:linkname cdcReset machine/usb/cdc.reset
+func cdcReset()
 
 type Serialer interface {
 	WriteByte(c byte) error
@@ -131,6 +134,7 @@ var (
 	usbTxHandler    [NumberOfUSBEndpoints]func()
 	usbRxHandler    [NumberOfUSBEndpoints]func([]byte) bool
 	usbSetupHandler [usb.NumberOfInterfaces]func(usb.Setup) bool
+	usbResetHandler [usb.NumberOfInterfaces]func()
 	usbStallHandler [NumberOfUSBEndpoints]func(usb.Setup) bool
 )
 
@@ -301,6 +305,12 @@ func handleStandardSetup(setup usb.Setup) bool {
 			usbConfiguration = setup.WValueL
 			USBDev.InitEndpointComplete = true
 
+			for _, h := range usbResetHandler {
+				if h != nil {
+					h()
+				}
+			}
+
 			SendZlp()
 			return true
 		} else {
@@ -365,8 +375,9 @@ func EnableCDC(txHandler func(), rxHandler func([]byte), setupHandler func(usb.S
 		},
 		[]usb.SetupConfig{
 			{
-				Index:   usb.CDC_ACM_INTERFACE,
-				Handler: setupHandler,
+				Index:        usb.CDC_ACM_INTERFACE,
+				Handler:      setupHandler,
+				ResetHandler: cdcReset,
 			},
 		})
 }
@@ -408,5 +419,8 @@ func ConfigureUSBEndpoint(desc descriptor.Descriptor, epSettings []usb.EndpointC
 
 	for _, s := range setup {
 		usbSetupHandler[s.Index] = s.Handler
+		if s.ResetHandler != nil {
+			usbResetHandler[s.Index] = s.ResetHandler
+		}
 	}
 }

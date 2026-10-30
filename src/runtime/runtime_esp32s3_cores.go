@@ -14,261 +14,16 @@ import (
 
 const numCPU = 2
 
-// Level 1 and level triggered on both cores, and not used by machine or espradio.
-// See ESP-IDF components/esp_hw_support/port/esp32s3/esp_cpu_intr.c.
-const crossCoreCPUInterrupt = 18
-
-var crossCoreInterrupt interrupt.Interrupt
-
-// PRID is 0xCDCD on core 0 and 0xABAB on core 1, see ESP-IDF xt_utils_get_core_id.
-func currentCPU() uint32 {
-	return uint32(device.AsmFull("rsr {}, PRID", nil)) >> 13 & 1
-}
-
-// See ESP-IDF components/esp_rom/esp32s3/ld/esp32s3.rom.ld.
-//
-//export ets_set_appcpu_boot_addr
-func romSetAppCPUBootAddr(addr uint32)
-
-//go:extern call_start_cpu1
-var callStartCPU1 [0]byte
-
-//go:extern _stack1_top
-var stack1TopSymbol [0]byte
-
-var core1Up atomic.Uint32
-
-// See start_other_core in ESP-IDF components/esp_system/port/cpu_start.c.
-func startSecondaryCores() {
-	crossCoreInterrupt = interrupt.New(crossCoreCPUInterrupt, crossCoreHandler)
-	esp.INTERRUPT_CORE0.SetCPU_INTR_FROM_CPU_0_MAP(crossCoreCPUInterrupt)
-	crossCoreInterrupt.Enable()
-
-	esp.RTC_CNTL.SetSW_CPU_STALL_SW_STALL_APPCPU_C1(0)
-	esp.RTC_CNTL.SetOPTIONS0_SW_STALL_APPCPU_C0(0)
-
-	// OpenOCD may have started core 1 already. A reset would remove its breakpoints.
-	if esp.SYSTEM.GetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN() == 0 {
-		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN(1)
-		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RUNSTALL(0)
-		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(1)
-		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(0)
-	}
-	romSetAppCPUBootAddr(uint32(uintptr(unsafe.Pointer(&callStartCPU1))))
-
-	for core1Up.Load() == 0 {
-		spinLoopWait()
-	}
-}
-
-//export tinygo_runCore1
-func runCore1() {
-	interruptInit()
-	romSetAppCPUBootAddr(0)
-
-	esp.INTERRUPT_CORE1.SetCPU_INTR_FROM_CPU_1_MAP(crossCoreCPUInterrupt)
-	crossCoreInterrupt.Enable()
-	timerAlarmInterrupt.Enable()
-	core1Up.Store(1)
-
-	// Do not run goroutines before the GC can stop this core.
-	for volatile.LoadUint8((*uint8)(unsafe.Pointer(&secondaryCoresStarted))) == 0 {
-		spinLoopWait()
-	}
-
-	schedulerLock.Lock()
-	scheduler(false)
-	schedulerLock.Unlock()
-
-	for {
-		device.Asm("waiti 0")
-	}
-}
-
-func signalCore(core uint32) {
-	if core == 0 {
-		esp.SYSTEM.CPU_INTR_FROM_CPU_0.Set(1)
-	} else {
-		esp.SYSTEM.CPU_INTR_FROM_CPU_1.Set(1)
-	}
-}
-
-func crossCoreHandler(interrupt.Interrupt) {
-	core := currentCPU()
-
-	// The source is level triggered, so clear it before the flags are read.
-	if core == 0 {
-		esp.SYSTEM.CPU_INTR_FROM_CPU_0.Set(0)
-	} else {
-		esp.SYSTEM.CPU_INTR_FROM_CPU_1.Set(0)
-	}
-	device.Asm("memw")
-
-	if gcPauseRequest[core].Swap(0) != 0 {
-		gcInterruptHandler(core)
-	}
-}
-
-// Core in sleepTicksMulticore, or 0xff. Protected by schedulerLock.
-var sleepingCore uint8 = 0xff
-
-var sleepInterrupted atomic.Uint32
-
-func hasSleepingCore() bool {
-	return sleepingCore != 0xff
-}
-
-func sleepTicksMulticore(d timeUnit) {
-	core := currentCPU()
-	sleepingCore = uint8(core)
-	sleepInterrupted.Store(0)
-	routeTimerAlarm(core)
-	target := ticks() + d
-
-	// waiti enables interrupts and waits in one step, so no wakeup is lost. An
-	// interrupt can wake a task before the sleep starts, so check the list.
-	mask := interrupt.Disable()
-	schedulerLock.Unlock()
-	for sleepInterrupted.Load() == 0 && interruptWakes[core] == nil {
-		setTimerAlarm(target)
-		if ticks() >= target {
-			break
-		}
-		device.Asm("waiti 0")
-		interrupt.Disable()
-	}
-	interrupt.Restore(mask)
-
-	schedulerLock.Lock()
-	sleepingCore = 0xff
-}
-
-// Send the level triggered TIMG0 alarm only to the given core, so the other
-// core cannot clear it first. See INT_MUX_DISABLED_INTNO in ESP-IDF intr_alloc.c.
-func routeTimerAlarm(core uint32) {
-	const disabled = 6
-	if core == 0 {
-		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(disabled)
-		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
-	} else {
-		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(disabled)
-		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
-	}
-}
-
-// Stop sleepTicksMulticore. Must be called with the scheduler lock held.
-func interruptSleep() {
-	sleepInterrupted.Store(1)
-	signalCore(uint32(sleepingCore))
-}
-
-// interruptSleepFromInterrupt stops sleepTicksMulticore after an interrupt
-// woke a task, so that the scheduler takes it.
-func interruptSleepFromInterrupt() {
-	sleepInterrupted.Store(1)
-}
-
-func interruptSleepTicksMulticore(wakeup timeUnit) {
-	if sleepingCore != 0xff {
-		interruptSleep()
-	}
-}
-
-// Cores in schedulerUnlockAndWait. Protected by schedulerLock.
-var waitingCores uint8
-
-func schedulerUnlockAndWait() {
-	core := currentCPU()
-	waitingCores |= 1 << core
-
-	// waiti enables interrupts and waits in one step, so a wakeup that comes
-	// after the unlock is not lost. An interrupt can wake a task before that.
-	mask := interrupt.Disable()
-	schedulerLock.Unlock()
-	if interruptWakes[core] == nil {
-		device.Asm("waiti 0")
-	}
-	interrupt.Restore(mask)
-
-	schedulerLock.Lock()
-	waitingCores &^= 1 << core
-}
-
-func schedulerWake() {
-	for core := uint32(0); core < numCPU; core++ {
-		if waitingCores&(1<<core) != 0 {
-			waitingCores &^= 1 << core
-			signalCore(core)
-			return
-		}
-	}
-	if sleepingCore != 0xff {
-		interruptSleep()
-	}
-}
-
-func schedulerWakeCore(core uint32) {
-	if waitingCores&(1<<core) != 0 {
-		waitingCores &^= 1 << core
-		signalCore(core)
-	} else if uint32(sleepingCore) == core {
-		interruptSleep()
-	}
-}
+// Level 1, level triggered line for the FROM_CPU software interrupts.
+// See esp-idf components/esp_hw_support/port/esp32s3/esp_cpu_intr.c.
+const crossCoreCPUInterrupt = 3
 
 var (
-	gcPauseRequest [numCPU]atomic.Uint32
-	gcSignalWait   [numCPU]atomic.Uint32
-)
-
-// Stop-the-world handshake with gcMarkReachable and gcResumeWorld.
-func gcInterruptHandler(core uint32) {
-	gcScanState.Add(1)
-	gcWaitForSignal(core)
-
-	scanCurrentStack()
-	if !task.OnSystemStack() {
-		markRoots(task.SystemStack(), coreStackTop(core))
-	}
-	gcScanState.Store(1)
-
-	gcWaitForSignal(core)
-	gcScanState.Add(1)
-}
-
-func gcWaitForSignal(core uint32) {
-	for gcSignalWait[core].Load() == 0 {
-		spinLoopWait()
-	}
-	gcSignalWait[core].Store(0)
-}
-
-func gcPauseCore(core uint32) {
-	gcPauseRequest[core].Store(1)
-	signalCore(core)
-}
-
-func gcSignalCore(core uint32) {
-	gcSignalWait[core].Store(1)
-}
-
-func coreStackTop(core uint32) uintptr {
-	switch core {
-	case 0:
-		return uintptr(unsafe.Pointer(&stackTopSymbol))
-	case 1:
-		return uintptr(unsafe.Pointer(&stack1TopSymbol))
-	default:
-		runtimeFatal("unexpected core")
-		return 0
-	}
-}
-
-var (
-	schedulerLock spinLock
-	futexLock     spinLock
-	atomicsLock   spinLock
 	printLock     spinLock
+	schedulerLock spinLock
+	atomicsLock   spinLock
+	futexLock     spinLock
+	ticksLock     spinLock
 )
 
 // spinLock is Peterson's lock for the two cores: plain loads and stores,
@@ -308,4 +63,367 @@ func (l *spinLock) Unlock() {
 }
 
 func spinLoopWait() {
+	device.Asm("nop")
+}
+
+// Return the current core number: 0 or 1. PRID bit 13 is the core ID, see
+// xt_utils_get_raw_core_id in esp-idf components/xtensa/include/xt_utils.h.
+func currentCPU() uint32 {
+	return uint32(device.AsmFull("rsr {}, PRID", nil)>>13) & 1
+}
+
+func lockTicks() interrupt.State {
+	mask := interrupt.Disable()
+	ticksLock.Lock()
+	return mask
+}
+
+func unlockTicks(mask interrupt.State) {
+	ticksLock.Unlock()
+	interrupt.Restore(mask)
+}
+
+var crossCoreInterrupt interrupt.Interrupt
+
+var (
+	core1Started         atomic.Uint32
+	schedulerWakePending [numCPU]atomic.Uint32
+	sleepWake            [numCPU]atomic.Uint32
+	gcPauseRequest       [numCPU]atomic.Uint32
+	gcSignalWait         [numCPU]atomic.Uint32
+)
+
+// Set (1) or clear (0) the FROM_CPU interrupt of the given core.
+func signalCore(core, value uint32) {
+	if core == 0 {
+		esp.SYSTEM.CPU_INTR_FROM_CPU_0.Set(value)
+	} else {
+		esp.SYSTEM.CPU_INTR_FROM_CPU_1.Set(value)
+	}
+}
+
+func crossCoreHandler(interrupt.Interrupt) {
+	core := currentCPU()
+
+	// The source is level triggered, so clear it before reading the flags.
+	signalCore(core, 0)
+	device.Asm("memw")
+	if core == 0 {
+		if mask := core0EnableRequest.Load(); mask != 0 {
+			interruptEnableLocal(mask)
+			core0EnableRequest.And(^mask)
+		}
+	}
+	if gcPauseRequest[core].Swap(0) != 0 {
+		gcInterruptHandler(core)
+	}
+	if flashPauseRequest[core].Swap(0) != 0 {
+		state := interrupt.Disable()
+		tinygo_flashPark(&flashParkState)
+		interrupt.Restore(state)
+	}
+}
+
+// Values of flashParkState, shared with tinygo_flashPark in esp32s3.S.
+const (
+	flashParkIdle    = 0
+	flashParkLocked  = 1
+	flashParkRelease = 2
+)
+
+var (
+	flashSafeLock     spinLock
+	flashPauseRequest [numCPU]atomic.Uint32
+	flashParkState    uint32
+)
+
+//export tinygo_flashPark
+func tinygo_flashPark(state *uint32)
+
+// Stop the other core in IRAM before a flash erase or write.
+// Must not be called from an interrupt or with interrupts disabled.
+func esp32s3EnterFlashSafeSection() (interrupt.State, bool) {
+	if secondaryCoresReady.Load() == 0 {
+		return interrupt.Disable(), false
+	}
+
+	flashSafeLock.Lock()
+
+	// Disable interrupts first, like rp2EnterFlashSafeSection. A GC pause here
+	// would wait for the other core while that core waits in IRAM.
+	state := interrupt.Disable()
+	other := 1 - currentCPU()
+	flashPauseRequest[other].Store(1)
+	signalCore(other, 1)
+	for volatile.LoadUint32(&flashParkState) != flashParkLocked {
+		spinLoopWait()
+	}
+	return state, true
+}
+
+func esp32s3ExitFlashSafeSection(state interrupt.State, multicore bool) {
+	if multicore {
+		volatile.StoreUint32(&flashParkState, flashParkRelease)
+		for volatile.LoadUint32(&flashParkState) != flashParkIdle {
+			spinLoopWait()
+		}
+		flashSafeLock.Unlock()
+	}
+	interrupt.Restore(state)
+}
+
+// CPU interrupt lines that core 1 asked core 0 to enable.
+var core0EnableRequest atomic.Uint32
+
+// Enable a CPU interrupt line on core 0. Called by interrupt.Enable on core 1,
+// which must have interrupts enabled so the GC can still pause it.
+func enableInterruptOnCore0(num uint32) {
+	bit := uint32(1) << num
+	core0EnableRequest.Or(bit)
+	signalCore(0, 1)
+	for core0EnableRequest.Load()&bit != 0 {
+		spinLoopWait()
+	}
+}
+
+//go:linkname interruptEnableLocal runtime/interrupt.enableLocal
+func interruptEnableLocal(mask uint32)
+
+// Start core 1, following start_other_core in esp-idf
+// components/esp_system/port/cpu_start.c.
+func startSecondaryCores() {
+	esp.INTERRUPT_CORE0.SetCPU_INTR_FROM_CPU_0_MAP(crossCoreCPUInterrupt)
+	esp.INTERRUPT_CORE1.SetCPU_INTR_FROM_CPU_1_MAP(crossCoreCPUInterrupt)
+	signalCore(0, 0)
+	signalCore(1, 0)
+	crossCoreInterrupt = interrupt.New(crossCoreCPUInterrupt, crossCoreHandler)
+	crossCoreInterrupt.Enable()
+
+	esp.RTC_CNTL.SetOPTIONS0_SW_STALL_APPCPU_C0(0)
+	esp.RTC_CNTL.SetSW_CPU_STALL_SW_STALL_APPCPU_C1(0)
+
+	// OpenOCD may have started core 1 already. A reset would remove its breakpoints.
+	if esp.SYSTEM.GetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN() == 0 {
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN(1)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RUNSTALL(0)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(1)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(0)
+	}
+	ets_set_appcpu_boot_addr(uintptr(unsafe.Pointer(&call_start_cpu1)))
+
+	// The GC can pause core 1 only after it has enabled its interrupt.
+	for core1Started.Load() == 0 {
+		spinLoopWait()
+	}
+}
+
+//export ets_set_appcpu_boot_addr
+func ets_set_appcpu_boot_addr(addr uintptr)
+
+//go:extern call_start_cpu1
+var call_start_cpu1 [0]byte
+
+// The function that is started on the second core, from call_start_cpu1.
+//
+//export tinygo_runCore1
+func runCore1() {
+	interruptInit()
+	ets_set_appcpu_boot_addr(0)
+
+	// sleepTicksMulticore routes the timer alarm to the core that sleeps.
+	interruptEnableLocal(1<<crossCoreCPUInterrupt | 1<<timerAlarmCPUInterrupt)
+	core1Started.Store(1)
+
+	waitForSecondaryCoresReady()
+
+	schedulerLock.Lock()
+	scheduler(false)
+	schedulerLock.Unlock()
+
+	exit(0)
+}
+
+// Bitset of cores waiting in schedulerUnlockAndWait.
+// Must only be accessed with the scheduler lock held.
+var waitingCores uint8
+
+// Put the scheduler to sleep, since there are no tasks to run.
+// This will unlock the scheduler lock, and must be called with the scheduler
+// lock held.
+func schedulerUnlockAndWait() {
+	core := currentCPU()
+	waitingCores |= 1 << core
+
+	// waiti lowers PS.INTLEVEL and waits in one step, so a wake sent after the
+	// unlock is not lost. See the Xtensa ISA Reference Manual, WAITI.
+	// An interrupt can wake a task before that, so check the list too.
+	state := interrupt.Disable()
+	schedulerLock.Unlock()
+	for schedulerWakePending[core].Swap(0) == 0 && interruptWakes[core] == nil {
+		device.Asm("waiti 0")
+		interrupt.Disable()
+	}
+	interrupt.Restore(state)
+	schedulerLock.Lock()
+	waitingCores &^= 1 << core
+}
+
+// Wake another core, if one is waiting or sleeping. Must be called with the
+// scheduler lock held.
+func schedulerWake() {
+	for core := uint32(0); core < numCPU; core++ {
+		if waitingCores&(1<<core) != 0 {
+			schedulerWakeCore(core)
+			return
+		}
+	}
+	if hasSleepingCore() {
+		interruptSleepTicksMulticore(0)
+	}
+}
+
+// Wake the given core if it is waiting or sleeping. Must be called with the
+// scheduler lock held.
+func schedulerWakeCore(core uint32) {
+	if waitingCores&(1<<core) != 0 {
+		waitingCores &^= 1 << core
+		schedulerWakePending[core].Store(1)
+		signalCore(core, 1)
+	} else if uint32(sleepingCore) == core {
+		interruptSleepTicksMulticore(0)
+	}
+}
+
+// Currently sleeping core, or 0xff.
+// Must only be accessed with the scheduler lock held.
+var sleepingCore uint8 = 0xff
+
+// Return whether another core is sleeping.
+// May only be called with the scheduler lock held.
+func hasSleepingCore() bool {
+	return sleepingCore != 0xff
+}
+
+// Like sleepTicks, but it unlocks the scheduler while it sleeps and
+// interruptSleepTicksMulticore can stop it. Call with the scheduler lock held.
+func sleepTicksMulticore(d timeUnit) {
+	core := currentCPU()
+	sleepingCore = uint8(core)
+	sleepWake[core].Store(0)
+	routeTimerAlarm(core)
+	target := ticks() + d
+
+	// waiti enables interrupts and waits in one step, so no wakeup is lost. An
+	// interrupt can wake a task before the sleep starts, so check the list.
+	mask := interrupt.Disable()
+	schedulerLock.Unlock()
+	for !sleepWoken(core) && interruptWakes[core] == nil {
+		setTimerAlarm(target)
+		if ticks() >= target {
+			break
+		}
+		device.Asm("waiti 0")
+		interrupt.Disable()
+	}
+	interrupt.Restore(mask)
+
+	schedulerLock.Lock()
+	sleepingCore = 0xff
+}
+
+// Send the level triggered TIMG0 alarm only to the given core, so the other
+// core cannot clear it first. See INT_MUX_DISABLED_INTNO in ESP-IDF intr_alloc.c.
+func routeTimerAlarm(core uint32) {
+	const disabled = 6
+	if core == 0 {
+		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(disabled)
+		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
+	} else {
+		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(disabled)
+		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
+	}
+}
+
+// Interrupt an ongoing call to sleepTicksMulticore on another core.
+// Must be called with the scheduler lock held.
+func interruptSleepTicksMulticore(wakeup timeUnit) {
+	if hasSleepingCore() {
+		sleepWake[sleepingCore].Store(1)
+		signalCore(uint32(sleepingCore), 1)
+	}
+}
+
+// interruptSleepFromInterrupt stops the wait or sleep of this core after an
+// interrupt woke a task, so that the scheduler takes it.
+func interruptSleepFromInterrupt() {
+	core := currentCPU()
+	sleepWake[core].Store(1)
+	schedulerWakePending[core].Store(1)
+}
+
+//go:inline
+func sleepWoken(core uint32) bool {
+	return sleepWake[core].Load() != 0
+}
+
+// The GC interrupted this core for the stop-the-world phase.
+// This function handles that, and only returns after the stop-the-world phase
+// ended.
+func gcInterruptHandler(core uint32) {
+	// Let the GC know we're ready.
+	gcScanState.Add(1)
+
+	// Wait until we get a signal to start scanning.
+	gcWaitForSignal(core)
+
+	// Scan the stack(s) of this core.
+	scanCurrentStack()
+	if !task.OnSystemStack() {
+		// Mark system stack.
+		markRoots(task.SystemStack(), coreStackTop(core))
+	}
+
+	// Signal we've finished scanning.
+	gcScanState.Store(1)
+
+	// Wait until we get a signal that the stop-the-world phase has ended.
+	gcWaitForSignal(core)
+
+	// Signal we received the signal and are going to exit the interrupt.
+	gcScanState.Add(1)
+}
+
+func gcWaitForSignal(core uint32) {
+	for gcSignalWait[core].Swap(0) == 0 {
+		spinLoopWait()
+	}
+}
+
+// Pause the given core by sending it an interrupt.
+func gcPauseCore(core uint32) {
+	gcPauseRequest[core].Store(1)
+	signalCore(core, 1)
+}
+
+// Signal the given core that it can resume one step.
+// The paused core polls this flag, so no interrupt is needed.
+func gcSignalCore(core uint32) {
+	gcSignalWait[core].Store(1)
+}
+
+//go:extern _stack1_top
+var stack1TopSymbol [0]byte
+
+// Returns the stack top (highest address) of the system stack of the given
+// core.
+func coreStackTop(core uint32) uintptr {
+	switch core {
+	case 0:
+		return uintptr(unsafe.Pointer(&stackTopSymbol))
+	case 1:
+		return uintptr(unsafe.Pointer(&stack1TopSymbol))
+	default:
+		runtimeFatal("unexpected core")
+		return 0
+	}
 }

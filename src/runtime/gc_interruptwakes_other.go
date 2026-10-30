@@ -6,3 +6,5 @@ package runtime
 func gcMarkInterruptWakes() (heads [0]uintptr) { return }
 
 func interruptWakesChanged(heads [0]uintptr) bool { return false }
+
+func hasInterruptWakes(core uint32) bool { return false }

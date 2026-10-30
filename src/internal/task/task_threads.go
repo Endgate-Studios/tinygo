@@ -192,6 +192,21 @@ func Goexit() {
 	tinygo_task_exit()
 }
 
+func CoroExit(next *Task) {
+	t := Current()
+	synctestTaskWake(next)
+	if exit(t) {
+		runtimeFatal("all goroutines are asleep - deadlock!")
+	}
+	scheduleTaskNoWake(next)
+	tinygo_task_exit()
+}
+
+// Yield yields the current thread to the OS scheduler.
+func Yield() {
+	sched_yield()
+}
+
 // scanWaitGroup is used to wait on until all threads have finished the current state transition.
 var scanWaitGroup waitGroup
 
@@ -361,6 +376,9 @@ func tinygo_task_send_gc_signal(threadID)
 
 //export tinygo_task_current
 func tinygo_task_current() unsafe.Pointer
+
+//export sched_yield
+func sched_yield() int32
 
 func NumCPU() int {
 	return int(numCPU)

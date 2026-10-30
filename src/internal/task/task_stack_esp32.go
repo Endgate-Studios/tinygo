@@ -15,6 +15,12 @@ import (
 	"unsafe"
 )
 
+// Returns a pointer where the system stack can be stored.
+// This is a layering violation, see task_stack_tinygoriscv.go.
+//
+//go:linkname runtime_systemStackPtr runtime.systemStackPtr
+func runtime_systemStackPtr() *uintptr
+
 // calleeSavedRegs is the list of registers that must be saved and restored when
 // switching between tasks. Also see task_stack_esp8266.S that relies on the
 // exact layout of this struct.
@@ -55,6 +61,21 @@ func (s *state) archInit(r *calleeSavedRegs, fn uintptr, args unsafe.Pointer) {
 	// pseudo-return to tinygo_startTask using the register window mechanism.
 	r.a3 = fn
 	r.a2 = uintptr(args)
+}
+
+func (s *state) resume() {
+	swapTask(s.sp, runtime_systemStackPtr())
+}
+
+// The system stack pointer is not cleared here. A GC interrupt between a clear
+// and the swap would scan the system stack from address 0.
+func (s *state) pause() {
+	swapTask(SystemStack(), &s.sp)
+}
+
+// SystemStack returns the system stack pointer when called from a task stack.
+func SystemStack() uintptr {
+	return *runtime_systemStackPtr()
 }
 
 //export tinygo_task_current

@@ -18,8 +18,7 @@
 //     e. Disable caches
 //     f. Cache_MMU_Init() — reset all MMU entries to invalid
 //     g. Cache_Set_IDROM_MMU_Size() — set IROM/DROM entry split
-//     h. Write MMU entries mapping the IROM and DROM flash pages, using the
-//        physical flash offsets patched into .data by builder/esp.go
+//     h. Write MMU entries mapping flash pages for IROM, DROM and machine.Flash
 //     i. Clear bus-shut bits
 //     j. Enable caches + isync
 
@@ -88,23 +87,24 @@
     .long 0x600C4064
 .Ldcache_ctrl1_reg:
     .long 0x600C4004
-// Flash section bounds, window bases, and builder-patched physical offsets.
-.Lirom_start:
-    .long _irom_start
-.Lirom_end:
-    .long _irom_end
-.Lirom_base:
-    .long 0x42000000
-.Ldrom_start:
-    .long _drom_start
-.Ldrom_end:
-    .long _drom_end
-.Ldrom_base:
-    .long 0x3C000000
-.Lirom_flash_addr_ptr:
+// Flash MMU layout from targets/esp32s3.ld. The builder patches the physical
+// IROM and DROM offsets into _irom_flash_addr and _drom_flash_addr.
+.Lirom_flash_addr:
     .long _irom_flash_addr
-.Ldrom_flash_addr_ptr:
+.Lirom_mmu_pages:
+    .long _irom_mmu_pages
+.Ldrom_flash_addr:
     .long _drom_flash_addr
+.Ldrom_mmu_index:
+    .long _drom_mmu_index
+.Ldrom_mmu_pages:
+    .long _drom_mmu_pages
+.Lflash_data_phys:
+    .long __flash_data_phys
+.Lflash_data_mmu_index:
+    .long _flash_data_mmu_index
+.Lflash_data_mmu_pages:
+    .long _flash_data_mmu_pages
 
 .global call_start_cpu0
 call_start_cpu0:
@@ -274,82 +274,67 @@ call_start_cpu0:
     l32r a4, .LCache_MMU_Init
     callx4 a4
 
-    // 4h. Split the shared 512-entry MMU table between IROM and DROM.
-    // DROM begins at the virtual page immediately after IROM.
-    l32r a2, .Ldrom_start
-    l32r a3, .Ldrom_base
-    sub  a2, a2, a3
-    srli a2, a2, 16                    // a2 = first DROM MMU entry
-
-    slli a6, a2, 2                     // IROM table size in bytes
-    movi a7, 0x400                     // movi takes a 12-bit signed immediate,
-    add  a7, a7, a7                    // so build 0x800 (full table) with an add
-    sub  a7, a7, a6                    // DROM table size in bytes
+    // 4h. IROM and DROM share one table of 512 entries. IROM uses the
+    //     entries before DROM, see mmu_ll_get_entry_id in esp-idf mmu_ll.h.
+    l32r a6, .Ldrom_mmu_index
+    slli a6, a6, 2                     // a6 = IROM table size in bytes
+    movi a7, 0x7FF
+    addi a7, a7, 1
+    sub  a7, a7, a6                    // a7 = DROM table size in bytes
     mov  a5, a1
     l32r a4, .LCache_Set_IDROM_MMU_Size
     callx4 a4
 
-    // 4i. Map physical flash pages into the shared MMU table. One 4-byte
-    //     entry per 64KB page; entry value = physical flash page number
-    //     (SOC_MMU_VALID = 0 on S3, SOC_MMU_ACCESS_SPIRAM bit clear for
-    //     flash). The physical base of each region is patched into
-    //     _irom_flash_addr/_drom_flash_addr by builder/esp.go, so virtual
-    //     pages are independent of flash pages.
-    //
-    //     Both regions use the hand-rolled store loop below. ROM's
-    //     Cache_Ibus_MMU_Set boots but then hangs at entry for reasons not
-    //     yet understood -- do not swap the IROM loop for it without a new
-    //     hypothesis. (The runtime PSRAM driver does use the ROM's
-    //     Cache_Dbus_MMU_Set, but only after the caches are up.)
+    // 4i. Map IROM, DROM and the machine.Flash area. Each loop writes a2
+    //     entries from a10 with physical pages counting up from a9.
     l32r a8, .Lmmu_table_base
 
-    // map_flash_pages maps one XIP region into the shared MMU table:
-    //
-    //   base_lit   literal holding the base VMA of the region's cache window
-    //   start_lit  literal holding the region's start VMA (page-aligned)
-    //   end_lit    literal holding the region's end VMA
-    //   addr_lit   literal holding the address of the physical flash offset
-    //              that builder/esp.go patched into .data
-    //
-    // Requires a8 = MMU table base. Clobbers a2, a3, a9, a10, a11. The
-    // region must be non-empty; targets/esp32s3.ld asserts that, because the
-    // page count below underflows for a zero-length region.
-    .macro map_flash_pages base_lit, start_lit, end_lit, addr_lit
-    // First table entry, from the region's virtual page in its window.
-    l32r a2, \start_lit
-    l32r a3, \base_lit
-    sub  a2, a2, a3
-    srli a2, a2, 16
-    slli a10, a2, 2
-    add  a10, a8, a10
-
-    // Number of pages covering [start, end).
-    l32r a2, \end_lit
-    l32r a3, \start_lit
-    sub  a2, a2, a3
-    addi a2, a2, -1
-    srli a2, a2, 16
-    addi a2, a2, 1
-
-    // First physical flash page.
-    l32r a3, \addr_lit
-    l32i a9, a3, 0
+    mov  a10, a8
+    l32r a9, .Lirom_flash_addr
+    l32i a9, a9, 0
     srli a9, a9, 16
-
-    movi a11, 0
-1:
+    l32r a2, .Lirom_mmu_pages
+.Lirom_map_loop:
+    beqz a2, .Lirom_map_done
     s32i a9, a10, 0
     addi a9, a9, 1
     addi a10, a10, 4
-    addi a11, a11, 1
-    blt  a11, a2, 1b
-    .endm
+    addi a2, a2, -1
+    j    .Lirom_map_loop
+.Lirom_map_done:
 
-    map_flash_pages .Lirom_base, .Lirom_start, .Lirom_end, .Lirom_flash_addr_ptr
-    map_flash_pages .Ldrom_base, .Ldrom_start, .Ldrom_end, .Ldrom_flash_addr_ptr
+    l32r a10, .Ldrom_mmu_index
+    addx4 a10, a10, a8
+    l32r a9, .Ldrom_flash_addr
+    l32i a9, a9, 0
+    srli a9, a9, 16
+    l32r a2, .Ldrom_mmu_pages
+.Ldrom_map_loop:
+    beqz a2, .Ldrom_map_done
+    s32i a9, a10, 0
+    addi a9, a9, 1
+    addi a10, a10, 4
+    addi a2, a2, -1
+    j    .Ldrom_map_loop
+.Ldrom_map_done:
+
+    l32r a10, .Lflash_data_mmu_index
+    addx4 a10, a10, a8
+    l32r a9, .Lflash_data_phys
+    srli a9, a9, 16
+    l32r a2, .Lflash_data_mmu_pages
+.Lflash_data_map_loop:
+    beqz a2, .Lflash_data_map_done
+    s32i a9, a10, 0
+    addi a9, a9, 1
+    addi a10, a10, 4
+    addi a2, a2, -1
+    j    .Lflash_data_map_loop
+.Lflash_data_map_done:
     memw
 
     // 4j. Clear bus-shut bits so core 0 can access ICache and DCache buses.
+    //     This also clears the core 1 bits, which call_start_cpu1 relies on.
     l32r a8, .Licache_ctrl1_reg         // 0x600C4064
     movi a9, 0
     s32i a9, a8, 0                      // Clear all ICACHE_CTRL1 shut bits
@@ -389,9 +374,11 @@ call_start_cpu0:
     // If main returns, loop forever.
 1:  j 1b
 
-// Core 1 entry for the cores scheduler. Core 0 has already set up the
-// shared cache and MMU, see runtime.startSecondaryCores.
-.section .text.call_start_cpu1,"ax"
+// -----------------------------------------------------------------------
+// Core 1 entry point, set with ets_set_appcpu_boot_addr. Placed in IRAM by
+// the linker. Only the per core setup of call_start_cpu0 is done here.
+// -----------------------------------------------------------------------
+.section .text.call_start_cpu1
     .literal_position
     .align 4
 .Lstack1_top_addr:
@@ -403,7 +390,7 @@ call_start_cpu0:
 
 .global call_start_cpu1
 call_start_cpu1:
-    // Same register file setup as call_start_cpu0.
+    // Disable WOE.
     rsr.ps a2
     movi a3, 1
     slli a3, a3, 18         // a3 = PS_WOE (0x40000)
@@ -412,6 +399,7 @@ call_start_cpu1:
     wsr.ps a2
     rsync
 
+    // Set WINDOWSTART to 1 << WINDOWBASE.
     rsr.windowbase  a2
     ssl  a2
     movi a2, 1
@@ -421,9 +409,10 @@ call_start_cpu1:
 
     l32r a1, .Lstack1_top_addr
 
+    // Re-enable WOE.
     rsr.ps a2
     movi a3, 1
-    slli a3, a3, 18
+    slli a3, a3, 18         // a3 = PS_WOE (0x40000)
     or a2, a2, a3
     wsr.ps a2
     rsync
@@ -433,10 +422,12 @@ call_start_cpu1:
     wsr.cpenable a2
     rsync
 
+    // VECBASE must be set before the first callx4.
     l32r a8, .Lvector_table_addr1
     wsr.vecbase a8
     rsync
 
+    // Clear PS.EXCM and PS.INTLEVEL, set PS.UM.
     rsr.ps a2
     movi a3, ~0x1F
     and a2, a2, a3
@@ -450,13 +441,6 @@ call_start_cpu1:
     callx4 a4
 
 1:  j 1b
-
-// System stack of core 1. Same size as _stack_size in targets/esp32s3.ld.
-.section .stack1,"aw",@nobits
-    .balign 16
-    .space 4096
-    .global _stack1_top
-_stack1_top:
 
 // -----------------------------------------------------------------------
 // tinygo_scanCurrentStack — Spill all Xtensa register windows to the
@@ -509,4 +493,23 @@ tinygo_scanCurrentStack:
     mov   a6, a2
     call4 .Lscan_spill
 .Lscan_spill_done:
+    retw
+
+// Park this core in IRAM while the other core erases or writes flash.
+// a2 points to the state: set 1, wait for 2, then set 0.
+.section .iram1.tinygo_flashPark, "ax"
+.global tinygo_flashPark
+    .balign 4
+tinygo_flashPark:
+    entry a1, 16
+    movi  a3, 1
+    s32i  a3, a2, 0
+    memw
+.Lflash_park_wait:
+    memw
+    l32i  a3, a2, 0
+    bnei  a3, 2, .Lflash_park_wait
+    movi  a3, 0
+    s32i  a3, a2, 0
+    memw
     retw

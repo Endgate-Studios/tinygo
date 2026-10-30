@@ -716,7 +716,9 @@ func (v Value) Slice(i, j int) Value {
 
 		hdr.len = j - i
 		hdr.cap = hdr.cap - i
-		hdr.data = unsafe.Add(hdr.data, i*elemSize)
+		if hdr.cap > 0 {
+			hdr.data = unsafe.Add(hdr.data, i*elemSize)
+		}
 
 		return Value{
 			typecode: v.typecode,
@@ -737,7 +739,10 @@ func (v Value) Slice(i, j int) Value {
 		var hdr sliceHeader
 		hdr.len = j - i
 		hdr.cap = length - i
-		hdr.data = unsafe.Add(buf, i*elemSize)
+		hdr.data = buf
+		if hdr.cap > 0 {
+			hdr.data = unsafe.Add(buf, i*elemSize)
+		}
 
 		sliceType := (*arrayType)(unsafe.Pointer(v.typecode.underlying())).slicePtr
 		return Value{
@@ -766,16 +771,17 @@ func (v Value) Slice3(i, j, k int) Value {
 	case Slice:
 		hdr := *(*sliceHeader)(v.value)
 		i, j, k := uintptr(i), uintptr(j), uintptr(k)
-
-		if j < i || k < j || hdr.len < k {
-			slicePanic()
+		if j < i || k < j || hdr.cap < k {
+			panic("reflect.Value.Slice3: slice index out of bounds")
 		}
 
 		elemSize := v.typecode.underlying().elem().Size()
 
 		hdr.len = j - i
 		hdr.cap = k - i
-		hdr.data = unsafe.Add(hdr.data, i*elemSize)
+		if k > i {
+			hdr.data = unsafe.Add(hdr.data, i*elemSize)
+		}
 
 		return Value{
 			typecode: v.typecode,
@@ -788,7 +794,7 @@ func (v Value) Slice3(i, j, k int) Value {
 		buf, length := buflen(v)
 		i, j, k := uintptr(i), uintptr(j), uintptr(k)
 		if j < i || k < j || length < k {
-			slicePanic()
+			panic("reflect.Value.Slice3: slice index out of bounds")
 		}
 
 		elemSize := v.typecode.underlying().elem().Size()
@@ -796,7 +802,10 @@ func (v Value) Slice3(i, j, k int) Value {
 		var hdr sliceHeader
 		hdr.len = j - i
 		hdr.cap = k - i
-		hdr.data = unsafe.Add(buf, i*elemSize)
+		hdr.data = buf
+		if k > i {
+			hdr.data = unsafe.Add(buf, i*elemSize)
+		}
 
 		sliceType := (*arrayType)(unsafe.Pointer(v.typecode.underlying())).slicePtr
 		return Value{
@@ -806,7 +815,7 @@ func (v Value) Slice3(i, j, k int) Value {
 		}
 	}
 
-	panic("unimplemented: (reflect.Value).Slice3()")
+	panic(&ValueError{Method: "reflect.Value.Slice3", Kind: v.Kind()})
 }
 
 //go:linkname maplen runtime.hashmapLen
@@ -908,17 +917,17 @@ func (v Value) Field(i int) Value {
 	if v.Kind() != Struct {
 		panic(&ValueError{Method: "Field", Kind: v.Kind()})
 	}
-	structField := v.typecode.rawField(i)
+	_, field := v.typecode.rawFieldDescriptor(i)
+	fieldFlags, _, offset := field.decode()
 
 	// Copy flags but clear EmbedRO; we're not an embedded field anymore
 	flags := v.flags & ^valueFlagEmbedRO
-	if structField.PkgPath != "" {
-		// No PkgPath => not exported.
+	if fieldFlags&structFieldFlagIsExported == 0 {
 		// Clear exported flag even if the parent was exported.
 		flags &^= valueFlagExported
 
 		// Update the RO flag
-		if structField.Anonymous {
+		if fieldFlags&structFieldFlagAnonymous != 0 {
 			// Embedded field
 			flags |= valueFlagEmbedRO
 		} else {
@@ -930,7 +939,7 @@ func (v Value) Field(i int) Value {
 	}
 
 	size := v.typecode.Size()
-	fieldType := structField.Type
+	fieldType := field.fieldType
 	fieldSize := fieldType.Size()
 	if v.isIndirect() || fieldSize > unsafe.Sizeof(uintptr(0)) {
 		// v.value was already a pointer to the value and it should stay that
@@ -938,7 +947,7 @@ func (v Value) Field(i int) Value {
 		return Value{
 			flags:    flags,
 			typecode: fieldType,
-			value:    unsafe.Add(v.value, structField.Offset),
+			value:    unsafe.Add(v.value, uintptr(offset)),
 		}
 	}
 
@@ -961,7 +970,7 @@ func (v Value) Field(i int) Value {
 		// The value was not stored in the interface before but will be
 		// afterwards, so load the value (from the correct offset) and return
 		// it.
-		ptr := unsafe.Add(v.value, structField.Offset)
+		ptr := unsafe.Add(v.value, uintptr(offset))
 		value := unsafe.Pointer(loadValue(ptr, fieldSize))
 		return Value{
 			flags:    flags &^ valueFlagIndirect,
@@ -972,7 +981,7 @@ func (v Value) Field(i int) Value {
 
 	// The value was already stored directly in the interface and it still
 	// is. Cut out the part of the value that we need.
-	value := maskAndShift(uintptr(v.value), structField.Offset, fieldSize)
+	value := maskAndShift(uintptr(v.value), uintptr(offset), fieldSize)
 	return Value{
 		flags:    flags,
 		typecode: fieldType,
@@ -1204,6 +1213,9 @@ func (v Value) MapIndex(key Value) Value {
 //go:linkname hashmapNewIterator runtime.hashmapNewIterator
 func hashmapNewIterator() unsafe.Pointer
 
+//go:linkname hashmapResetIterator runtime.hashmapResetIterator
+func hashmapResetIterator(it unsafe.Pointer) unsafe.Pointer
+
 //go:linkname hashmapNext runtime.hashmapNext
 func hashmapNext(m unsafe.Pointer, it unsafe.Pointer, key, value unsafe.Pointer) bool
 
@@ -1219,50 +1231,104 @@ type MapIter struct {
 	key Value
 	val Value
 
-	valid bool
+	started bool
+	valid   bool
 }
 
 func (it *MapIter) Key() Value {
+	if !it.started {
+		panic("reflect: MapIter.Key called before Next")
+	}
 	if !it.valid {
-		panic("reflect.MapIter.Key called on invalid iterator")
+		panic("reflect: MapIter.Key called on exhausted iterator")
 	}
 
-	return it.key.Elem()
+	key := it.key.Elem()
+	key.flags |= it.m.flags & valueFlagRO
+	return key
 }
 
 func (v Value) SetIterKey(iter *MapIter) {
-	v.Set(iter.Key())
+	if !iter.started {
+		panic("reflect: Value.SetIterKey called before Next")
+	}
+	if !iter.valid {
+		panic("reflect: Value.SetIterKey called on exhausted iterator")
+	}
+	if !v.isIndirect() {
+		panic("reflect.Value.SetIterKey using unaddressable value")
+	}
+	if v.isRO() || iter.m.isRO() {
+		panic("reflect.Value.SetIterKey using value obtained using unexported field")
+	}
+	key := iter.key.Elem()
+	if !key.typecode.AssignableTo(v.typecode) {
+		panic("reflect.Value.SetIterKey: value of type " + key.typecode.String() + " is not assignable to type " + v.typecode.String())
+	}
+	v.Set(key)
 }
 
 func (it *MapIter) Value() Value {
+	if !it.started {
+		panic("reflect: MapIter.Value called before Next")
+	}
 	if !it.valid {
-		panic("reflect.MapIter.Value called on invalid iterator")
+		panic("reflect: MapIter.Value called on exhausted iterator")
 	}
 
-	return it.val.Elem()
+	value := it.val.Elem()
+	value.flags |= it.m.flags & valueFlagRO
+	return value
 }
 
 func (v Value) SetIterValue(iter *MapIter) {
-	v.Set(iter.Value())
+	if !iter.started {
+		panic("reflect: Value.SetIterValue called before Next")
+	}
+	if !iter.valid {
+		panic("reflect: Value.SetIterValue called on exhausted iterator")
+	}
+	if !v.isIndirect() {
+		panic("reflect.Value.SetIterValue using unaddressable value")
+	}
+	if v.isRO() || iter.m.isRO() {
+		panic("reflect.Value.SetIterValue using value obtained using unexported field")
+	}
+	value := iter.val.Elem()
+	if !value.typecode.AssignableTo(v.typecode) {
+		panic("reflect.Value.SetIterValue: value of type " + value.typecode.String() + " is not assignable to type " + v.typecode.String())
+	}
+	v.Set(value)
 }
 
 func (it *MapIter) Next() bool {
+	if !it.m.IsValid() {
+		panic("reflect: MapIter.Next called on an iterator that does not have an associated map Value")
+	}
+	if it.started && !it.valid {
+		panic("reflect: MapIter.Next called on exhausted iterator")
+	}
 	it.key = New(it.m.typecode.Key())
 	it.val = New(it.m.typecode.Elem())
 
+	it.started = true
 	it.valid = hashmapNext(it.m.pointer(), it.it, it.key.value, it.val.value)
 	return it.valid
 }
 
 func (iter *MapIter) Reset(v Value) {
-	if v.Kind() != Map {
+	if v.IsValid() && v.Kind() != Map {
 		panic(&ValueError{Method: "MapRange", Kind: v.Kind()})
 	}
 
-	*iter = MapIter{
-		m:  v,
-		it: hashmapNewIterator(),
+	if v.IsValid() || iter.it != nil {
+		iter.it = hashmapResetIterator(iter.it)
 	}
+	iter.m = v
+	iter.key = Value{}
+	iter.val = Value{}
+	iter.started = false
+	iter.valid = false
 }
 
 func (v Value) Set(x Value) {
@@ -1377,6 +1443,15 @@ func (v Value) SetComplex(x complex128) {
 	}
 }
 
+func (v Value) SetPointer(x unsafe.Pointer) {
+	v.checkAddressable()
+	v.checkRO()
+	if v.Kind() != UnsafePointer {
+		panic(&ValueError{Method: "reflect.Value.SetPointer", Kind: v.Kind()})
+	}
+	*(*unsafe.Pointer)(v.value) = x
+}
+
 func (v Value) SetString(x string) {
 	v.checkAddressable()
 	v.checkRO()
@@ -1400,7 +1475,16 @@ func (v Value) SetBytes(x []byte) {
 }
 
 func (v Value) SetCap(n int) {
-	panic("unimplemented: (reflect.Value).SetCap()")
+	if v.typecode.Kind() != Slice {
+		panic(&ValueError{Method: "reflect.Value.SetCap", Kind: v.Kind()})
+	}
+	v.checkAddressable()
+	v.checkRO()
+	hdr := (*sliceHeader)(v.value)
+	if int(uintptr(n)) != n || uintptr(n) < hdr.len || uintptr(n) > hdr.cap {
+		panic("reflect.Value.SetCap: slice capacity out of range")
+	}
+	hdr.cap = uintptr(n)
 }
 
 func (v Value) SetLen(n int) {
@@ -2187,7 +2271,28 @@ func (v Value) FieldByIndex(index []int) Value {
 
 // FieldByIndexErr returns the nested field corresponding to index.
 func (v Value) FieldByIndexErr(index []int) (Value, error) {
-	return Value{}, &ValueError{Method: "FieldByIndexErr"}
+	if len(index) == 1 {
+		return v.Field(index[0]), nil
+	}
+	if v.Kind() != Struct {
+		panic(&ValueError{"FieldByIndexErr", v.Kind()})
+	}
+	for i, x := range index {
+		if i > 0 && v.Kind() == Pointer && v.typecode.elem().Kind() == Struct {
+			if v.IsNil() {
+				return Value{}, fieldByIndexError("reflect: indirection through nil pointer to embedded struct field " + v.typecode.elem().Name())
+			}
+			v = v.Elem()
+		}
+		v = v.Field(x)
+	}
+	return v, nil
+}
+
+type fieldByIndexError string
+
+func (e fieldByIndexError) Error() string {
+	return string(e)
 }
 
 func (v Value) FieldByName(name string) Value {
@@ -2309,5 +2414,9 @@ func (v Value) Recv() (x Value, ok bool) {
 }
 
 func NewAt(typ Type, p unsafe.Pointer) Value {
-	panic("unimplemented: reflect.New()")
+	return Value{
+		typecode: pointerTo(typ.(*RawType)),
+		value:    p,
+		flags:    valueFlagExported,
+	}
 }

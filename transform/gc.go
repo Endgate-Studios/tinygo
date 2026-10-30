@@ -158,12 +158,17 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 
 		// Determine what to do with each call.
 		var pointers []llvm.Value
+		rooted := make(map[llvm.Value]struct{}, len(calls))
+		var cyclicPHIs []llvm.Value
 		for _, call := range calls {
 			ptr := call.Operand(0)
 			call.EraseFromParentAsInstruction()
 
 			// Some trivial optimizations.
 			if ptr.IsAInstruction().IsNil() {
+				continue
+			}
+			if _, ok := rooted[ptr]; ok {
 				continue
 			}
 			switch ptr.InstructionOpcode() {
@@ -187,8 +192,14 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 					continue
 				}
 			case llvm.PHI:
-				// While the value may have already been tracked, it may be overwritten in a loop.
-				// Therefore, a second copy must be created to ensure that it is tracked over the entirety of its lifetime.
+				// A phi gets a slot of its own because its value can change,
+				// so tracking an input instead is not enough. A phi that can
+				// be re-evaluated has its slot overwritten on the way round
+				// and so only roots the value the current iteration selected,
+				// so remember it and give its inputs slots below.
+				if blockInCycle(ptr.InstructionParent()) {
+					cyclicPHIs = append(cyclicPHIs, ptr)
+				}
 			case llvm.ExtractValue, llvm.BitCast:
 				// These instructions do not create new values, but their
 				// original value may not be tracked. So keep tracking them for
@@ -209,7 +220,55 @@ func MakeGCStackSlots(mod llvm.Module) bool {
 				// on the C stack which is scanned separately.
 				continue
 			}
+			rooted[ptr] = struct{}{}
 			pointers = append(pointers, ptr)
+		}
+
+		// Give every input of a tracked phi that can repeat a slot of its own.
+		// SimplifyCFG may have merged the trackPointer calls of two unrelated
+		// pointers into a single call on this phi, leaving whichever pointer
+		// the phi did not select unrooted while it is still live.
+		//
+		// Inputs are followed only through phis that can themselves repeat.
+		// A merge that runs at most once stores its slot once and never
+		// overwrites it, so that slot continues to root the selected value
+		// for the rest of the frame.
+		//
+		// Inputs are not screened by the non-zero-offset GEP rule the loop
+		// above applies, so an interior pointer whose base is already tracked
+		// can pick up a slot of its own. That is another slot rather than
+		// another root, so it is left alone for now.
+		if len(cyclicPHIs) != 0 {
+			expanded := make(map[llvm.Value]struct{}, len(cyclicPHIs))
+			worklist := append([]llvm.Value(nil), cyclicPHIs...)
+			for len(worklist) != 0 {
+				phi := worklist[len(worklist)-1]
+				worklist = worklist[:len(worklist)-1]
+				if _, ok := expanded[phi]; ok {
+					// Phis can be cyclic, so only expand each one once.
+					continue
+				}
+				expanded[phi] = struct{}{}
+				for i := 0; i < phi.IncomingCount(); i++ {
+					incoming := phi.IncomingValue(i)
+					if incoming.IsAInstruction().IsNil() {
+						// Constants and arguments cannot be given a slot here.
+						continue
+					}
+					if incoming.InstructionOpcode() == llvm.PHI && blockInCycle(incoming.InstructionParent()) {
+						worklist = append(worklist, incoming)
+					}
+					if stripped := stripPointerCasts(incoming); !stripped.IsAAllocaInst().IsNil() {
+						// Allocas live on the C stack, which is scanned separately.
+						continue
+					}
+					if _, ok := rooted[incoming]; ok {
+						continue
+					}
+					rooted[incoming] = struct{}{}
+					pointers = append(pointers, incoming)
+				}
+			}
 		}
 
 		if len(pointers) == 0 {
@@ -313,7 +372,7 @@ func makeGCGlobalRoots(mod llvm.Module) bool {
 		if strings.HasPrefix(global.Name(), "llvm.") ||
 			global.IsGlobalConstant() ||
 			global.Initializer().IsNil() ||
-			!gcTypeHasPointers(global.GlobalValueType()) {
+			!typeHasPointers(global.GlobalValueType()) {
 			continue
 		}
 		roots = appendGCGlobalRootRanges(roots, global, global.GlobalValueType(), targetData, ctx.Int8Type(), uintptrType)
@@ -424,14 +483,14 @@ func appendGCGlobalRootOffsets(offsets []uint64, typ llvm.Type, targetData llvm.
 		return append(offsets, baseOffset)
 	case llvm.StructTypeKind:
 		for i, fieldType := range typ.StructElementTypes() {
-			if gcTypeHasPointers(fieldType) {
+			if typeHasPointers(fieldType) {
 				fieldOffset := targetData.ElementOffset(typ, i)
 				offsets = appendGCGlobalRootOffsets(offsets, fieldType, targetData, baseOffset+fieldOffset)
 			}
 		}
 	case llvm.ArrayTypeKind:
 		elemType := typ.ElementType()
-		if gcTypeHasPointers(elemType) {
+		if typeHasPointers(elemType) {
 			elemSize := targetData.TypeAllocSize(elemType)
 			for i := 0; i < typ.ArrayLength(); i++ {
 				offsets = appendGCGlobalRootOffsets(offsets, elemType, targetData, baseOffset+uint64(i)*elemSize)
@@ -439,22 +498,6 @@ func appendGCGlobalRootOffsets(offsets []uint64, typ llvm.Type, targetData llvm.
 		}
 	}
 	return offsets
-}
-
-func gcTypeHasPointers(typ llvm.Type) bool {
-	switch typ.TypeKind() {
-	case llvm.PointerTypeKind:
-		return true
-	case llvm.StructTypeKind:
-		for _, field := range typ.StructElementTypes() {
-			if gcTypeHasPointers(field) {
-				return true
-			}
-		}
-	case llvm.ArrayTypeKind:
-		return typ.ArrayLength() != 0 && gcTypeHasPointers(typ.ElementType())
-	}
-	return false
 }
 
 // markParentFunctions traverses all parent function calls (recursively) and
@@ -477,4 +520,34 @@ func markParentFunctions(marked map[llvm.Value]struct{}, fn llvm.Value) {
 			}
 		}
 	}
+}
+
+// blockInCycle returns whether bb lies on a cycle, that is, whether it is
+// reachable from itself and so can execute more than once per call. This is
+// broader than being a loop header: a merge inside a loop body also qualifies,
+// and its slot is overwritten each iteration just the same.
+func blockInCycle(bb llvm.BasicBlock) bool {
+	// Walk forward from bb and look for an edge back into it.
+	seen := map[llvm.BasicBlock]struct{}{}
+	worklist := []llvm.BasicBlock{bb}
+	for len(worklist) != 0 {
+		cur := worklist[len(worklist)-1]
+		worklist = worklist[:len(worklist)-1]
+		term := cur.LastInstruction()
+		if term.IsNil() {
+			continue
+		}
+		for i := 0; i < term.SuccessorsCount(); i++ {
+			succ := term.Successor(i)
+			if succ == bb {
+				return true
+			}
+			if _, ok := seen[succ]; ok {
+				continue
+			}
+			seen[succ] = struct{}{}
+			worklist = append(worklist, succ)
+		}
+	}
+	return false
 }

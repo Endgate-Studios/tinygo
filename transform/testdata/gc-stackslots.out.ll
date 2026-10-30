@@ -56,25 +56,21 @@ define ptr @needsStackSlots() {
 }
 
 define ptr @needsStackSlots2() {
-  %gc.stackobject = alloca { ptr, i32, ptr, ptr, ptr, ptr, ptr }, align 8
-  store { ptr, i32, ptr, ptr, ptr, ptr, ptr } { ptr null, i32 5, ptr null, ptr null, ptr null, ptr null, ptr null }, ptr %gc.stackobject, align 4
+  %gc.stackobject = alloca { ptr, i32, ptr, ptr, ptr }, align 8
+  store { ptr, i32, ptr, ptr, ptr } { ptr null, i32 3, ptr null, ptr null, ptr null }, ptr %gc.stackobject, align 4
   %1 = load ptr, ptr @runtime.stackChainStart, align 4
-  %2 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  %2 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 0
   store ptr %1, ptr %2, align 4
   store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
   %ptr1 = call ptr @getPointer()
-  %3 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 4
+  %3 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 2
   store ptr %ptr1, ptr %3, align 4
-  %4 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 3
-  store ptr %ptr1, ptr %4, align 4
-  %5 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 2
-  store ptr %ptr1, ptr %5, align 4
   %ptr2 = getelementptr i8, ptr @someGlobal, i32 0
-  %6 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 5
-  store ptr %ptr2, ptr %6, align 4
+  %4 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 3
+  store ptr %ptr2, ptr %4, align 4
   %unused = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
-  %7 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 6
-  store ptr %unused, ptr %7, align 4
+  %5 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 4
+  store ptr %unused, ptr %5, align 4
   store ptr %1, ptr @runtime.stackChainStart, align 4
   ret ptr %ptr1
 }
@@ -136,6 +132,157 @@ loop:                                             ; preds = %loop, %entry
 end:                                              ; preds = %loop
   store ptr %0, ptr @runtime.stackChainStart, align 4
   ret ptr %next.x
+}
+
+define ptr @loopPhiUntrackedInput(i1 %repeat) {
+entry:
+  %gc.stackobject = alloca { ptr, i32, ptr, ptr, ptr }, align 8
+  store { ptr, i32, ptr, ptr, ptr } { ptr null, i32 3, ptr null, ptr null, ptr null }, ptr %gc.stackobject, align 4
+  %0 = load ptr, ptr @runtime.stackChainStart, align 4
+  %1 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  store ptr %0, ptr %1, align 4
+  store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
+  %loop.entry = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %2 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 3
+  store ptr %loop.entry, ptr %2, align 4
+  br label %loop
+
+loop:                                             ; preds = %loop, %entry
+  %loop.cur = phi ptr [ %loop.entry, %entry ], [ %loop.next, %loop ]
+  %3 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 2
+  store ptr %loop.cur, ptr %3, align 4
+  %loop.next = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %4 = getelementptr { ptr, i32, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 4
+  store ptr %loop.next, ptr %4, align 4
+  br i1 %repeat, label %loop, label %end
+
+end:                                              ; preds = %loop
+  store ptr %0, ptr @runtime.stackChainStart, align 4
+  ret ptr %loop.cur
+}
+
+define ptr @nestedLoopPhiUntrackedInput(i1 %repeat.inner, i1 %repeat.outer) {
+entry:
+  %gc.stackobject = alloca { ptr, i32, ptr, ptr, ptr, ptr }, align 8
+  store { ptr, i32, ptr, ptr, ptr, ptr } { ptr null, i32 4, ptr null, ptr null, ptr null, ptr null }, ptr %gc.stackobject, align 4
+  %0 = load ptr, ptr @runtime.stackChainStart, align 4
+  %1 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  store ptr %0, ptr %1, align 4
+  store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
+  %original = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %2 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 5
+  store ptr %original, ptr %2, align 4
+  br label %outer
+
+outer:                                            ; preds = %latch, %entry
+  %outer.ptr = phi ptr [ %original, %entry ], [ %inner.ptr, %latch ]
+  %3 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 3
+  store ptr %outer.ptr, ptr %3, align 4
+  br label %inner
+
+inner:                                            ; preds = %inner, %outer
+  %inner.ptr = phi ptr [ %outer.ptr, %outer ], [ %next, %inner ]
+  %4 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 2
+  store ptr %inner.ptr, ptr %4, align 4
+  %next = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %5 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 4
+  store ptr %next, ptr %5, align 4
+  br i1 %repeat.inner, label %inner, label %latch
+
+latch:                                            ; preds = %inner
+  br i1 %repeat.outer, label %outer, label %end
+
+end:                                              ; preds = %latch
+  store ptr %0, ptr @runtime.stackChainStart, align 4
+  ret ptr %original
+}
+
+define ptr @duplicateAcrossBranches(i1 %condition) {
+entry:
+  %gc.stackobject = alloca { ptr, i32, ptr }, align 8
+  store { ptr, i32, ptr } { ptr null, i32 1, ptr null }, ptr %gc.stackobject, align 4
+  %0 = load ptr, ptr @runtime.stackChainStart, align 4
+  %1 = getelementptr { ptr, i32, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  store ptr %0, ptr %1, align 4
+  store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
+  %original = call ptr @getPointer()
+  %2 = getelementptr { ptr, i32, ptr }, ptr %gc.stackobject, i32 0, i32 2
+  store ptr %original, ptr %2, align 4
+  br i1 %condition, label %left, label %right
+
+left:                                             ; preds = %entry
+  br label %join
+
+right:                                            ; preds = %entry
+  br label %join
+
+join:                                             ; preds = %right, %left
+  %unused = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  store ptr %0, ptr @runtime.stackChainStart, align 4
+  ret ptr %original
+}
+
+define ptr @duplicateNestedLoopPhis(i1 %repeat.inner, i1 %repeat.outer) {
+entry:
+  %gc.stackobject = alloca { ptr, i32, ptr, ptr, ptr, ptr }, align 8
+  store { ptr, i32, ptr, ptr, ptr, ptr } { ptr null, i32 4, ptr null, ptr null, ptr null, ptr null }, ptr %gc.stackobject, align 4
+  %0 = load ptr, ptr @runtime.stackChainStart, align 4
+  %1 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  store ptr %0, ptr %1, align 4
+  store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
+  %original = call ptr @getPointer()
+  %2 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 2
+  store ptr %original, ptr %2, align 4
+  br label %outer
+
+outer:                                            ; preds = %latch, %entry
+  %outer.ptr = phi ptr [ %original, %entry ], [ %inner.ptr, %latch ]
+  %3 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 3
+  store ptr %outer.ptr, ptr %3, align 4
+  br label %inner
+
+inner:                                            ; preds = %inner, %outer
+  %inner.ptr = phi ptr [ %outer.ptr, %outer ], [ %next, %inner ]
+  %4 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 4
+  store ptr %inner.ptr, ptr %4, align 4
+  %next = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %5 = getelementptr { ptr, i32, ptr, ptr, ptr, ptr }, ptr %gc.stackobject, i32 0, i32 5
+  store ptr %next, ptr %5, align 4
+  br i1 %repeat.inner, label %inner, label %latch
+
+latch:                                            ; preds = %inner
+  br i1 %repeat.outer, label %outer, label %end
+
+end:                                              ; preds = %latch
+  store ptr %0, ptr @runtime.stackChainStart, align 4
+  ret ptr %inner.ptr
+}
+
+define ptr @duplicateAcyclicPhi(i1 %condition) {
+entry:
+  %gc.stackobject = alloca { ptr, i32, ptr }, align 8
+  store { ptr, i32, ptr } { ptr null, i32 1, ptr null }, ptr %gc.stackobject, align 4
+  %0 = load ptr, ptr @runtime.stackChainStart, align 4
+  %1 = getelementptr { ptr, i32, ptr }, ptr %gc.stackobject, i32 0, i32 0
+  store ptr %0, ptr %1, align 4
+  store ptr %gc.stackobject, ptr @runtime.stackChainStart, align 4
+  br i1 %condition, label %left, label %right
+
+left:                                             ; preds = %entry
+  %left.ptr = call ptr @getPointer()
+  br label %join
+
+right:                                            ; preds = %entry
+  %right.ptr = call ptr @getPointer()
+  br label %join
+
+join:                                             ; preds = %right, %left
+  %merged = phi ptr [ %left.ptr, %left ], [ %right.ptr, %right ]
+  %2 = getelementptr { ptr, i32, ptr }, ptr %gc.stackobject, i32 0, i32 2
+  store ptr %merged, ptr %2, align 4
+  %unused = call ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  store ptr %0, ptr @runtime.stackChainStart, align 4
+  ret ptr %merged
 }
 
 declare ptr @arrayAlloc()

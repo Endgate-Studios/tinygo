@@ -7,14 +7,20 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"debug/dwarf"
+	"debug/elf"
+	"debug/pe"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,8 +41,6 @@ const TESTDATA = "testdata"
 
 var testTarget = flag.String("target", "", "override test target")
 
-var testOnlyCurrentOS = flag.Bool("only-current-os", false, "")
-
 var supportedLinuxArches = map[string]string{
 	"AMD64Linux": "linux/amd64",
 	"X86Linux":   "linux/386",
@@ -48,6 +52,409 @@ var supportedLinuxArches = map[string]string{
 
 var sema = make(chan struct{}, runtime.NumCPU())
 
+func TestBoehmFinalizerInterior(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		target, scheduler string
+	}{
+		{"wasm", "asyncify"},
+		{"wasm", "none"},
+		{"", "tasks"},
+		{"", "threads"},
+		{"", "none"},
+	} {
+		if test.target == "" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+			continue
+		}
+		t.Run(test.target+"/"+test.scheduler, func(t *testing.T) {
+			t.Parallel()
+			options := optionsFromTarget(test.target, sema)
+			options.GC = "boehm"
+			options.Scheduler = test.scheduler
+			options.Tags = append(options.Tags, "runtime_asserts")
+			options.GlobalValues = map[string]map[string]string{
+				"main": {"finalizerTestMode": "interior"},
+			}
+			runTest("finalizer.go", options, t, nil, nil)
+		})
+	}
+}
+
+func TestBoehmFinalizerInteriorInvalid(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("host finalizers need Linux or Darwin")
+	}
+	options := optionsFromTarget("", sema)
+	options.GC = "boehm"
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"interior-pointer", "interior-large"} {
+		t.Run(name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			_, err := buildAndRun("testdata/finalizer.go", config, output, []string{name}, nil, time.Minute, func(cmd *exec.Cmd, result builder.BuildResult) error {
+				cmd.Stdout = nil
+				cmd.Stderr = nil
+				data, err := cmd.CombinedOutput()
+				output.Write(data)
+				return err
+			})
+			if err == nil || !strings.Contains(output.String(), "pointer not at beginning of allocated block") {
+				t.Fatalf("interior registration result: %v\n%s", err, output.String())
+			}
+		})
+	}
+}
+
+func TestFinalizerRunnerRegistration(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		target, gc, scheduler string
+	}{
+		{"wasm", "boehm", "asyncify"},
+		{"wasm", "conservative", "asyncify"},
+		{"", "boehm", "tasks"},
+		{"", "boehm", "threads"},
+	} {
+		if test.target == "" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+			continue
+		}
+		t.Run(test.target+"/"+test.gc+"/"+test.scheduler, func(t *testing.T) {
+			t.Parallel()
+			options := optionsFromTarget(test.target, sema)
+			options.GC = test.gc
+			options.Scheduler = test.scheduler
+			options.GlobalValues = map[string]map[string]string{
+				"main": {"finalizerIdleMode": "registration"},
+			}
+			runTest("finalizeridle.go", options, t, nil, nil)
+		})
+	}
+}
+
+func TestParseGoLinkFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want []string
+		err  string
+	}{
+		{name: "empty"},
+		{name: "windows-path", in: `-extldflags=-LC:\x\lib`, want: []string{`-LC:\x\lib`}},
+		{
+			name: "quoted-windows-paths",
+			in:   `-extldflags '-LC:\x\lib "-LC:\Program Files\x"'`,
+			want: []string{`-LC:\x\lib`, `-LC:\Program Files\x`},
+		},
+		{
+			name: "literal-quotes-and-backslashes",
+			in:   `-extldflags '-DNAME="value" a\ b ""'`,
+			want: []string{`-DNAME="value"`, `a\`, "b", ""},
+		},
+		{
+			name: "unterminated-ldflags",
+			in:   `-extldflags 'abc`,
+			err:  "unterminated ' string",
+		},
+		{
+			name: "unterminated-extldflags",
+			in:   `-extldflags "'abc"`,
+			err:  "could not parse -extldflags: unterminated ' string",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got, err := parseGoLinkFlag(tc.in)
+			if tc.err != "" {
+				if err == nil || err.Error() != tc.err {
+					t.Fatalf("parseGoLinkFlag(%q) error = %v, want %q", tc.in, err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("external flags = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("global-values", func(t *testing.T) {
+		got, _, err := parseGoLinkFlag(`-X main.version=1.0 -X 'example.com/app.name=hello world' -X 'main.path=C:\x\lib'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]map[string]string{
+			"main":            {"version": "1.0", "path": `C:\x\lib`},
+			"example.com/app": {"name": "hello world"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("global values = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestTrimPath(t *testing.T) {
+	t.Setenv("CGO_CFLAGS", "-iquoteinclude -includestdint.h -imacros relative.h")
+	root := t.TempDir()
+	var binaries [][]byte
+	options := optionsFromTarget(*testTarget, sema)
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"a", "b"} {
+		dir := filepath.Join(root, name)
+		if err := os.CopyFS(dir, os.DirFS(filepath.Join(TESTDATA, "trimpath"))); err != nil {
+			t.Fatal(err)
+		}
+
+		outpath := filepath.Join(root, name+".out")
+		cache := filepath.Join(root, "cache-"+name)
+		cmd := trimPathCommand(t, dir, "build", "-trimpath", "-p=4", "-o", outpath, ".")
+		cmd.Env = append(cmd.Env, "XDG_CACHE_HOME="+cache, "HOME="+cache, "LocalAppData="+cache)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build failed: %v\n%s", err, output)
+		}
+		binary, err := os.ReadFile(outpath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, localPath := range []string{root, goenv.Get("GOROOT"), goenv.Get("TINYGOROOT"), goenv.Get("GOCACHE")} {
+			if bytes.Contains(binary, []byte(localPath)) || bytes.Contains(binary, []byte(filepath.ToSlash(localPath))) {
+				t.Errorf("trimmed binary contains local path %q", localPath)
+			}
+		}
+		binaries = append(binaries, binary)
+	}
+
+	if !bytes.Equal(binaries[0], binaries[1]) {
+		t.Error("trimmed binaries built in different directories are not identical")
+	}
+	if config.GOOS() != "darwin" {
+		files := trimPathDWARFFiles(t, filepath.Join(root, "a.out"), config.GOOS())
+		headerPath := "/_/example.com/dependency@v1.2.3/include/shared.h"
+		if config.GOOS() == "windows" {
+			headerPath = "//_/_/example.com/dependency@v1.2.3/include/shared.h"
+		}
+		for _, want := range []string{
+			"example.com/trimpath/main.go",
+			"example.com/dependency@v1.2.3/subpackage/dependency.go",
+			headerPath,
+		} {
+			if !slices.Contains(files, want) {
+				t.Errorf("missing DWARF path %q in %v", want, files)
+			}
+		}
+		for _, file := range files {
+			if strings.Contains(file, filepath.ToSlash(root)) || strings.Count(file, "example.com/") > 1 {
+				t.Errorf("invalid DWARF path %q", file)
+			}
+		}
+	}
+
+	dir := filepath.Join(root, "a")
+	for _, trim := range []bool{false, true} {
+		outpath := filepath.Join(root, "nodebug.out")
+		args := []string{"build", "-no-debug", "-o", outpath}
+		if trim {
+			args = append(args, "-trimpath")
+		}
+		cmd := trimPathCommand(t, dir, append(args, ".")...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build failed: %v\n%s", err, output)
+		}
+		binary, err := os.ReadFile(outpath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		containsPath := bytes.Contains(binary, []byte(dir)) || bytes.Contains(binary, []byte(filepath.ToSlash(dir)))
+		if containsPath == trim {
+			t.Errorf("trimpath=%v: contains local __FILE__ path=%v", trim, containsPath)
+		}
+	}
+}
+
+func TestTrimPathStackSizes(t *testing.T) {
+	dir := t.TempDir()
+	source := `package main
+func main() {
+	done := make(chan int)
+	go func() { done <- 42 }()
+	println(<-done)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, trim := range []bool{false, true} {
+		t.Run(fmt.Sprintf("trimpath=%v", trim), func(t *testing.T) {
+			outpath := filepath.Join(dir, "main.elf")
+			args := []string{"build", "-target=pico2", "-o", outpath}
+			if trim {
+				args = append(args, "-trimpath")
+			}
+			cmd := trimPathCommand(t, dir, append(args, "main.go")...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build failed: %v\n%s", err, output)
+			}
+			file, err := elf.Open(outpath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if section := file.Section(".tinygo_stacksizes"); section == nil || section.Size == 0 {
+				t.Fatal("missing automatic stack-size data")
+			}
+			binary, err := os.ReadFile(outpath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(binary, []byte("task_stack.go")) {
+				t.Fatal("missing stack-size source file")
+			}
+			sourceDir := filepath.Join(goenv.Get("TINYGOROOT"), "src")
+			containsPath := bytes.Contains(binary, []byte(sourceDir)) || bytes.Contains(binary, []byte(filepath.ToSlash(sourceDir)))
+			if containsPath == trim {
+				t.Errorf("trimpath=%v: contains local runtime source directory=%v", trim, containsPath)
+			}
+		})
+	}
+}
+
+func trimPathCommand(t *testing.T, dir string, args ...string) *exec.Cmd {
+	t.Helper()
+	options := optionsFromTarget(*testTarget, sema)
+	if options.Target != "" {
+		args = slices.Insert(args, 1, "-target="+options.Target)
+	}
+	cmd := exec.Command(os.Args[0], append([]string{"test-main"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"TINYGOROOT="+goenv.Get("TINYGOROOT"),
+		"GOPATH="+goenv.Get("GOPATH"),
+		"GOOS="+options.GOOS,
+		"GOARCH="+options.GOARCH,
+		"GOARM="+options.GOARM,
+	)
+	return cmd
+}
+
+func trimPathDWARFFiles(t *testing.T, filename, goos string) []string {
+	t.Helper()
+	f, err := os.Open(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var data *dwarf.Data
+	switch goos {
+	case "windows":
+		file, parseErr := pe.NewFile(f)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		data, err = file.DWARF()
+	case "wasip1", "wasip2", "js":
+		file, parseErr := wasm.Parse(f)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		data, err = file.DWARF()
+	default:
+		file, parseErr := elf.NewFile(f)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		data, err = file.DWARF()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	reader := data.Reader()
+	for {
+		entry, err := reader.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil {
+			break
+		}
+		if entry.Tag != dwarf.TagCompileUnit {
+			continue
+		}
+		lines, err := data.LineReader(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lines == nil {
+			continue
+		}
+		var line dwarf.LineEntry
+		for {
+			if err := lines.Next(&line); err != nil {
+				if err != io.EOF {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+		for _, file := range lines.Files() {
+			if file != nil {
+				files = append(files, strings.ReplaceAll(file.Name, "\\", "/"))
+			}
+		}
+	}
+	return files
+}
+
+func TestTrimPathTestPackages(t *testing.T) {
+	options := optionsFromTarget(*testTarget, sema)
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.GOOS() == "darwin" {
+		t.Skip("Mach-O executables keep DWARF in separate object files")
+	}
+	for _, externalOnly := range []bool{false, true} {
+		dir := t.TempDir()
+		files := map[string]string{
+			"go.mod":           "module example.com/pkg_test\n\ngo 1.23\n",
+			"external_test.go": "package pkg_test\nimport \"testing\"\nfunc TestPath(t *testing.T) { t.Log(\"path\") }\n",
+		}
+		if !externalOnly {
+			files["pkg.go"] = "package pkg\nvar Value = 1\n"
+		}
+		for name, data := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		outpath := filepath.Join(dir, "test.out")
+		cmd := trimPathCommand(t, dir, "test", "-trimpath", "-c", "-o", outpath, ".")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("test build failed: %v\n%s", err, output)
+		}
+		got := trimPathDWARFFiles(t, outpath, config.GOOS())
+		if !slices.Contains(got, "example.com/pkg_test/external_test.go") {
+			t.Errorf("externalOnly=%v: incorrect test paths: %v", externalOnly, got)
+		}
+		if !slices.Contains(got, "_testmain.go") {
+			t.Errorf("externalOnly=%v: missing generated test main path", externalOnly)
+		}
+		for _, file := range got {
+			if filepath.IsAbs(filepath.FromSlash(file)) && !strings.HasPrefix(file, "/_/") && !strings.HasPrefix(file, "//_/_/") {
+				t.Errorf("externalOnly=%v: untrimmed test path %q", externalOnly, file)
+			}
+		}
+	}
+}
+
 func TestBuild(t *testing.T) {
 	t.Parallel()
 
@@ -55,9 +462,11 @@ func TestBuild(t *testing.T) {
 		"alias.go",
 		"atomic.go",
 		"binop.go",
+		"buildinfo.go",
 		"calls.go",
 		"cgo/",
 		"channel.go",
+		"coreassign.go",
 		"embed/",
 		"finalizer.go",
 		"finalizerbits.go",
@@ -67,9 +476,13 @@ func TestBuild(t *testing.T) {
 		"float.go",
 		"gc.go",
 		"generics.go",
+		"go1.21.go",
+		"go1.22/",
+		"go1.23/",
 		"goroutines.go",
 		"init.go",
 		"init_multi.go",
+		"interface-blank.go",
 		"interface.go",
 		"json.go",
 		"localtypes/",
@@ -89,26 +502,8 @@ func TestBuild(t *testing.T) {
 		"structs.go",
 		"testing.go",
 		"timers.go",
+		"typealias.go",
 		"zeroalloc.go",
-	}
-
-	// Go 1.21 made some changes to the language, which we can only test when
-	// we're actually on Go 1.21.
-	_, minor, err := goenv.GetGorootVersion()
-	if err != nil {
-		t.Fatal("could not get version:", minor)
-	}
-	if minor >= 21 {
-		tests = append(tests, "go1.21.go")
-	}
-	if minor >= 22 {
-		tests = append(tests, "go1.22/")
-	}
-	if minor >= 23 {
-		tests = append(tests, "go1.23/")
-	}
-	if minor >= 24 {
-		tests = append(tests, "typealias.go")
 	}
 
 	if *testTarget != "" {
@@ -139,7 +534,6 @@ func TestBuild(t *testing.T) {
 		switch runtime.GOOS {
 		case "darwin", "linux":
 			for _, scheduler := range []string{"threads", "none"} {
-				scheduler := scheduler
 				t.Run("finalizerinvariants.go-gc-conservative-scheduler-"+scheduler, func(t *testing.T) {
 					t.Parallel()
 					options := compileopts.Options(hostOptions)
@@ -149,6 +543,39 @@ func TestBuild(t *testing.T) {
 					runTest("finalizerinvariants.go", options, t, nil, nil)
 				})
 			}
+		}
+	})
+
+	t.Run("boehm-finalizers", func(t *testing.T) {
+		t.Parallel()
+		options := optionsFromTarget("wasm", sema)
+		options.GC = "boehm"
+		t.Run("finalizerlarge.go-graph", func(t *testing.T) {
+			t.Parallel()
+			testOptions := compileopts.Options(options)
+			testOptions.GlobalValues = map[string]map[string]string{
+				"main": {"finalizerLargeMode": "graph"},
+			}
+			runTest("finalizerlarge.go", testOptions, t, nil, nil)
+		})
+		for _, name := range []string{
+			"finalizer.go",
+			"finalizerbits.go",
+			"finalizeridle.go",
+			"finalizerlarge.go",
+			"finalizerinvariants.go",
+		} {
+			name := name
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				testOptions := compileopts.Options(options)
+				if name == "finalizerlarge.go" {
+					testOptions.GlobalValues = map[string]map[string]string{
+						"main": {"finalizerLargeMode": "runner-payload"},
+					}
+				}
+				runTest(name, testOptions, t, nil, nil)
+			})
 		}
 	})
 
@@ -199,6 +626,19 @@ func TestBuild(t *testing.T) {
 				diagnostics.CreateDiagnostics(err).WriteTo(w, "")
 				t.Fatal(w.String())
 			}
+		})
+
+		// Regression test: at -opt=0 the compiler does not always remove a
+		// local escaping through Queue.Push, so runGC used to allocate while
+		// marking the runqueue. runGC is //go:noheap, so a regression here
+		// makes the build fail with a linker error instead of silently
+		// hanging like it used to.
+		t.Run("opt=0-gc-cortex-m-qemu", func(t *testing.T) {
+			t.Parallel()
+			opts := optionsFromTarget("cortex-m-qemu", sema)
+			opts.Opt = "0"
+			emuCheck(t, opts)
+			runTestWithConfig("gc.go", t, opts, nil, nil)
 		})
 
 		t.Run("gc=none-runtime-panic", func(t *testing.T) {
@@ -259,13 +699,9 @@ func TestBuild(t *testing.T) {
 		})
 	})
 
-	if testing.Short() {
-		// Don't test other targets when the -short flag is used. Only test the
-		// host system.
-		return
-	}
-
-	if !*testOnlyCurrentOS {
+	// Short mode skips the targets that every host can test. Linux CI tests
+	// them without -short.
+	if !testing.Short() {
 		t.Run("EmulatedCortexM3", func(t *testing.T) {
 			t.Parallel()
 			runPlatTests(optionsFromTarget("cortex-m-qemu", sema), tests, t)
@@ -285,6 +721,7 @@ func TestBuild(t *testing.T) {
 			t.Parallel()
 
 			runPlatTests(optionsFromTarget("wasm", sema), tests, t)
+			runGCLivenessTest(optionsFromTarget("wasm", sema), t)
 			// Test with -gc=boehm.
 			t.Run("gc.go-boehm", func(t *testing.T) {
 				t.Parallel()
@@ -298,6 +735,7 @@ func TestBuild(t *testing.T) {
 			t.Parallel()
 			options := optionsFromTarget("wasip1", sema)
 			runPlatTests(options, tests, t)
+			runGCLivenessTest(options, t)
 			t.Run("cgo-realloc", func(t *testing.T) {
 				runTest("cgo-realloc/", options, t, nil, nil)
 			})
@@ -314,10 +752,14 @@ func TestBuild(t *testing.T) {
 		t.Run("WASIp2", func(t *testing.T) {
 			t.Parallel()
 			runPlatTests(optionsFromTarget("wasip2", sema), tests, t)
+			runGCLivenessTest(optionsFromTarget("wasip2", sema), t)
 		})
 	}
 
-	if runtime.GOOS == "linux" {
+	// Linux CI also tests the other Linux architectures without -short, so
+	// short mode skips them. Windows CI runs only in short mode, so
+	// Windows386 continues to run.
+	if runtime.GOOS == "linux" && !testing.Short() {
 		for name, osArch := range supportedLinuxArches {
 			options := optionsFromOSARCH(osArch, sema)
 			if options.GOARCH != runtime.GOARCH { // Native architecture already run above.
@@ -405,6 +847,10 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 			// output order, so only run it with non-threaded schedulers.
 			continue
 		}
+		if name == "coreassign.go" && spec.Scheduler != "cores" {
+			// Core assignment needs the cores scheduler.
+			continue
+		}
 		if options.GOOS == "linux" && (options.GOARCH == "arm" || options.GOARCH == "386") {
 			switch name {
 			case "timers.go":
@@ -449,7 +895,7 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 				// Does not pass due to high mark false positive rate.
 				continue
 
-			case "json.go", "stdlib.go", "testing.go":
+			case "buildinfo.go", "json.go", "stdlib.go", "testing.go":
 				// Too big for AVR. Doesn't fit in flash/RAM.
 				continue
 
@@ -495,14 +941,6 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 				continue
 			}
 		}
-		if options.Target == "" && options.GC == "" {
-			switch name {
-			case "finalizerinvariants.go":
-				// Skip the default host GC because it does not implement finalizers.
-				// Explicit conservative GC variants cover this test.
-				continue
-			}
-		}
 		if options.Target == "simavr" {
 			switch name {
 			case "finalizerinvariants.go":
@@ -514,11 +952,12 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			testOptions := compileopts.Options(options)
-			if name == "finalizerinvariants.go" || name == "finalizerlarge.go" {
+			switch name {
+			case "finalizerinvariants.go", "finalizerlarge.go", "interface.go", "interface-blank.go":
 				testOptions.Tags = append(append([]string(nil), options.Tags...), "runtime_asserts")
 			}
-			if testOptions.Target == "simavr" && name == "math.go" {
-				// This test exceeds simavr's default 384-byte goroutine stack.
+			if testOptions.Target == "simavr" && (name == "math.go" || name == "string.go") {
+				// These tests exceed simavr's default 384-byte goroutine stack.
 				testOptions.StackSize = 512
 			}
 			runTest(name, testOptions, t, nil, nil)
@@ -561,6 +1000,12 @@ func runPlatTests(options compileopts.Options, tests []string, t *testing.T) {
 			options.Scheduler = "none"
 			options.PanicUnwind = "explicit"
 			runTest("recover-explicit.go", options, t, nil, nil)
+		})
+		t.Run("calls.go-unwind-none", func(t *testing.T) {
+			t.Parallel()
+			options := compileopts.Options(options)
+			options.PanicUnwind = "none"
+			runTest("calls.go", options, t, nil, nil)
 		})
 	}
 }
@@ -626,6 +1071,16 @@ func optionsFromOSARCH(osarch string, sema chan struct{}) compileopts.Options {
 		options.GOMIPS = parts[2]
 	}
 	return options
+}
+
+// runGCLivenessTest runs testdata/gc-liveness-repro.go. Only targets with
+// stack objects can lose a GC root the way it reproduces, so it is registered
+// per wasm target instead of being part of the shared test list.
+func runGCLivenessTest(options compileopts.Options, t *testing.T) {
+	t.Run("gc-liveness-repro.go", func(t *testing.T) {
+		t.Parallel()
+		runTest("gc-liveness-repro.go", options, t, nil, nil)
+	})
 }
 
 func runTest(name string, options compileopts.Options, t *testing.T, cmdArgs, environmentVars []string) {
@@ -1158,7 +1613,6 @@ func checkOutput(t *testing.T, filename string, actual []byte) {
 
 func checkOutputData(t *testing.T, expectedOutput, actual []byte) {
 	t.Helper()
-	expectedOutput = bytes.ReplaceAll(expectedOutput, []byte("\r\n"), []byte("\n"))
 	actual = bytes.ReplaceAll(actual, []byte("\r\n"), []byte("\n"))
 
 	if !bytes.Equal(actual, expectedOutput) {
@@ -1377,6 +1831,25 @@ func TestTest(t *testing.T) {
 
 			emuCheck(t, targ.opts)
 
+			t.Run("StringComparisons", func(t *testing.T) {
+				t.Parallel()
+
+				var wg sync.WaitGroup
+				defer wg.Wait()
+
+				out := ioLogger(t, &wg)
+				defer out.Close()
+
+				opts := targ.opts
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/stringcompare", false, out, out, &opts, "")
+				if err != nil {
+					t.Errorf("test error: %v", err)
+				}
+				if !passed {
+					t.Error("test failed")
+				}
+			})
+
 			t.Run("Pass", func(t *testing.T) {
 				t.Parallel()
 
@@ -1389,7 +1862,7 @@ func TestTest(t *testing.T) {
 				defer out.Close()
 
 				opts := targ.opts
-				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/pass", out, out, &opts, "")
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/pass", false, out, out, &opts, "")
 				if err != nil {
 					t.Errorf("test error: %v", err)
 				}
@@ -1410,7 +1883,7 @@ func TestTest(t *testing.T) {
 				defer out.Close()
 
 				opts := targ.opts
-				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/fail", out, out, &opts, "")
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/fail", false, out, out, &opts, "")
 				if err != nil {
 					t.Errorf("test error: %v", err)
 				}
@@ -1437,7 +1910,7 @@ func TestTest(t *testing.T) {
 
 				var output bytes.Buffer
 				opts := targ.opts
-				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/nothing", io.MultiWriter(&output, out), out, &opts, "")
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/nothing", false, io.MultiWriter(&output, out), out, &opts, "")
 				if err != nil {
 					t.Errorf("test error: %v", err)
 				}
@@ -1461,7 +1934,7 @@ func TestTest(t *testing.T) {
 				defer out.Close()
 
 				opts := targ.opts
-				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/builderr", out, out, &opts, "")
+				passed, err := Test("github.com/tinygo-org/tinygo/tests/testing/builderr", false, out, out, &opts, "")
 				if err == nil {
 					t.Error("test did not error")
 				}
@@ -1475,16 +1948,14 @@ func TestTest(t *testing.T) {
 
 func ioLogger(t *testing.T, wg *sync.WaitGroup) io.WriteCloser {
 	r, w := io.Pipe()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer r.Close()
 
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			t.Log(scanner.Text())
 		}
-	}()
+	})
 
 	return w
 }
@@ -1510,19 +1981,33 @@ func TestGetListOfPackages(t *testing.T) {
 			},
 		},
 		{
+			pkgs: []string{"fmt", "./tests/testing/pass"},
+			expectedPkgs: []string{
+				"fmt",
+				"github.com/tinygo-org/tinygo/tests/testing/pass",
+			},
+		},
+		{
 			pkgs:          []string{"./tests/testing"},
 			expectesError: true,
 		},
 	}
 
 	for _, test := range tests {
-		actualPkgs, err := getListOfPackages(test.pkgs, &opts)
+		packages, err := getListOfPackages(test.pkgs, &opts)
 		if err != nil && !test.expectesError {
 			t.Errorf("unexpected error: %v", err)
 		} else if err == nil && test.expectesError {
 			t.Error("expected error, but got none")
 		}
 
+		var actualPkgs []string
+		for _, pkg := range packages {
+			actualPkgs = append(actualPkgs, pkg.ImportPath)
+			if pkg.Standard != (pkg.ImportPath == "fmt") {
+				t.Errorf("package %s: unexpected Standard value %v", pkg.ImportPath, pkg.Standard)
+			}
+		}
 		if !reflect.DeepEqual(test.expectedPkgs, actualPkgs) {
 			t.Errorf("expected two slices to be equal, expected %v got %v", test.expectedPkgs, actualPkgs)
 		}
@@ -1544,9 +2029,59 @@ func TestMain(m *testing.M) {
 				os.Exit(1)
 			}
 			os.Exit(0)
+		case "test-main":
+			os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+			flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+			main()
+			os.Exit(0)
 		}
+	}
+
+	// make test sets these to build TinyGo against the host LLVM.
+	for _, name := range []string{"CGO_CPPFLAGS", "CGO_CFLAGS", "CGO_CXXFLAGS"} {
+		os.Unsetenv(name)
 	}
 
 	// Run normal tests.
 	os.Exit(m.Run())
+}
+
+func TestInitAllDWARF(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS != "linux" {
+		t.Skip("test reads ELF DWARF")
+	}
+
+	options := optionsFromTarget("", sema)
+	config, err := builder.NewConfig(&options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := builder.Build("testdata/init.go", "", t.TempDir(), config)
+	if err != nil {
+		t.Fatal("failed to build binary:", err)
+	}
+	f, err := elf.Open(result.Binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	d, err := f.DWARF()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := d.Reader()
+	for {
+		entry, err := r.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil {
+			t.Fatal("no DWARF subprogram for runtime.initAll")
+		}
+		if entry.Tag == dwarf.TagSubprogram && entry.Val(dwarf.AttrName) == "runtime.initAll" {
+			return
+		}
+	}
 }

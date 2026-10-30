@@ -3,6 +3,7 @@ package msc
 import (
 	"machine"
 	"machine/usb"
+	"machine/usb/msc/scsi"
 )
 
 func setupPacketHandler(setup usb.Setup) bool {
@@ -12,7 +13,9 @@ func setupPacketHandler(setup usb.Setup) bool {
 	return false
 }
 
+// setupPacketHandler runs in the USB interrupt, so it unlocks without defer.
 func (m *msc) setupPacketHandler(setup usb.Setup) bool {
+	state := m.mu.lock()
 	ok := false
 	wValue := (uint16(setup.WValueH) << 8) | uint16(setup.WValueL)
 	switch setup.BRequest {
@@ -29,6 +32,7 @@ func (m *msc) setupPacketHandler(setup usb.Setup) bool {
 			ok = m.handleReset(setup, wValue)
 		}
 	}
+	m.mu.unlock(state)
 	return ok
 }
 
@@ -66,22 +70,25 @@ func (m *msc) handleClearFeature(setup usb.Setup, wValue uint16) bool {
 	}
 
 	wIndex := uint8(setup.WIndex & 0x7F)
+	isIn := (setup.WIndex & 0x80) != 0
 	if wIndex == usb.MSC_ENDPOINT_IN {
-		if (setup.WIndex & 0x80) != 0 {
+		if isIn {
 			m.clearStallEndpointIn(wIndex)
-			ok = true
-			if m.state == mscStateStatus {
-				m.sendCSW(m.respStatus)
-			}
 		} else {
 			m.clearStallEndpointOut(wIndex)
-			ok = true
 		}
+		ok = true
 	}
 
 	if ok {
 		machine.SendZlp()
 	}
+
+	// Send a CSW if needed to resume after the IN endpoint stall is cleared
+	if m.state == mscStateStatus && isIn && wIndex == usb.MSC_ENDPOINT_IN {
+		m.sendCSW(m.respStatus)
+	}
+
 	return ok
 }
 
@@ -103,20 +110,43 @@ func (m *msc) handleReset(setup usb.Setup, wValue uint16) bool {
 	if setup.WIndex != mscInterface || setup.WLength != 0 || wValue != 0 {
 		return false
 	}
-	// Reset to command waiting state
-	m.state = mscStateCmd
-
-	// Reset transfer state
-	m.resetBuffer(0)
-	m.senseKey = 0
-	m.addlSenseCode = 0
-	m.addlSenseQualifier = 0
+	m.resetState()
 
 	// Send a zero-length packet (ZLP) to indicate the reset is complete
 	machine.SendZlp()
 
 	// Return true to indicate successful reset
 	return true
+}
+
+// configurationReset runs when the host sets the configuration, for example
+// after a USB reset in the middle of a transfer.
+func configurationReset() {
+	if MSC != nil {
+		state := MSC.mu.lock()
+		MSC.resetState()
+		MSC.txStalled = false
+		MSC.rxStalled = false
+		// The endpoints were set up again, so a stale task must not ack OUT.
+		MSC.rxPending = false
+		MSC.mu.unlock(state)
+	}
+}
+
+// resetState goes back to waiting for a CBW and drops any queued read.
+func (m *msc) resetState() {
+	m.state = mscStateCmd
+	m.skipTxDone = false
+	m.cmdGen++
+	m.cachedBlock = -1
+	if m.taskCmd == scsi.CmdRead {
+		// A queued read does not own m.buf, so drop it now.
+		m.taskQueued = false
+	}
+	m.resetBuffer(0)
+	m.senseKey = 0
+	m.addlSenseCode = 0
+	m.addlSenseQualifier = 0
 }
 
 func (m *msc) stallEndpointIn(ep uint8) {

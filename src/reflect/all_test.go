@@ -3154,8 +3154,6 @@ func TestFieldByIndex(t *testing.T) {
 	}
 }
 
-/*
-
 func TestFieldByName(t *testing.T) {
 	for _, test := range fieldTests {
 		s := TypeOf(test.s)
@@ -3195,8 +3193,6 @@ func TestFieldByName(t *testing.T) {
 		}
 	}
 }
-
-*/
 
 func TestImportPath(t *testing.T) {
 	tests := []struct {
@@ -3347,6 +3343,10 @@ func TestVariadicType(t *testing.T) {
 	}
 	t.Error(s)
 }
+
+*/
+
+/*
 
 type inner struct {
 	x int
@@ -3623,8 +3623,6 @@ func TestIndex(t *testing.T) {
 	}
 }
 
-/*
-
 func TestSlice(t *testing.T) {
 	xs := []int{1, 2, 3, 4, 5, 6, 7, 8}
 	v := ValueOf(xs).Slice(3, 5).Interface().([]int)
@@ -3740,6 +3738,8 @@ func TestSetLenCap(t *testing.T) {
 	shouldPanic("SetLen", func() { va.SetLen(8) })
 	shouldPanic("SetCap", func() { va.SetCap(8) })
 }
+
+/*
 
 func TestVariadic(t *testing.T) {
 	var b strings.Builder
@@ -6723,6 +6723,8 @@ func TestZeroSet(t *testing.T) {
 	}
 }
 
+*/
+
 func TestFieldByIndexNil(t *testing.T) {
 	type P struct {
 		F int
@@ -6745,6 +6747,8 @@ func TestFieldByIndexNil(t *testing.T) {
 
 	t.Fatalf("did not panic")
 }
+
+/*
 
 // Given
 //	type Outer struct {
@@ -7782,8 +7786,6 @@ func TestMapIterNilMap(t *testing.T) {
 	}
 }
 
-/*
-
 func TestMapIterReset(t *testing.T) {
 	iter := new(MapIter)
 
@@ -7903,8 +7905,6 @@ func TestMapIterSafety(t *testing.T) {
 		t.Fatal("Next did not panic")
 	}()
 }
-
-*/
 
 func TestMapIterNext(t *testing.T) {
 	// The first call to Next should reflect any
@@ -8080,6 +8080,8 @@ func TestMethodCallValueCodePtr(t *testing.T) {
 	}
 }
 
+*/
+
 type A struct{}
 type B[T any] struct{}
 
@@ -8093,8 +8095,6 @@ func TestIssue50208(t *testing.T) {
 		t.Errorf("name of type parameter mismatched, want:%s, got:%s", want2, got)
 	}
 }
-
-*/
 
 func TestNegativeKindString(t *testing.T) {
 	x := -1

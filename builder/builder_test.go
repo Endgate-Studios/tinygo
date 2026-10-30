@@ -30,6 +30,7 @@ func TestClangAttributes(t *testing.T) {
 		"cortex-m7",
 		"esp32c3",
 		"esp32c6",
+		"esp32h2",
 		"esp32s3",
 		"fe310",
 		"gameboy-advance",
@@ -176,7 +177,7 @@ func checkFeatureFlags(t *testing.T, targetFeatures, clangFeatures string) {
 
 	// Build a set of Clang's features for fast lookup.
 	clangSet := make(map[string]bool) // feature name -> enabled
-	for _, f := range strings.Split(clangFeatures, ",") {
+	for f := range strings.SplitSeq(clangFeatures, ",") {
 		f = strings.TrimSpace(f)
 		if len(f) < 2 {
 			continue
@@ -188,7 +189,7 @@ func checkFeatureFlags(t *testing.T, targetFeatures, clangFeatures string) {
 
 	// Check each feature that TinyGo specifies.
 	var missing, conflicts []string
-	for _, f := range strings.Split(targetFeatures, ",") {
+	for f := range strings.SplitSeq(targetFeatures, ",") {
 		f = strings.TrimSpace(f)
 		if len(f) < 2 {
 			continue

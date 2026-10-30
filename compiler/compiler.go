@@ -50,6 +50,7 @@ type Config struct {
 	RelocationModel string
 	SizeLevel       int
 	TinyGoVersion   string // for llvm.ident
+	TrimPath        bool
 
 	// Various compiler options that determine how code is generated.
 	Scheduler          string
@@ -88,6 +89,8 @@ type compilerContext struct {
 	program          *ssa.Program
 	diagnostics      []error
 	functionInfos    map[*ssa.Function]functionInfo
+	globalInfos      map[*ssa.Global]globalInfo
+	pragmaErrors     map[*ast.Comment]bool
 	callProperties   map[*ssa.Function]functionCallProperties
 	asyncifyCatchers map[llvm.Type]llvm.Value
 	directCatchers   map[llvm.Value]llvm.Value
@@ -115,6 +118,8 @@ func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *C
 		machine:          machine,
 		targetData:       machine.CreateTargetData(),
 		functionInfos:    map[*ssa.Function]functionInfo{},
+		globalInfos:      map[*ssa.Global]globalInfo{},
+		pragmaErrors:     map[*ast.Comment]bool{},
 		callProperties:   map[*ssa.Function]functionCallProperties{},
 		asyncifyCatchers: map[llvm.Type]llvm.Value{},
 		directCatchers:   map[llvm.Value]llvm.Value{},
@@ -861,7 +866,8 @@ func (c *compilerContext) attachDebugInfoRawWithDefinition(f *ssa.Function, llvm
 // one.
 func (c *compilerContext) getDIFile(filename string) llvm.Metadata {
 	if _, ok := c.difiles[filename]; !ok {
-		dir, file := filepath.Split(filename)
+		recordedPath := c.loaderPkg.RecordedPath(filename)
+		dir, file := filepath.Split(recordedPath)
 		if dir != "" {
 			dir = dir[:len(dir)-1]
 		}
@@ -883,7 +889,7 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 	sort.Slice(members, func(i, j int) bool {
 		iPos := pkg.Members[members[i]].Pos()
 		jPos := pkg.Members[members[j]].Pos()
-		if i == j {
+		if iPos == jPos {
 			// Cannot sort by pos, so do it by name.
 			return members[i] < members[j]
 		}
@@ -1206,6 +1212,9 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	}
 
 	b.addStandardDefinedAttributes(b.llvmFn)
+	if b.info.noruntime {
+		b.llvmFn.AddFunctionAttr(b.ctx.CreateStringAttribute("tinygo-noruntime", ""))
+	}
 	if !b.info.exported {
 		// Do not set visibility for local linkage (internal or private).
 		// Otherwise a "local linkage requires default visibility"
@@ -1270,6 +1279,11 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		} else if b.fn.Syntax() != nil {
 			// Create debug info file if needed.
 			b.difunc = b.attachDebugInfo(b.fn)
+		} else if b.fn.Pos().IsValid() {
+			// Synthetic wrappers such as $bound and $thunk have no syntax but share the
+			// position of the wrapped method. See https://pkg.go.dev/golang.org/x/tools/go/ssa#Function
+			pos := b.program.Fset.Position(b.fn.Pos())
+			b.difunc = b.attachDebugInfoRaw(b.fn, b.llvmFn, "", pos.Filename, pos.Line)
 		}
 		b.setDebugLocation(b.fn.Pos())
 	}
@@ -1689,8 +1703,8 @@ func (b *builder) isOversizedAggregate(typ types.Type) bool {
 
 func (b *builder) isAggregateValue(typ types.Type) bool {
 	if tuple, ok := typ.(*types.Tuple); ok {
-		for i := 0; i < tuple.Len(); i++ {
-			if !isLLVMValueType(tuple.At(i).Type()) {
+		for v := range tuple.Variables() {
+			if !isLLVMValueType(v.Type()) {
 				return false
 			}
 		}
@@ -1715,6 +1729,101 @@ func (b *builder) getValuePointer(value ssa.Value) llvm.Value {
 	ptr := b.createIndirectStorage(llvmType, value.Name())
 	b.storeValue(ptr, value)
 	return ptr
+}
+
+func isMemequalArrayComparison(expr *ssa.BinOp) bool {
+	typ, ok := expr.X.Type().Underlying().(*types.Array)
+	return ok &&
+		typ.Len() > hashArrayUnrollLimit &&
+		isBinaryComparable(typ.Elem()) &&
+		(expr.Op == token.EQL || expr.Op == token.NEQ)
+}
+
+// isRangeLoopCompare returns whether expr is the (index + 1) < len(slice) test
+// of rangeIndexed in golang.org/x/tools/go/ssa. Neither side is ever negative.
+func isRangeLoopCompare(expr *ssa.BinOp) bool {
+	if expr.Op != token.LSS || expr.Block().Comment != "rangeindex.loop" {
+		return false
+	}
+	call, ok := expr.Y.(*ssa.Call)
+	if !ok {
+		return false
+	}
+	if builtin, ok := call.Call.Value.(*ssa.Builtin); !ok || builtin.Name() != "len" {
+		return false
+	}
+	next, ok := expr.X.(*ssa.BinOp)
+	if !ok || next.Op != token.ADD {
+		return false
+	}
+	if _, ok := next.X.(*ssa.Phi); !ok {
+		return false
+	}
+	one, ok := next.Y.(*ssa.Const)
+	return ok && one.Int64() == 1
+}
+
+func canUseDereferencePointer(unop *ssa.UnOp) bool {
+	if !isDereference(unop) {
+		return false
+	}
+	comparison := adjacentComparison(unop, isDereference)
+	return comparison != nil && isMemequalArrayComparison(comparison)
+}
+
+func isDereference(value ssa.Value) bool {
+	unop, ok := value.(*ssa.UnOp)
+	return ok && unop.Op == token.MUL
+}
+
+// adjacentComparison returns the only binary operation that uses instr, if
+// only debug refs and other operands accepted by operandOK run in between.
+func adjacentComparison(instr ssa.Instruction, operandOK func(ssa.Value) bool) *ssa.BinOp {
+	value, ok := instr.(ssa.Value)
+	if !ok {
+		return nil
+	}
+	referrers := value.Referrers()
+	if referrers == nil {
+		return nil
+	}
+	var comparison *ssa.BinOp
+	for _, referrer := range *referrers {
+		switch referrer := referrer.(type) {
+		case *ssa.DebugRef:
+		case *ssa.BinOp:
+			if comparison != nil {
+				return nil
+			}
+			comparison = referrer
+		default:
+			return nil
+		}
+	}
+	if comparison == nil || instr.Block() != comparison.Block() {
+		return nil
+	}
+
+	found := false
+	for _, instruction := range instr.Block().Instrs {
+		if !found {
+			found = instruction == instr
+			continue
+		}
+		if instruction == comparison {
+			return comparison
+		}
+		switch instruction := instruction.(type) {
+		case *ssa.DebugRef:
+		case ssa.Value:
+			if comparison.X != instruction && comparison.Y != instruction || !operandOK(instruction) {
+				return nil
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 func (b *builder) getCallArgument(value ssa.Value, indirect bool) llvm.Value {
@@ -2456,6 +2565,24 @@ func (c *compilerContext) maxSliceSize(elementType llvm.Type) uint64 {
 	return maxSize
 }
 
+// goHeapAddressBits matches heapAddrBits for Go's common 64-bit targets.
+// See https://github.com/golang/go/blob/2ff5743d9fd52fac166225e75df0c2c1edf82abb/src/runtime/malloc.go#L207-L220.
+const goHeapAddressBits = 48
+
+// maxSliceAllocationSize determines the maximum length of an allocated slice.
+func (c *compilerContext) maxSliceAllocationSize(elementType llvm.Type) uint64 {
+	maxSize := c.maxSliceSize(elementType)
+	if c.uintptrType.IntTypeWidth() <= goHeapAddressBits {
+		return maxSize
+	}
+
+	elementSize := c.targetData.TypeAllocSize(elementType)
+	if elementSize == 0 {
+		return maxSize
+	}
+	return min(maxSize, (uint64(1)<<goHeapAddressBits)/elementSize)
+}
+
 // createExpr translates a Go SSA expression to LLVM IR. This can be zero, one,
 // or multiple LLVM IR instructions and/or runtime calls.
 func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
@@ -2489,8 +2616,24 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			return buf, nil
 		}
 	case *ssa.BinOp:
+		if isMemequalArrayComparison(expr) {
+			typ := expr.X.Type().Underlying().(*types.Array)
+			x := b.getValuePointer(expr.X)
+			y := b.getValuePointer(expr.Y)
+			size := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(b.getLLVMType(typ)), false)
+			result := b.createRuntimeCall("memequal", []llvm.Value{x, y, size}, "arraycmp")
+			if expr.Op == token.NEQ {
+				result = b.CreateNot(result, "")
+			}
+			return result, nil
+		}
 		x := b.getValue(expr.X, getPos(expr))
 		y := b.getValue(expr.Y, getPos(expr))
+		if isRangeLoopCompare(expr) {
+			// An unsigned compare gives the same result here. It matches the
+			// unsigned bounds check of the element, which LLVM then removes.
+			return b.CreateICmp(llvm.IntULT, x, y, ""), nil
+		}
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
 		return b.createFunctionCall(expr.Common())
@@ -2539,6 +2682,12 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		panic("const is not an expression")
 	case *ssa.Convert:
 		x := b.getValue(expr.X, getPos(expr))
+		if isByteSliceToStringComparison(expr) {
+			str := llvm.Undef(b.getLLVMRuntimeType("_string"))
+			str = b.CreateInsertValue(str, b.CreateExtractValue(x, 0, ""), 0, "")
+			str = b.CreateInsertValue(str, b.CreateExtractValue(x, 1, ""), 1, "")
+			return str, nil
+		}
 		return b.createConvert(expr.X.Type(), expr.Type(), x, expr.Pos())
 	case *ssa.Extract:
 		if _, ok := expr.Tuple.(*ssa.Select); ok {
@@ -2706,7 +2855,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		elemSizeValue := llvm.ConstInt(b.uintptrType, elemSize, false)
 
 		maxSize := b.maxSliceSize(llvmElemType)
-		if elemSize > maxSize {
+		if maxSize == 0 {
 			// This seems to be checked by the typechecker already, but let's
 			// check it again just to be sure.
 			return llvm.Value{}, b.makeError(expr.Pos(), fmt.Sprintf("slice element type is too big (%v bytes)", elemSize))
@@ -2715,8 +2864,9 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		// Bounds checking.
 		lenType := expr.Len.Type().Underlying().(*types.Basic)
 		capType := expr.Cap.Type().Underlying().(*types.Basic)
-		maxSizeValue := llvm.ConstInt(b.uintptrType, maxSize, false)
-		b.createSliceBoundsCheck(maxSizeValue, sliceLen, sliceCap, sliceCap, lenType, capType, capType)
+		maxAllocationSize := b.maxSliceAllocationSize(llvmElemType)
+		maxSizeValue := llvm.ConstInt(b.uintptrType, maxAllocationSize, false)
+		b.createSliceBoundsCheck(maxSizeValue, sliceLen, sliceCap, sliceCap, lenType, capType, capType, false)
 
 		// Allocate the backing array.
 		sliceCapCast, err := b.createConvert(expr.Cap.Type(), types.Typ[types.Uintptr], sliceCap, expr.Pos())
@@ -2826,7 +2976,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 
 			b.createNilCheck(expr.X, value, "slice")
-			b.createSliceBoundsCheck(llvmLen, low, high, max, lowType, highType, maxType)
+			b.createSliceBoundsCheck(llvmLen, low, high, max, lowType, highType, maxType, false)
 
 			// Truncate ints bigger than uintptr. This is after the bounds
 			// check so it's safe.
@@ -2866,7 +3016,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				max = oldCap
 			}
 
-			b.createSliceBoundsCheck(oldCap, low, high, max, lowType, highType, maxType)
+			b.createSliceBoundsCheck(oldCap, low, high, max, lowType, highType, maxType, expr.High == nil && expr.Max == nil)
 
 			// Truncate ints bigger than uintptr. This is after the bounds
 			// check so it's safe.
@@ -2910,7 +3060,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 				high = oldLen
 			}
 
-			b.createSliceBoundsCheck(oldLen, low, high, high, lowType, highType, maxType)
+			b.createSliceBoundsCheck(oldLen, low, high, high, lowType, highType, maxType, false)
 
 			// Truncate ints bigger than uintptr. This is after the bounds
 			// check so it's safe.
@@ -2948,6 +3098,52 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	default:
 		return llvm.Value{}, b.makeError(expr.Pos(), "todo: unknown expression: "+expr.String())
 	}
+}
+
+func isByteSliceToStringComparison(expr *ssa.Convert) bool {
+	if !isByteSliceToStringConvert(expr) {
+		return false
+	}
+	comparison := adjacentComparison(expr, isStringComparisonOperand)
+	return comparison != nil && isComparisonOp(comparison.Op)
+}
+
+// isStringComparisonOperand reports whether value cannot write memory or call
+// code, so it is safe to run between a conversion and its comparison.
+func isStringComparisonOperand(value ssa.Value) bool {
+	switch value := value.(type) {
+	case *ssa.UnOp:
+		return value.Op == token.MUL
+	case *ssa.Slice:
+		basic, ok := value.X.Type().Underlying().(*types.Basic)
+		return ok && basic.Info()&types.IsString != 0
+	}
+	return isByteSliceToStringConvert(value)
+}
+
+func isComparisonOp(op token.Token) bool {
+	switch op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return true
+	}
+	return false
+}
+
+func isByteSliceToStringConvert(value ssa.Value) bool {
+	expr, ok := value.(*ssa.Convert)
+	if !ok {
+		return false
+	}
+	target, ok := expr.Type().Underlying().(*types.Basic)
+	if !ok || target.Info()&types.IsString == 0 {
+		return false
+	}
+	source, ok := expr.X.Type().Underlying().(*types.Slice)
+	if !ok {
+		return false
+	}
+	element, ok := source.Elem().Underlying().(*types.Basic)
+	return ok && element.Kind() == types.Byte
 }
 
 // createBinOp creates a LLVM binary operation (add, sub, mul, etc) for a Go
@@ -3315,15 +3511,27 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 		//     Array values are comparable if values of the array element type
 		//     are comparable. Two array values are equal if their corresponding
 		//     elements are equal.
-		result := llvm.ConstInt(b.ctx.Int1Type(), 1, true)
-		for i := 0; i < int(typ.Len()); i++ {
-			xField := b.CreateExtractValue(x, i, "")
-			yField := b.CreateExtractValue(y, i, "")
-			fieldEqual, err := b.createBinOp(token.EQL, typ.Elem(), typ.Elem(), xField, yField, pos)
-			if err != nil {
-				return llvm.Value{}, err
+		var result llvm.Value
+		if typ.Len() > hashArrayUnrollLimit && isBinaryComparable(typ.Elem()) {
+			xPtr, xSize := b.createTemporaryAlloca(x.Type(), "arraycmp.x")
+			yPtr, ySize := b.createTemporaryAlloca(y.Type(), "arraycmp.y")
+			b.CreateStore(x, xPtr)
+			b.CreateStore(y, yPtr)
+			size := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(x.Type()), false)
+			result = b.createRuntimeCall("memequal", []llvm.Value{xPtr, yPtr, size}, "arraycmp")
+			b.emitLifetimeEnd(xPtr, xSize)
+			b.emitLifetimeEnd(yPtr, ySize)
+		} else {
+			result = llvm.ConstInt(b.ctx.Int1Type(), 1, true)
+			for i := 0; i < int(typ.Len()); i++ {
+				xField := b.CreateExtractValue(x, i, "")
+				yField := b.CreateExtractValue(y, i, "")
+				fieldEqual, err := b.createBinOp(token.EQL, typ.Elem(), typ.Elem(), xField, yField, pos)
+				if err != nil {
+					return llvm.Value{}, err
+				}
+				result = b.CreateAnd(result, fieldEqual, "")
 			}
-			result = b.CreateAnd(result, fieldEqual, "")
 		}
 		switch op {
 		case token.EQL: // ==
@@ -3539,7 +3747,7 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 				}
 				return b.createRuntimeCall("stringFromUnicode", []llvm.Value{value}, ""), nil
 			case *types.Slice:
-				switch typeFrom.Elem().(*types.Basic).Kind() {
+				switch typeFrom.Elem().Underlying().(*types.Basic).Kind() {
 				case types.Byte:
 					return b.createRuntimeCall("stringFromBytes", []llvm.Value{value}, ""), nil
 				case types.Rune:
@@ -3767,6 +3975,9 @@ func (b *builder) createUnOp(unop *ssa.UnOp) (llvm.Value, error) {
 			return fn, nil
 		} else {
 			b.createNilCheck(unop.X, x, "deref")
+			if canUseDereferencePointer(unop) {
+				return x, nil
+			}
 			return b.loadFromStorage(x, unop.Type(), ""), nil
 		}
 	case token.XOR: // ^x, toggle all bits in integer

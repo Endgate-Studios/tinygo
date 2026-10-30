@@ -1,4 +1,4 @@
-//go:build (scheduler.tasks || scheduler.cores) && !tinygo.riscv && !(scheduler.cores && esp32s3)
+//go:build (scheduler.tasks || scheduler.cores) && !tinygo.riscv
 
 package task
 

@@ -12,28 +12,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/token"
 	"go/types"
 	"hash/crc32"
+	"io"
 	"maps"
 	"math/bits"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/compiler"
+	"github.com/tinygo-org/tinygo/compiler/llvmutil"
 	"github.com/tinygo-org/tinygo/goenv"
 	"github.com/tinygo-org/tinygo/interp"
 	"github.com/tinygo-org/tinygo/loader"
 	"github.com/tinygo-org/tinygo/stacksize"
 	"github.com/tinygo-org/tinygo/transform"
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -128,6 +135,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		},
 		"testing": {},
 	}
+	if config.TrimPath() {
+		globalValues["runtime"]["goroot"] = ""
+	}
 	if config.TestConfig.CompileTestBinary {
 		// The testing.testBinary is set to "1" when in a test.
 		// This is needed for testing.Testing() to work correctly.
@@ -214,6 +224,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		RelocationModel: config.RelocationModel(),
 		SizeLevel:       sizeLevel,
 		TinyGoVersion:   goenv.Version(),
+		TrimPath:        config.TrimPath(),
 
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: config.AutomaticStackSize(),
@@ -256,10 +267,33 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		return result, err
 	}
 
+	// Embed module build information so runtime/debug.ReadBuildInfo() works,
+	// mirroring what the standard `go build` toolchain does. We fill
+	// runtime/debug.modinfo (a plain string global) from the module info that
+	// `go list` already reported for the loaded packages; runtime/debug parses
+	// it back into a *BuildInfo. An explicit -ldflags="-X runtime/debug.modinfo=..."
+	// takes precedence. This is skipped in GOPATH mode (no module info) and when
+	// the main package isn't in a module.
+	if _, overridden := globalValues["runtime/debug"]["modinfo"]; !overridden {
+		mi, err := moduleBuildInfo(lprogram, config.Options.BuildVCS)
+		if err != nil {
+			return result, err
+		}
+		if mi != "" {
+			if globalValues["runtime/debug"] == nil {
+				globalValues["runtime/debug"] = map[string]string{}
+			}
+			globalValues["runtime/debug"]["modinfo"] = mi
+		}
+	}
+
 	// Store which filesystem paths map to which package name.
 	result.PackagePathMap = make(map[string]string, len(lprogram.Packages))
 	for _, pkg := range lprogram.Sorted() {
 		result.PackagePathMap[pkg.OriginalDir()] = pkg.Pkg.Path()
+		if config.TrimPath() {
+			result.PackagePathMap[filepath.FromSlash(pkg.RecordedDir())] = pkg.Pkg.Path()
+		}
 	}
 
 	// Strip default initializers for -X globals from the type info before
@@ -330,7 +364,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 						}
 					}
 
-					job.result, err = createEmbedObjectFile(string(data), hexSum, name, pkg.OriginalDir(), tmpdir, compilerConfig)
+					job.result, err = createEmbedObjectFile(string(data), hexSum, name, pkg.RecordedDir(), tmpdir, compilerConfig)
 					return err
 				},
 			}
@@ -364,7 +398,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					CompilerBuildID:  string(compilerBuildID),
 					LLVMVersion:      llvm.Version,
 					Config:           compilerConfig,
-					CFlags:           pkg.CFlags,
+					CFlags:           pkg.RecordedCFlags(),
 					FileHashes:       make(map[string]string, len(pkg.FileHashes)),
 					EmbeddedFiles:    make(map[string]string, len(allFiles)),
 					Imports:          make(map[string]string, len(pkg.Pkg.Imports())),
@@ -372,7 +406,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					UndefinedGlobals: undefinedGlobals,
 				}
 				for filePath, hash := range pkg.FileHashes {
-					actionID.FileHashes[filePath] = hex.EncodeToString(hash)
+					actionID.FileHashes[pkg.RecordedPath(filePath)] = hex.EncodeToString(hash)
 				}
 				for name, files := range allFiles {
 					actionID.EmbeddedFiles[name] = files[0].Hash
@@ -431,9 +465,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				// These headers could be compiled in parallel but the benefit
 				// is so small that it's probably not worth parallelizing.
 				// Packages are compiled independently anyway.
-				for _, cgoHeader := range pkg.CGoHeaders {
+				packageNameHash := sha256.Sum256([]byte(pkg.ImportPath))
+				for i, cgoHeader := range pkg.CGoHeaders {
 					// Store the header text in a temporary file.
-					f, err := os.CreateTemp(tmpdir, "cgosnippet-*.c")
+					f, err := os.Create(filepath.Join(tmpdir, fmt.Sprintf("cgosnippet-%x-%d.c", packageNameHash, i)))
 					if err != nil {
 						return err
 					}
@@ -445,6 +480,12 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 
 					// Compile the code (if there is any) to bitcode.
 					flags := append([]string{"-c", "-emit-llvm", "-o", f.Name() + ".bc", f.Name()}, pkg.CFlags...)
+					flags = append(flags, "-working-directory="+tmpdir)
+					if config.TrimPath() {
+						flags = append(flags,
+							"-ffile-prefix-map="+tmpdir+"="+config.CSourcePath(pkg.RecordedDir()),
+						)
+					}
 					if config.Options.PrintCommands != nil {
 						config.Options.PrintCommands("clang", flags...)
 					}
@@ -547,6 +588,18 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		packageJobs = append(packageJobs, job)
 	}
 
+	// The link job needs only these names, so go/ssa can be freed before it.
+	var initFuncs []string
+	for _, pkg := range lprogram.Sorted() {
+		initFuncs = append(initFuncs, pkg.Pkg.Path()+".init")
+	}
+	debugInitAll := config.Debug() && !config.Options.SkipDWARF
+	var initAllPos token.Position
+	if debugInitAll {
+		initAllPos = program.Fset.Position(program.ImportedPackage("runtime").Members["initAll"].Pos())
+		initAllPos.Filename = lprogram.Packages["runtime"].RecordedPath(initAllPos.Filename)
+	}
+
 	// Add job that links and optimizes all packages together.
 	var mod llvm.Module
 	defer func() {
@@ -563,8 +616,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		run: func(*compileJob) error {
 			// Load and link all the bitcode files. This does not yet optimize
 			// anything, it only links the bitcode files together.
+			debug.FreeOSMemory()
 			ctx := llvm.NewContext()
 			mod = ctx.NewModule("main")
+			// Use one Linker for all packages. LinkModules rescans the whole
+			// module on every call.
+			linker := llvm.NewLinker(mod)
+			defer linker.Dispose()
 			for _, pkgJob := range packageJobs {
 				pkgMod, err := ctx.ParseBitcodeFile(pkgJob.result)
 				if err != nil {
@@ -587,7 +645,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					}
 					fn.SetLinkage(llvm.LinkOnceODRLinkage)
 				}
-				err = llvm.LinkModules(mod, pkgMod)
+				err = linker.LinkModule(pkgMod)
 				if err != nil {
 					return fmt.Errorf("failed to link module: %w", err)
 				}
@@ -600,7 +658,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			// works fine. See:
 			// https://github.com/tinygo-org/tinygo/issues/4810
 			globalsMod := makeGlobalsModule(ctx, globalValues, machine)
-			llvm.LinkModules(mod, globalsMod)
+			if err := linker.LinkModule(globalsMod); err != nil {
+				return fmt.Errorf("failed to link globals module: %w", err)
+			}
 
 			// Create runtime.initAll function that calls the runtime
 			// initializer of each package.
@@ -613,11 +673,14 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			irbuilder := mod.Context().NewBuilder()
 			defer irbuilder.Dispose()
 			irbuilder.SetInsertPointAtEnd(block)
+			if debugInitAll {
+				addInitAllDebugInfo(mod, llvmInitFn, irbuilder, initAllPos, config.TrimPath())
+			}
 			ptrType := llvm.PointerType(mod.Context().Int8Type(), 0)
-			for _, pkg := range lprogram.Sorted() {
-				pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
+			for _, name := range initFuncs {
+				pkgInit := mod.NamedFunction(name)
 				if pkgInit.IsNil() {
-					panic("init not found for " + pkg.Pkg.Path())
+					panic("init not found for " + name)
 				}
 				irbuilder.CreateCall(pkgInit.GlobalValueType(), pkgInit, []llvm.Value{llvm.Undef(ptrType)}, "")
 			}
@@ -667,7 +730,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			// Make sure stack sizes are loaded from a separate section so they can be
 			// modified after linking.
 			if config.AutomaticStackSize() {
-				stackSizeLoads = transform.CreateStackSizeLoads(mod, config)
+				stackSizeLoads, err = transform.CreateStackSizeLoads(mod, config)
+				if err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -720,8 +786,18 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		result:       objfile,
 		run: func(*compileJob) error {
 			llvmBuf := llvm.WriteThinLTOBitcodeToMemoryBuffer(mod)
-			defer llvmBuf.Dispose()
-			return os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
+			err := os.WriteFile(objfile, llvmBuf.Bytes(), 0666)
+			llvmBuf.Dispose()
+			// Only the stack size analysis in the link job reads the module
+			// after this point, so free it when that analysis will not run.
+			if !config.Options.PrintStacks && !config.AutomaticStackSize() {
+				ctx := mod.Context()
+				mod.Dispose()
+				ctx.Dispose()
+				mod = llvm.Module{}
+				releaseCHeap()
+			}
+			return err
 		},
 	}
 
@@ -794,7 +870,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		job := &compileJob{
 			description: "compile extra file " + path,
 			run: func(job *compileJob) error {
-				result, err := compileAndCacheCFile(abspath, tmpdir, config.CFlags(false), config.Options.PrintCommands)
+				var compileConfig *cFileCompileConfig
+				if config.TrimPath() {
+					compileConfig = &cFileCompileConfig{
+						recordedPath: config.CSourcePath(filepath.Join("github.com/tinygo-org/tinygo", path)),
+					}
+				}
+				result, err := compileAndCacheCFile(abspath, tmpdir, config.CFlags(false), compileConfig, config.Options.PrintCommands)
 				job.result = result
 				return err
 			},
@@ -802,21 +884,36 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		linkerDependencies = append(linkerDependencies, job)
 	}
 
-	// Add jobs to compile C files in all packages. This is part of CGo.
+	// Add jobs to compile C and C++ files in all packages. This is part of CGo.
 	// TODO: do this as part of building the package to be able to link the
 	// bitcode files together.
 	for _, pkg := range lprogram.Sorted() {
-		for _, filename := range pkg.CFiles {
-			abspath := filepath.Join(pkg.OriginalDir(), filename)
-			job := &compileJob{
-				description: "compile CGo file " + abspath,
-				run: func(job *compileJob) error {
-					result, err := compileAndCacheCFile(abspath, tmpdir, pkg.CFlags, config.Options.PrintCommands)
-					job.result = result
-					return err
-				},
+		for _, source := range []struct {
+			files []string
+			flags []string
+		}{
+			{pkg.CFiles, pkg.CFlags},
+			{pkg.CXXFiles, pkg.CXXFlags},
+		} {
+			for _, filename := range source.files {
+				abspath := filepath.Join(pkg.OriginalDir(), filename)
+				job := &compileJob{
+					description: "compile CGo file " + abspath,
+					run: func(job *compileJob) error {
+						cflags := source.flags
+						var compileConfig *cFileCompileConfig
+						if config.TrimPath() {
+							compileConfig = &cFileCompileConfig{
+								recordedPath: config.CSourcePath(pkg.RecordedPath(abspath)),
+							}
+						}
+						result, err := compileAndCacheCFile(abspath, tmpdir, cflags, compileConfig, config.Options.PrintCommands)
+						job.result = result
+						return err
+					},
+				}
+				linkerDependencies = append(linkerDependencies, job)
 			}
-			linkerDependencies = append(linkerDependencies, job)
 		}
 	}
 
@@ -864,11 +961,18 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		description:  "link",
 		dependencies: linkerDependencies,
 		run: func(job *compileJob) error {
-			for _, dependency := range job.dependencies {
+			for i, dependency := range job.dependencies {
 				if dependency.result == "" {
 					return errors.New("dependency without result: " + dependency.description)
 				}
-				ldflags = append(ldflags, dependency.result)
+				linkerInput := dependency.result
+				if config.TrimPath() && config.LinkerFlavor() == "darwin" {
+					linkerInput = filepath.Join(tmpdir, fmt.Sprintf("link-input-%d%s", i, filepath.Ext(linkerInput)))
+					if err := linkOrCopyFile(dependency.result, linkerInput); err != nil {
+						return err
+					}
+				}
+				ldflags = append(ldflags, linkerInput)
 			}
 			ldflags = append(ldflags, "-mllvm", "-mcpu="+config.CPU())
 			ldflags = append(ldflags, "-mllvm", "-mattr="+config.Features()) // needed for MIPS softfloat
@@ -880,9 +984,15 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"))
 			case "darwin":
 				// Options for the ld64-compatible lld linker.
-				ldflags = append(ldflags,
-					"--lto-O"+strconv.Itoa(speedLevel),
-					"-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
+				ldflags = append(ldflags, "--lto-O"+strconv.Itoa(speedLevel))
+				// LLD 15 embeds cache paths in OSO symbols, unlike LLD 16+.
+				// Fixed in LLD 16 by https://reviews.llvm.org/D131624.
+				if !config.TrimPath() || llvmutil.Version() >= 16 {
+					ldflags = append(ldflags, "-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
+				}
+				if config.TrimPath() {
+					ldflags = append(ldflags, "-oso_prefix", tmpdir+string(filepath.Separator))
+				}
 			case "gnu":
 				// Options for the ELF linker.
 				ldflags = append(ldflags,
@@ -909,7 +1019,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			if config.SharedLibrary() {
 				err = linkSharedLibrary(config.Target.Linker, ldflags...)
 			} else {
-				err = link(config.Target.Linker, ldflags...)
+				var linkEnv []string
+				if config.TrimPath() && config.LinkerFlavor() == "darwin" {
+					linkEnv = append(linkEnv, "ZERO_AR_DATE=1")
+				}
+				err = link(config.Target.Linker, ldflags, linkEnv...)
 			}
 			if err != nil {
 				return err
@@ -1113,7 +1227,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		if err != nil {
 			return result, err
 		}
-	case "esp32", "esp32-img", "esp32c3", "esp32s3", "esp32c6", "esp8266":
+	case "esp32", "esp32-img", "esp32c3", "esp32s3", "esp32c6", "esp32h2", "esp8266":
 		// Special format for the ESP family of chips (parsed by the ROM
 		// bootloader).
 		result.Binary = filepath.Join(tmpdir, "main"+outext)
@@ -1133,6 +1247,34 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	}
 
 	return result, nil
+}
+
+func linkOrCopyFile(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(destination, source)
+	closeErr := destination.Close()
+	if copyErr != nil {
+		os.Remove(dst)
+		return copyErr
+	}
+	if closeErr != nil {
+		os.Remove(dst)
+		return closeErr
+	}
+	return nil
 }
 
 // createEmbedObjectFile creates a new object file with the given contents, for
@@ -1224,7 +1366,8 @@ func createEmbedObjectFile(data, hexSum, sourceFile, sourceDir, tmpdir string, c
 		return "", err
 	}
 	defer machine.Dispose()
-	outfile, err := os.CreateTemp(tmpdir, "embed-"+hexSum+"-*.o")
+	sourcePathHash := sha256.Sum256([]byte(filepath.ToSlash(filepath.Join(sourceDir, sourceFile))))
+	outfile, err := os.Create(filepath.Join(tmpdir, "embed-"+hexSum+"-"+hex.EncodeToString(sourcePathHash[:8])+".o"))
 	if err != nil {
 		return "", err
 	}
@@ -1273,6 +1416,40 @@ func optimizeProgram(mod llvm.Module, config *compileopts.Config) error {
 	}
 
 	return nil
+}
+
+// addInitAllDebugInfo gives runtime.initAll a subprogram so that code emitted
+// into it by interp or the inliner keeps its line information.
+func addInitAllDebugInfo(mod llvm.Module, fn llvm.Value, irbuilder llvm.Builder, pos token.Position, trimPath bool) {
+	dir, file := filepath.Split(pos.Filename)
+	compileDir, compileFile := filepath.Clean(dir), file
+	if trimPath {
+		compileDir, compileFile = "", pos.Filename
+	}
+	dibuilder := llvm.NewDIBuilder(mod)
+	defer dibuilder.Destroy()
+	dibuilder.CreateCompileUnit(llvm.DICompileUnit{
+		Language:  0xb, // DW_LANG_C99 (0xc, off-by-one?)
+		File:      compileFile,
+		Dir:       compileDir,
+		Producer:  "TinyGo",
+		Optimized: true,
+	})
+	difile := dibuilder.CreateFile(file, filepath.Clean(dir))
+	subprogram := dibuilder.CreateFunction(difile, llvm.DIFunction{
+		Name:         "runtime.initAll",
+		LinkageName:  "runtime.initAll",
+		File:         difile,
+		Line:         pos.Line,
+		Type:         dibuilder.CreateSubroutineType(llvm.DISubroutineType{File: difile}),
+		LocalToUnit:  true,
+		IsDefinition: true,
+		Flags:        llvm.FlagPrototyped,
+		Optimized:    true,
+	})
+	fn.SetSubprogram(subprogram)
+	irbuilder.SetCurrentDebugLocation(uint(pos.Line), 0, subprogram, llvm.Metadata{})
+	dibuilder.Finalize()
 }
 
 func makeGlobalsModule(ctx llvm.Context, globals map[string]map[string]string, machine llvm.TargetMachine) llvm.Module {
@@ -1635,4 +1812,249 @@ func b2u8(b bool) uint8 {
 		return 1
 	}
 	return 0
+}
+
+// moduleBuildInfo constructs the module build-info string embedded into the
+// runtime/debug.modinfo global, in the same textual format that
+// runtime/debug.BuildInfo.String() produces (minus the leading "go" line, which
+// runtime/debug supplies from runtime.Version()). runtime/debug.ReadBuildInfo
+// parses it back into a *BuildInfo, so `go build`-style version reporting works
+// under TinyGo without -ldflags. It returns "" when there is no module
+// information to embed (e.g. GOPATH mode, or a main package outside any module).
+//
+// The layout is the reverse of runtime/debug.ParseBuildInfo:
+//
+//	path\t<main package import path>\n
+//	mod\t<main module path>\t<version>\t<sum>\n
+//	dep\t<module path>\t<version>\t<sum>\n   (one per contributing module, sorted)
+//
+// The main module version is reported as "(devel)" for a local checkout, as the
+// go toolchain does; VCS-derived pseudo-version stamping is a separate follow-up.
+// buildVCS selects whether the vcs.* settings and a VCS-derived version are
+// stamped in: "false" skips it, "true" and "auto" (and "", the zero value, for
+// callers that don't set it) stamp when a usable repository is found. This
+// mirrors the go toolchain's -buildvcs, including its reason for existing:
+// stamping shells out to git on every build, which a caller may not want to
+// pay for.
+func moduleBuildInfo(lprogram *loader.Program, buildVCS string) (string, error) {
+	main := lprogram.MainPkg()
+	if main == nil || main.Module.Path == "" {
+		return "", nil // GOPATH mode or no module: nothing to embed.
+	}
+
+	// Collect the distinct non-main modules that contributed packages to the
+	// build. As in the go toolchain, a module is listed if any of its packages
+	// are part of the build graph.
+	depVersions := make(map[string]string) // module path -> version
+	for _, pkg := range lprogram.Sorted() {
+		m := pkg.Module
+		if m.Path == "" || m.Main || m.Path == main.Module.Path {
+			continue
+		}
+		depVersions[m.Path] = m.Version
+	}
+	deps := make([]string, 0, len(depVersions))
+	for path := range depVersions {
+		deps = append(deps, path)
+	}
+	sort.Strings(deps)
+
+	// Derive the main module version. `go list` leaves it empty for a local
+	// checkout, so fall back to VCS stamping (as `go build` does): an exact tag
+	// on HEAD, otherwise a pseudo-version. This also yields the vcs.* build
+	// settings appended below. If VCS info isn't available, use "(devel)".
+	mainVersion := main.Module.Version
+	var vcsSettings string
+	if mainVersion == "" {
+		if buildVCS == "false" {
+			// Don't touch the repository at all: no git subprocesses run.
+			mainVersion = "(devel)"
+		} else {
+			v, s, gitErr := gitVCSStamp(main.Module.Dir, main.Module.Path)
+			switch {
+			case v != "":
+				mainVersion, vcsSettings = v, s
+			case s != "":
+				// A repository with no commits gives settings but no version.
+				mainVersion, vcsSettings = "(devel)", s
+			case buildVCS == "true":
+				// -buildvcs=true means the stamp was demanded, so failing to
+				// produce one is an error rather than a silent fallback. This
+				// matches the go toolchain.
+				reason := "not a git work tree, the module is not at the repository root, or git is unavailable"
+				if gitErr != nil {
+					reason = gitErr.Error()
+				}
+				return "", fmt.Errorf("error obtaining VCS status for %s: %s\n"+
+					"\tUse -buildvcs=false to disable VCS stamping.", main.Module.Dir, reason)
+			default:
+				mainVersion = "(devel)"
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("path\t")
+	b.WriteString(main.ImportPath)
+	b.WriteByte('\n')
+	b.WriteString("mod\t")
+	b.WriteString(main.Module.Path)
+	b.WriteByte('\t')
+	b.WriteString(mainVersion)
+	b.WriteString("\t\n") // trailing tab leaves the checksum column empty
+	for _, path := range deps {
+		b.WriteString("dep\t")
+		b.WriteString(path)
+		b.WriteByte('\t')
+		b.WriteString(depVersions[path])
+		b.WriteString("\t\n") // go list -json carries no checksum; leave it empty
+	}
+	// Build settings (vcs.*) come after the module lines, matching
+	// runtime/debug.BuildInfo.String().
+	b.WriteString(vcsSettings)
+	return b.String(), nil
+}
+
+// gitVCSStamp derives the main-module version and the vcs.* build settings from
+// the git checkout at dir, mirroring what the standard `go build` toolchain
+// records under -buildvcs. modPath is the main module's path, used to reject a
+// version that belongs to some other module.
+//
+// It returns ("", "", nil) when there is simply no stamp to make — dir is not a
+// git work tree, or git is unavailable — so the caller falls back to "(devel)".
+// The error is non-nil only when git itself failed in a way worth reporting,
+// which -buildvcs=true turns into a hard failure.
+// resolvePath makes an absolute path with symbolic links resolved.
+func resolvePath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func gitVCSStamp(dir, modPath string) (version, settings string, gitErr error) {
+	if dir == "" {
+		return "", "", nil
+	}
+	// Keep the first git failure so -buildvcs=true can report the true cause.
+	var firstErr error
+	git := func(args ...string) (string, bool) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			if firstErr == nil {
+				msg := strings.TrimSpace(stderr.String())
+				if msg == "" {
+					msg = err.Error()
+				}
+				firstErr = fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+			}
+			return "", false
+		}
+		return strings.TrimSpace(string(out)), true
+	}
+	if out, ok := git("rev-parse", "--is-inside-work-tree"); !ok || out != "true" {
+		return "", "", firstErr
+	}
+	// Tags found from the module directory can belong to a parent repository.
+	// Only stamp when the module is at the repository root, as the go tool does.
+	root, ok := git("rev-parse", "--show-toplevel")
+	if !ok {
+		return "", "", firstErr
+	}
+	// git gives the physical path but go list can give one with a symbolic link.
+	// Resolve both before the comparison, and do not stamp if that is not possible.
+	absDir, dirErr := resolvePath(dir)
+	absRoot, rootErr := resolvePath(root)
+	if dirErr != nil || rootErr != nil || absDir != absRoot {
+		return "", "", nil
+	}
+	// The module path major version decides which tags can belong to this module.
+	// See https://go.dev/ref/mod#major-version-suffixes
+	major, tagMatch := "", "v[0-9]*"
+	if _, pathMajor, ok := module.SplitPathVersion(modPath); ok && pathMajor != "" {
+		major = strings.TrimLeft(pathMajor, "/.")
+		tagMatch = major + ".*"
+	}
+	rev, ok := git("rev-parse", "HEAD")
+	if !ok || rev == "" {
+		// A repository with no commits has no revision. The go tool still records
+		// vcs and vcs.modified here and uses (devel). See cmd/go/internal/load/pkg.go
+		if inside, ok := git("rev-parse", "--is-bare-repository"); ok && inside == "false" {
+			var sb strings.Builder
+			sb.WriteString("build\tvcs=git\n")
+			sb.WriteString("build\tvcs.modified=true\n")
+			return "", sb.String(), nil
+		}
+		return "", "", firstErr
+	}
+
+	// An unparsable commit time is a stamp failure. module.PseudoVersion would
+	// otherwise encode the zero time as 00010101000000 and look real.
+	var commitTime time.Time
+	s, ok := git("show", "-s", "--format=%ct", "HEAD")
+	if !ok {
+		return "", "", firstErr
+	}
+	sec, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return "", "", fmt.Errorf("git show -s --format=%%ct: unparsable commit time %q", s)
+	}
+	commitTime = time.Unix(sec, 0).UTC()
+
+	// The tree is modified when git status reports any change, tracked or not.
+	// This is what go build does.
+	modified := false
+	if status, ok := git("status", "--porcelain"); ok && status != "" {
+		modified = true
+	}
+
+	// Use an exact semver tag on HEAD, else a pseudo-version from the last tag.
+	if tags, ok := git("tag", "--points-at", "HEAD"); ok {
+		for t := range strings.FieldsSeq(tags) {
+			if semver.IsValid(t) && semver.Canonical(t) == t {
+				version = t
+				break
+			}
+		}
+	}
+	if version == "" {
+		older := ""
+		if base, ok := git("describe", "--tags", "--abbrev=0", "--match", tagMatch); ok && semver.IsValid(base) {
+			older = base
+		}
+		short := rev
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		pseudoMajor := major
+		if pseudoMajor == "" {
+			pseudoMajor = semver.Major(older)
+		}
+		version = module.PseudoVersion(pseudoMajor, older, commitTime, short)
+	}
+
+	// Final safety check on the major version only. module.Check would also
+	// reject an unpublished module path with no dot in its first element.
+	if _, pathMajor, ok := module.SplitPathVersion(modPath); ok {
+		if err := module.CheckPathMajor(version, pathMajor); err != nil {
+			return "", "", nil // not our version, fall back to (devel)
+		}
+	}
+
+	// A modified tree no longer describes the tagged commit.
+	if modified {
+		version += "+dirty"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("build\tvcs=git\n")
+	sb.WriteString("build\tvcs.revision=" + rev + "\n")
+	// RFC3339Nano is the format cmd/go writes.
+	sb.WriteString("build\tvcs.time=" + commitTime.Format(time.RFC3339Nano) + "\n")
+	sb.WriteString("build\tvcs.modified=" + strconv.FormatBool(modified) + "\n")
+	return version, sb.String(), nil
 }
