@@ -58,6 +58,8 @@ func main() {
 	testFreeShim()
 	testArenaOnReservedMemory()
 	testInjectedStrategies()
+	testGCPointerOnlyInArena()
+	testHeapStrategyEarlyFree()
 
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)

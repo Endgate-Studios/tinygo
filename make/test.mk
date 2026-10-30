@@ -282,6 +282,21 @@ tinygo-bench:
 tinygo-bench-fast:
 	$(TINYGO) test -bench . $(TEST_PACKAGES_HOST)
 
+# The memory packages with the two collectors that the arena GC tests know, gcsuite on the
+# host, and the check that arena memory holds no GC pointers. gcshim runs only on a board.
+MEMORY_TEST_PACKAGES = runtime/memory/arena runtime/memory/heap runtime/memory/collector
+
+.PHONY: memory-test memory-bench
+memory-test:
+	$(TINYGO) test -gc=conservative $(MEMORY_TEST_PACKAGES)
+	$(TINYGO) test -gc=precise $(MEMORY_TEST_PACKAGES)
+	$(TINYGO) run -gc=conservative ./src/examples/gcsuite quick
+	$(TINYGO) run -gc=precise ./src/examples/gcsuite quick
+	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -buildmode exe -tags "byollvm llvm22 osusergo" ./tools/arenacheck
+memory-bench:
+	$(TINYGO) test -gc=conservative -run XXX -bench . runtime/memory/arena
+	$(TINYGO) test -gc=precise -run XXX -bench . runtime/memory/arena
+
 # Same thing, except for wasi rather than the current platform.
 tinygo-test-wasm:
 	$(call run-tinygo-tests,$(TEST_PACKAGES_WASM),-target wasm,$(TEST_SKIP_FLAG))

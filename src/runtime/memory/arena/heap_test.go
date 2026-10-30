@@ -197,64 +197,73 @@ func TestHeapPoison(t *testing.T) {
 
 // FuzzHeap runs random Alloc, Free and Realloc calls and checks the heap at each step.
 // A model records the contents of each live allocation.
+// TinyGo does not run fuzz targets (F.Fuzz in src/testing/fuzz.go), so the Ops tests run the seeds.
 func FuzzHeap(f *testing.F) {
 	f.Add(int64(1), uint16(500))
 	f.Add(int64(42), uint16(2000))
-	f.Fuzz(func(t *testing.T, seed int64, steps uint16) {
-		h := newTestHeap(t, 32<<10)
-		rng := rand.New(rand.NewSource(seed))
-		type live struct {
-			p    unsafe.Pointer
-			size uintptr
-			tag  byte
-		}
-		var objs []live
-		verify := func(o live) {
-			for i, b := range bytesAt(uintptr(o.p), o.size) {
-				if b != o.tag {
-					t.Fatalf("object %p byte %d = %#x, want %#x", o.p, i, b, o.tag)
-				}
+	f.Fuzz(heapOps)
+}
+
+func TestHeapOps(t *testing.T) {
+	for seed := range int64(20) {
+		heapOps(t, seed, 2000)
+	}
+}
+
+func heapOps(t *testing.T, seed int64, steps uint16) {
+	h := newTestHeap(t, 32<<10)
+	rng := rand.New(rand.NewSource(seed))
+	type live struct {
+		p    unsafe.Pointer
+		size uintptr
+		tag  byte
+	}
+	var objs []live
+	verify := func(o live) {
+		for i, b := range bytesAt(uintptr(o.p), o.size) {
+			if b != o.tag {
+				t.Fatalf("object %p byte %d = %#x, want %#x", o.p, i, b, o.tag)
 			}
 		}
-		for step := 0; step < int(steps); step++ {
-			switch op := rng.Intn(4); {
-			case op <= 1 || len(objs) == 0:
-				size := uintptr(1 + rng.Intn(700))
-				align := uintptr(1) << rng.Intn(8)
-				p := h.Alloc(size, align)
-				if p == nil {
-					continue
-				}
-				o := live{p: p, size: size, tag: byte(rng.Intn(255) + 1)}
-				fillBytes(uintptr(p), size, o.tag)
-				objs = append(objs, o)
-			case op == 2:
-				i := rng.Intn(len(objs))
-				verify(objs[i])
-				h.Free(objs[i].p)
-				objs = append(objs[:i], objs[i+1:]...)
-			default:
-				i := rng.Intn(len(objs))
-				o := objs[i]
-				size := uintptr(1 + rng.Intn(1200))
-				q := h.Realloc(o.p, size)
-				if q == nil {
-					verify(o)
-					continue
-				}
-				kept := min(o.size, size)
-				verify(live{p: q, size: kept, tag: o.tag})
-				fillBytes(uintptr(q), size, o.tag)
-				objs[i] = live{p: q, size: size, tag: o.tag}
+	}
+	for step := 0; step < int(steps); step++ {
+		switch op := rng.Intn(4); {
+		case op <= 1 || len(objs) == 0:
+			size := uintptr(1 + rng.Intn(700))
+			align := uintptr(1) << rng.Intn(8)
+			p := h.Alloc(size, align)
+			if p == nil {
+				continue
 			}
-			if err := h.Check(); err != nil {
-				t.Fatalf("step %d: %v", step, err)
+			o := live{p: p, size: size, tag: byte(rng.Intn(255) + 1)}
+			fillBytes(uintptr(p), size, o.tag)
+			objs = append(objs, o)
+		case op == 2:
+			i := rng.Intn(len(objs))
+			verify(objs[i])
+			h.Free(objs[i].p)
+			objs = append(objs[:i], objs[i+1:]...)
+		default:
+			i := rng.Intn(len(objs))
+			o := objs[i]
+			size := uintptr(1 + rng.Intn(1200))
+			q := h.Realloc(o.p, size)
+			if q == nil {
+				verify(o)
+				continue
 			}
+			kept := min(o.size, size)
+			verify(live{p: q, size: kept, tag: o.tag})
+			fillBytes(uintptr(q), size, o.tag)
+			objs[i] = live{p: q, size: size, tag: o.tag}
 		}
-		for _, o := range objs {
-			verify(o)
+		if err := h.Check(); err != nil {
+			t.Fatalf("step %d: %v", step, err)
 		}
-	})
+	}
+	for _, o := range objs {
+		verify(o)
+	}
 }
 
 func TestRegion(t *testing.T) {
@@ -374,5 +383,65 @@ func TestHeapContainsAndSize(t *testing.T) {
 	q := h.Alloc(300, 0)
 	if !h.Contains(q) {
 		t.Error("Contains misses the second span")
+	}
+}
+
+func FuzzRegion(f *testing.F) {
+	f.Add(int64(1), uint16(500))
+	f.Add(int64(7), uint16(3000))
+	f.Fuzz(regionOps)
+}
+
+func TestRegionOps(t *testing.T) {
+	for seed := range int64(20) {
+		regionOps(t, seed, 3000)
+	}
+}
+
+func regionOps(t *testing.T, seed int64, steps uint16) {
+	r := newTestRegion(t, make([]byte, 8<<10), WithRegionPoison(true))
+	rng := rand.New(rand.NewSource(seed))
+	type live struct {
+		p    unsafe.Pointer
+		size uintptr
+		tag  byte
+	}
+	var objs []live
+	var marks []uintptr
+	for step := 0; step < int(steps); step++ {
+		switch op := rng.Intn(10); {
+		case op <= 5:
+			size := uintptr(1 + rng.Intn(300))
+			p := r.Alloc(size, uintptr(1)<<rng.Intn(6))
+			if p == nil {
+				continue
+			}
+			o := live{p: p, size: size, tag: byte(rng.Intn(255) + 1)}
+			fillBytes(uintptr(p), size, o.tag)
+			objs = append(objs, o)
+		case op <= 7:
+			marks = append(marks, r.Mark())
+		case op == 8 && len(marks) > 0:
+			m := marks[len(marks)-1]
+			marks = marks[:len(marks)-1]
+			r.Rewind(m)
+			// Rewind keeps only the objects that end at or below the mark.
+			for len(objs) > 0 && uintptr(objs[len(objs)-1].p)+objs[len(objs)-1].size > r.base+m {
+				objs = objs[:len(objs)-1]
+			}
+		case op == 9:
+			r.Reset()
+			objs, marks = objs[:0], marks[:0]
+		}
+		for _, o := range objs {
+			for i, b := range bytesAt(uintptr(o.p), o.size) {
+				if b != o.tag {
+					t.Fatalf("step %d: object %p byte %d = %#x, want %#x", step, o.p, i, b, o.tag)
+				}
+			}
+		}
+		if s := r.Stats(); s.Used != r.Mark() || s.Used > s.Cap || s.Peak < s.Used {
+			t.Fatalf("step %d: stats %+v, mark %d", step, s, r.Mark())
+		}
 	}
 }
