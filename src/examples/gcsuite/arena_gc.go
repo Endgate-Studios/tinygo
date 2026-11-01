@@ -24,6 +24,7 @@ const (
 
 var (
 	staticArena [8 << 10]byte
+	rootArena   [8 << 10]byte
 	victimSink  *victim
 )
 
@@ -124,6 +125,66 @@ func testGCPointerOnlyInArena() {
 	}
 	gcshim.Release(reserved)
 }
+
+// testRegisteredRoot puts the only pointer to each victim in a Region that is
+// registered with gcshim.AddRoot. Every victim must survive, in internal RAM
+// and in PSRAM, with precise or conservative globals.
+func testRegisteredRoot() {
+	if !gcshim.Installed() {
+		check("gcshim.AddRoot without gcshim", gcshim.AddRoot(&fakeRoot{}) == gcshim.ErrNotInstalled)
+		println("SKIP registered root: gcshim is not the collector")
+		return
+	}
+	cases := []arenaCase{{name: "static array", mem: rootArena[:]}}
+	if mem := psramArena(); mem != nil {
+		cases = append(cases, arenaCase{name: "PSRAM", mem: mem})
+	}
+	for _, c := range cases {
+		r, err := arena.NewRegion(c.mem)
+		if err != nil {
+			check("arena.NewRegion over "+c.name, false)
+			continue
+		}
+		if err := gcshim.AddRoot(r); err != nil {
+			check("gcshim.AddRoot of the "+c.name+" Region", false)
+			continue
+		}
+		slots := memory.MakeSlice[unsafe.Pointer](r, victims)
+		plantVictims(slots)
+		clobberStack()
+		bad := 0
+		for round := 0; round < 8 && bad == 0; round++ {
+			runtime.GC()
+			reuseFreed()
+			bad = corruptedVictims(slots)
+		}
+		println("  registered Region over", c.name+":", bad, "of", victims, "victims overwritten")
+		check("a registered Region over the "+c.name+" keeps its victims", bad == 0)
+		gcshim.RemoveRoot(r)
+	}
+
+	// The list holds MaxRoots, and RemoveRoot frees a place.
+	var fakes [gcshim.MaxRoots + 1]fakeRoot
+	n := 0
+	for i := range fakes {
+		if gcshim.AddRoot(&fakes[i]) != nil {
+			break
+		}
+		n++
+	}
+	full := gcshim.AddRoot(&fakes[len(fakes)-1]) == gcshim.ErrTooManyRoots
+	for i := range fakes {
+		gcshim.RemoveRoot(&fakes[i])
+	}
+	again := gcshim.AddRoot(&fakes[0]) == nil
+	gcshim.RemoveRoot(&fakes[0])
+	check("gcshim holds MaxRoots roots, then ErrTooManyRoots, and RemoveRoot frees them", n == gcshim.MaxRoots && full && again)
+}
+
+// fakeRoot is a Root with nothing in use.
+type fakeRoot struct{ _ byte }
+
+func (*fakeRoot) Live() (start, end uintptr) { return 0, 0 }
 
 // testHeapStrategyEarlyFree frees objects early through the heap strategy, then checks
 // that later collections keep the live data.
