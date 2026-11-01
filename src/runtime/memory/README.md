@@ -142,6 +142,60 @@ marked. `runtime.free` now accepts only this memory, and Go finalizers on it
 are rejected. Because of this change, `free.Free` on a normal GC object
 crashed with `free: invalid pointer` until the fork commit `edfd4d53`.
 
+## Fork position
+
+gcshim is a faster collector than the built-in one. The arenas are fast, and
+they are safe when the program obeys the rules below. `tools/arenacheck` and
+the tests enforce part of the rules. The rest is the job of the program.
+
+aykevl's advice in #4434 was to improve the GC itself. gcshim does that. The
+disagreement is only about the arenas.
+
+### Evidence from imp
+
+`github.com/endgate-studios/imp`, the mp3 player on an ESP32-S3 with 8 MB of
+octal PSRAM. `cmd/mp3ab` measured the fork build against the TinyGo 0.44.0
+release build on 2026-11-01, with 6 runs each and `benchstat`. The details are
+in `imp/docs/release-vs-fork.md`.
+
+| | Fork (gcshim) | Release | p |
+|---|---|---|---|
+| Pause of a full collection | 30.5 ms | 75.6 ms | 0.000 |
+| Full redraw, per frame | 198 ms | 251 ms | 0.002 |
+| AAC decode, per 1 s of audio | 438 ms | 521 ms | 0.002 |
+| Allocations for 1 MB over Wi-Fi | 1.2k | 39k | 0.002 |
+| Heap in use after a Wi-Fi download | 983 KiB | 6.5 MiB | 0.004 |
+| Binary | 1.505 MiB | 1.641 MiB | 0.002 |
+
+The player runs for hours on the fork build with no crash.
+
+These numbers compare the fork with the release, not arenas with the GC. In
+that run, both builds kept the decoders in a bump arena over `.psram`. The
+other gains come from gcshim (internal RAM first, shorter pauses), the radio
+and the TCP stack. A measurement of the arenas alone is planned in
+`imp/plans/arena-measure`.
+
+### Designs that keep the arenas safe
+
+- Decoder state (`imp/cmd/mp3_player/songmem.go`): an `arena.Region` over a
+  `.psram` array for each decoder, registered with `gcshim.AddRoot`. The
+  player resets it when a song opens, after the last decoder is done. Without
+  gcshim, it falls back to the heap.
+- UI rebuilds (`imp/ui/arena.go`): `ui.UseArenas` puts the widgets of each
+  rebuild in a `gcshim.Scope`. A `Scope` is a `Root`, so the collector scans
+  it. The rebuilds use at least 2 arenas in turn, so an arena is reset only
+  after the next rebuild has replaced its widgets. `kept`, `State.Set` and
+  `UseState` copy strings out.
+
+### Rules
+
+1. Arena memory must not hold the only pointer to a heap object, unless the
+   arena is registered with `gcshim.AddRoot` or is a `gcshim.Scope`.
+2. No pointer into an arena is used after its `Free` or `Reset`.
+3. A value made in an arena and kept longer than the arena is copied out by
+   the code that keeps it.
+4. Run `make memory-test` and `tools/arenacheck` after each upstream merge.
+
 ## What upstream wants instead
 
 - A better GC, such as Boehm (`-gc=boehm`, #4385).
