@@ -33,17 +33,13 @@ type Scope struct {
 // kept pointer read after Reset faults.
 const scopePoison = 0xA5
 
-// maxScopes is how many Scopes there can be: each is a root.
-const maxScopes = 4
-
+// Each Scope is a Root, so Scopes count against MaxRoots.
 var scopes struct {
-	all    [maxScopes]*Scope
-	n      int
 	inside [2]*Scope // by core: the Scope being allocated into
 }
 
 // NewScope makes a Scope of mem, which must not be the heap's (a fixed
-// array, best in PSRAM). It returns nil when there are maxScopes already.
+// array, best in PSRAM). It returns nil when MaxRoots Roots are registered.
 func NewScope(mem []byte) *Scope {
 	if len(mem) < 16 {
 		return nil
@@ -54,13 +50,15 @@ func NewScope(mem []byte) *Scope {
 	s := &Scope{base: base, top: base, end: (lo + uintptr(len(mem))) &^ 7}
 	shim.lock.Lock()
 	defer shim.lock.Unlock()
-	if scopes.n == maxScopes {
+	if addRootLocked(s) != nil {
 		return nil
 	}
-	scopes.all[scopes.n] = s
-	scopes.n++
 	return s
 }
+
+// Live is the part of s in use. It is for the collector (see Root): use
+// Used, which takes the lock.
+func (s *Scope) Live() (start, end uintptr) { return s.base, s.top }
 
 // Enter has this goroutine's allocations go to s, until Exit. Only one
 // goroutine on a core can be inside a Scope at a time; another goroutine
@@ -117,16 +115,6 @@ func scopeAlloc(size uintptr) unsafe.Pointer {
 	s.Peak = max(s.Peak, s.top-s.base)
 	memset(p, 0, size)
 	return p
-}
-
-// markScopes marks what the Scopes hold, as roots. The caller holds
-// shim.lock, with the world stopped.
-func markScopes() {
-	for _, s := range scopes.all[:scopes.n] {
-		if s.top > s.base {
-			shim.heap.MarkRange(s.base, s.top)
-		}
-	}
 }
 
 func memset(p unsafe.Pointer, b byte, n uintptr) {

@@ -33,7 +33,16 @@ type Scope struct{ Overflows uint32 }
 // NewScope returns a Scope that does nothing.
 func NewScope(mem []byte) *Scope { return &Scope{} }
 
-func (s *Scope) Enter()        {}
-func (s *Scope) Exit()         {}
-func (s *Scope) Reset()        {}
-func (s *Scope) Used() uintptr { return 0 }
+func (s *Scope) Enter()                     {}
+func (s *Scope) Exit()                      {}
+func (s *Scope) Reset()                     {}
+func (s *Scope) Used() uintptr              { return 0 }
+func (s *Scope) Live() (start, end uintptr) { return 0, 0 }
+
+// AddRoot returns ErrNotInstalled without gcshim: the built-in collectors
+// have no registered roots. -gc=conservative reads heap and global memory
+// anyway, but -gc=precise does not read a byte array.
+func AddRoot(r Root) error { return ErrNotInstalled }
+
+// RemoveRoot does nothing without gcshim.
+func RemoveRoot(r Root) {}

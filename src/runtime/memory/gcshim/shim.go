@@ -129,7 +129,7 @@ func collect() {
 	shim.allocated = 0
 	shim.heap.BeginCycle()
 	markAllRoots()
-	markScopes()
+	markRegisteredRoots()
 	shim.heap.FinishMark()
 	resumeWorld()
 	shim.heap.Sweep()

@@ -55,6 +55,12 @@ func NewRegion(mem []byte, opts ...RegionOption) (*Region, error) {
 	return r, nil
 }
 
+// Live is the part of the region in use, [start, end). With it, a Region is a
+// gcshim.Root: gcshim.AddRoot(r) has the collector scan what r holds, so the
+// region may hold the only pointer to a heap object. Without that, the
+// collector may not read the region's memory at all.
+func (r *Region) Live() (start, end uintptr) { return r.base, r.off }
+
 // Alloc returns size zeroed bytes aligned to align, or nil if the region is full.
 // An align of 0 selects DefaultAlign.
 func (r *Region) Alloc(size, align uintptr) unsafe.Pointer {
