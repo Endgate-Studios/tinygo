@@ -1,4 +1,4 @@
-//go:build gc.custom && !(tinygo.wasm || (baremetal && (esp32 || esp32s3 || esp32c3 || scheduler.cores)))
+//go:build gc.custom && !(tinygo.wasm || (baremetal && (esp32 || esp32s3 || esp32c3 || scheduler.cores)) || (windows && amd64 && scheduler.tasks))
 
 package gcshim
 

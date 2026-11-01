@@ -283,8 +283,10 @@ tinygo-bench-fast:
 	$(TINYGO) test -bench . $(TEST_PACKAGES_HOST)
 
 # The memory packages with the two collectors that the arena GC tests know, gcsuite on the
-# host, and the check that arena memory holds no GC pointers. gcshim runs only on a board.
+# host, and the check that arena memory holds no GC pointers. gcshim runs on a Windows host.
 MEMORY_TEST_PACKAGES = runtime/memory runtime/memory/arena runtime/memory/heap runtime/memory/collector runtime/memory/free runtime/memory/internal/memtest
+# gcshim imports collector, so the collector tests cannot run with gcshim as the GC.
+MEMORY_TEST_PACKAGES_GCSHIM = $(filter-out runtime/memory/collector,$(MEMORY_TEST_PACKAGES))
 
 .PHONY: memory-test memory-bench
 memory-test:
@@ -292,6 +294,10 @@ memory-test:
 	$(TINYGO) test -gc=precise $(MEMORY_TEST_PACKAGES)
 	$(TINYGO) run -gc=conservative ./src/examples/gcsuite quick
 	$(TINYGO) run -gc=precise ./src/examples/gcsuite quick
+ifeq ($(uname),Windows_NT)
+	$(TINYGO) test -gc=custom $(MEMORY_TEST_PACKAGES_GCSHIM)
+	$(TINYGO) run -gc=custom ./src/examples/gcsuite quick
+endif
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -buildmode exe -tags "byollvm llvm22 osusergo" ./tools/arenacheck
 memory-bench:
 	$(TINYGO) test -gc=conservative -run XXX -bench . runtime/memory/arena

@@ -28,6 +28,7 @@ program, not a unit test.
 | Name | Command | Collector | Real free | gcshim |
 |---|---|---|---|---|
 | Host | `tinygo test -gc=conservative` and `-gc=precise` | built-in | No | No |
+| Windows | `tinygo test -gc=custom` | gcshim, precise globals | Yes | Yes |
 | Wasm | `tinygo test -target=wasip1 -gc=custom` | gcshim | Yes | Yes |
 | Board | `tinygo test -c -target=esp32s3-psram-octal -scheduler=cores -gc=custom -tags=gcshim_psram,gcshim_precise_globals`, then flash and read serial | gcshim, internal RAM and PSRAM | Yes | Yes |
 | Board, debug | Board with `-tags=...,memory_debug` | as above, freed memory poisoned | Yes | Yes |
@@ -38,9 +39,15 @@ false. Then each package runs in each place, and each place tests what it can.
 
 The Wasm row needs `wasmtime` on PATH. It is not installed on this PC.
 
-A real free runs only with gcshim, so only on Wasm and on the board. The built-in
+A real free runs only with gcshim: on Windows, on Wasm and on the board. The built-in
 collectors stop with `free: invalid pointer` for a GC object (upstream `02021b58`), so
 `memory_realfree` cannot run on the host.
+
+gcshim on Windows (`target_windows.go`) uses the heap that the runtime reserves with
+`VirtualAlloc`, the `stackTop` of the runtime, and the stack scan in
+`src/runtime/asm_amd64_windows.S`. It always uses precise globals, because Windows has no
+globals linker symbols. The `collector` tests cannot run with gcshim as the GC, because
+gcshim imports `collector`.
 
 A `-gc=custom` test binary needs gcshim to supply the collector. Each package without a
 gcshim import has a `gcshim_test.go` with `//go:build gc.custom` and `import _
@@ -93,9 +100,11 @@ The tests and benchmarks that compare strategies go in `memtest_test`.
   early, collect 3 times, and check the list. From `testHeapStrategyEarlyFree`.
 - [x] `TestFreeOutsideHeapDoesNothing`: `Free` of a pointer to a global or to the
   stack. gcshim ignores a pointer outside its heap.
-- [ ] `TestFreeIntoArena`: `Free` of the first allocation of a `Region` over
-  `make` memory. That pointer is the start of the backing array, so a real free
-  can release the whole arena. Run it on the board, and fix what it does.
+- [x] `TestFreeIntoArenaReleasesBackingArray`: `Free` of the first allocation of a
+  `Region` over `make` memory. That pointer is the start of the backing array, so a
+  real free releases the whole arena. Confirmed with gcshim on Windows.
+- [x] `TestFreeOfLocalReleasesIt`: a local whose address goes to `Free` escapes to
+  the heap, so a real free releases it while the function still uses it (#3182).
 
 ### `gcshim`
 
@@ -199,8 +208,10 @@ per op (`gcs/op`), heap in use after (`heap-B`) and highest heap in use
 
 1. Done: `memtest` with the victim pattern and the strategy table.
 2. Done: `free` and `memory` tests. The host runs them with both collectors and with
-   standard Go. They build for the board with gcshim, but did not run there yet.
-3. `gcshim` tests, on the board first. Wasm when `wasmtime` is installed.
+   standard Go. They also run with gcshim on Windows, with and without `memory_debug`. They build for
+   the board, but did not run there yet.
+3. `gcshim` tests, on Windows first, then on the board. Wasm when `wasmtime` is
+   installed.
 4. `arena` additions.
 5. Benchmarks.
 6. Make targets.

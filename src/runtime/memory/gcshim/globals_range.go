@@ -1,4 +1,4 @@
-//go:build gc.custom && !gcshim_precise_globals
+//go:build gc.custom && !gcshim_precise_globals && !windows
 
 package gcshim
 

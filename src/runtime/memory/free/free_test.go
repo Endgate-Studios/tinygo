@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"testing"
 	"unsafe"
+
+	"runtime/memory/arena"
 )
 
 var sink []byte
@@ -80,13 +82,11 @@ func TestFreeSliceReusesMemory(t *testing.T) {
 	sink = nil
 }
 
-// TestFreeOutsideHeapDoesNothing frees pointers to a global and to the stack. gcshim
-// ignores a pointer outside its heap (free in src/runtime/memory/gcshim/shim.go).
+// TestFreeOutsideHeapDoesNothing frees a pointer to a global. gcshim ignores a pointer
+// outside its heap (free in src/runtime/memory/gcshim/shim.go).
 func TestFreeOutsideHeapDoesNothing(t *testing.T) {
-	var local [8]uintptr
 	before := frees()
 	Free(&global)
-	Free(&local)
 	if n := frees() - before; n != 0 {
 		t.Errorf("MemStats.Frees grew by %d, want 0", n)
 	}
@@ -96,6 +96,50 @@ func TestFreeOutsideHeapDoesNothing(t *testing.T) {
 }
 
 var global = [8]uintptr{1}
+
+// TestFreeOfLocalReleasesIt shows a weakness. A local whose address goes to Free escapes
+// to the heap, so a real free releases it while the function still uses it (#3182).
+func TestFreeOfLocalReleasesIt(t *testing.T) {
+	var local [8]uintptr
+	before := frees()
+	Free(&local)
+	want := uint64(0)
+	if IsReal() {
+		want = 1
+	}
+	if n := frees() - before; n != want {
+		t.Errorf("MemStats.Frees grew by %d, want %d", n, want)
+	}
+}
+
+// TestFreeIntoArenaReleasesBackingArray shows a weakness. The first allocation of a
+// Region is the start of its backing array, so a real free of it releases the whole arena.
+func TestFreeIntoArenaReleasesBackingArray(t *testing.T) {
+	sink = make([]byte, 4096)
+	r, err := arena.NewRegion(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := r.Alloc(64, 8)
+	if p != unsafe.Pointer(unsafe.SliceData(sink)) {
+		t.Fatal("the first allocation is not the start of the backing array")
+	}
+	before := frees()
+	Free((*byte)(p))
+	want := uint64(0)
+	if IsReal() {
+		want = 1
+	}
+	if n := frees() - before; n != want {
+		t.Errorf("MemStats.Frees grew by %d, want %d", n, want)
+	}
+	if IsReal() {
+		if b := make([]byte, 4096); unsafe.SliceData(b) == unsafe.SliceData(sink) {
+			t.Log("the next allocation of the same size took the arena's memory")
+		}
+	}
+	sink = nil
+}
 
 type node struct {
 	next *node
