@@ -284,7 +284,7 @@ tinygo-bench-fast:
 
 # The memory packages with the two collectors that the arena GC tests know, gcsuite on the
 # host, and the check that arena memory holds no GC pointers. gcshim runs only on a board.
-MEMORY_TEST_PACKAGES = runtime/memory/arena runtime/memory/heap runtime/memory/collector
+MEMORY_TEST_PACKAGES = runtime/memory runtime/memory/arena runtime/memory/heap runtime/memory/collector runtime/memory/free runtime/memory/internal/memtest
 
 .PHONY: memory-test memory-bench
 memory-test:

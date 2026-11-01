@@ -28,7 +28,6 @@ program, not a unit test.
 | Name | Command | Collector | Real free | gcshim |
 |---|---|---|---|---|
 | Host | `tinygo test -gc=conservative` and `-gc=precise` | built-in | No | No |
-| Host, real free | `tinygo test -gc=precise -tags=memory_realfree` | built-in | Yes | No |
 | Wasm | `tinygo test -target=wasip1 -gc=custom` | gcshim | Yes | Yes |
 | Board | `tinygo test -c -target=esp32s3-psram-octal -scheduler=cores -gc=custom -tags=gcshim_psram,gcshim_precise_globals`, then flash and read serial | gcshim, internal RAM and PSRAM | Yes | Yes |
 | Board, debug | Board with `-tags=...,memory_debug` | as above, freed memory poisoned | Yes | Yes |
@@ -39,47 +38,64 @@ false. Then each package runs in each place, and each place tests what it can.
 
 The Wasm row needs `wasmtime` on PATH. It is not installed on this PC.
 
+A real free runs only with gcshim, so only on Wasm and on the board. The built-in
+collectors stop with `free: invalid pointer` for a GC object (upstream `02021b58`), so
+`memory_realfree` cannot run on the host.
+
+A `-gc=custom` test binary needs gcshim to supply the collector. Each package without a
+gcshim import has a `gcshim_test.go` with `//go:build gc.custom` and `import _
+"runtime/memory/gcshim"`. gcshim imports only `collector`, so this makes no cycle.
+
 ## Shared test code
 
 ### `runtime/memory/internal/memtest`
 
-- [ ] Move the victim pattern from `src/examples/gcsuite/arena_gc.go` here:
-  `PlantVictims`, `ClobberStack`, `ReuseFreed` and `CorruptedVictims`.
-  `gcsuite`, `arena`, `gcshim` and `free` use it.
-- [ ] `Survives(slots, rounds)`: up to 8 rounds of `runtime.GC` and
-  `ReuseFreed`. It returns the number of corrupted victims.
-- [ ] `Strategies()`: the table below, with a skip reason for each strategy
-  that the build cannot run.
+The tests of `arena`, `heap`, `free` and `gcshim` cannot import a package that imports
+them. So `memtest` itself has only the victim pattern, and imports no memory package. The
+strategy table and the tests that compare strategies are in its test files, in the
+external package `memtest_test`.
+
+`gcsuite` is outside `runtime/memory`, so it cannot import an `internal` package. It
+keeps its own copy of the victim pattern.
+
+- [x] `victim.go`: `Plant`, `ClobberStack`, `ReuseFreed`, `Corrupted`, and
+  `Collect(slots, rounds)`, which returns the number of corrupted victims.
+- [x] `strategy_test.go`: the table below, `forEach`, and a skip reason for each
+  strategy that the build cannot run.
+- [x] `TestStrategiesGiveZeroedAlignedMemory` and `TestHeldVictimsSurvive`.
 
 | Name | Alloc | Release | Needs |
 |---|---|---|---|
-| `gc` | `new`, `make` | the collector | |
-| `free` | `heap.New` | `memory.Free`, `memory.FreeSlice` | real free |
-| `arena.Heap` | `arena.NewHeap` | `Free` | |
+| `gc` | `heap.New` | the collector | |
+| `free` | `heap.New` | `Free` of each allocation | real free |
+| `arena.Heap` | `arena.NewHeap` | `Free` of each allocation | |
 | `arena.Region` | `arena.NewRegion` | `Reset` | |
 | `region-root` | `arena.NewRegion` with `gcshim.AddRoot` | `Reset` | gcshim |
 | `scope` | `gcshim.NewScope`, `Enter` | `Reset` | gcshim |
 
-Each test and benchmark that compares strategies runs a subtest for each row.
+The tests and benchmarks that compare strategies go in `memtest_test`.
 
 ## Tests by package
 
 ### `free`
 
-- [ ] `TestNilAndEmpty`: `Free(nil)`, `FreeSlice(nil)` and a slice with
+- [x] `TestNilAndEmpty`: `Free(nil)`, `FreeSlice(nil)` and a slice with
   `cap` 0 do nothing.
-- [ ] `TestIsRealMatchesBuild`: `IsReal` is true only with `gc.custom` or
-  `memory_realfree`.
-- [ ] `TestNoOpWithoutRealFree`: without a real free, `Free` of a GC object
+- [x] `TestVerifyMatchesIsReal`: `Verify` finds a real free exactly when `IsReal`
+  is true.
+- [x] `TestNoOpWithoutRealFree`: without a real free, `Free` of a GC object
   does not crash, and the object stays usable. This is the regression test for
   upstream `02021b58` and the fork's `edfd4d53`.
-- [ ] `TestFreeReturnsMemory`: with a real free, `MemStats.Frees` grows by one
-  for each `Free`, and the next allocation of the same size can use the block.
-- [ ] `TestFreeSliceReturnsBackingArray`: as above, for `FreeSlice`.
-- [ ] `TestEarlyFreeKeepsLiveData`: build a list, free 1000 other objects
+- [x] `TestFreeCountsInMemStats`: with a real free, `MemStats.Frees` grows by one.
+- [x] `TestFreeSliceReusesMemory`: with a real free, the next allocation of the
+  same size uses the freed block.
+- [x] `TestEarlyFreeKeepsLiveData`: build a list, free 1000 other objects
   early, collect 3 times, and check the list. From `testHeapStrategyEarlyFree`.
-- [ ] `TestFreeForeignPointer`: `Free` of a pointer into a global, a stack
-  array or an arena. Write down what happens. The test fixes that behavior.
+- [x] `TestFreeOutsideHeapDoesNothing`: `Free` of a pointer to a global or to the
+  stack. gcshim ignores a pointer outside its heap.
+- [ ] `TestFreeIntoArena`: `Free` of the first allocation of a `Region` over
+  `make` memory. That pointer is the start of the backing array, so a real free
+  can release the whole arena. Run it on the board, and fix what it does.
 
 ### `gcshim`
 
@@ -130,12 +146,15 @@ Each test and benchmark that compares strategies runs a subtest for each row.
 
 ### `memory`
 
-- [ ] `TestNewZeroes` and `TestMakeSliceZeroes` over each strategy.
-- [ ] `TestNewNilWhenFull` and `TestMakeSliceNilWhenFull`.
-- [ ] `TestMakeSliceOverflow`: `n` times the element size overflows. The
+- [x] `TestNewAsksForSizeAndAlign` and `TestMakeSlice`.
+- [x] `TestNewNilWhenFull` and `TestMakeSliceNilWhenFull`.
+- [x] `TestMakeSliceZeroAndNegative`: `n` 0 gives an empty slice, `n` below 0
+  gives nil, and neither calls `Alloc`.
+- [x] `TestMakeSliceOverflow`: `n` times the element size overflows. The
   result is nil, not a short slice.
-- [ ] `TestFreeUsesFreer`: `memory.Free` calls the `Freer` of the strategy, and
-  does nothing for a strategy without one.
+- [x] `TestFreeUsesFreer` and `TestFreeNilAndEmpty`.
+- [x] Zeroed memory over each strategy: `TestStrategiesGiveZeroedAlignedMemory`
+  in `memtest_test`.
 
 ### `heap`
 
@@ -164,8 +183,9 @@ per op (`gcs/op`), heap in use after (`heap-B`) and highest heap in use
 
 ## Make targets
 
-- [ ] `memory-test`: add `free`, `memory` and `gcshim` to
-  `MEMORY_TEST_PACKAGES`, and add the `memory_realfree` run.
+- [x] `memory-test`: `memory`, `free` and `internal/memtest` are in
+  `MEMORY_TEST_PACKAGES`.
+- [ ] Add `gcshim` when it has tests.
 - [ ] `memory-test-wasm`: the packages with `-target=wasip1 -gc=custom`. It
   skips with a message when `wasmtime` is not on PATH.
 - [ ] `memory-test-board`: build each package's test binary for the board,
@@ -177,13 +197,14 @@ per op (`gcs/op`), heap in use after (`heap-B`) and highest heap in use
 
 ## Order
 
-1. `memtest` with the victim pattern and the strategy table.
-2. `free` and `memory` tests. They run on the host now.
+1. Done: `memtest` with the victim pattern and the strategy table.
+2. Done: `free` and `memory` tests. The host runs them with both collectors and with
+   standard Go. They build for the board with gcshim, but did not run there yet.
 3. `gcshim` tests, on the board first. Wasm when `wasmtime` is installed.
 4. `arena` additions.
 5. Benchmarks.
 6. Make targets.
-7. `gcsuite` uses `memtest`, and keeps only what a unit test cannot do.
+7. `gcsuite` keeps only what a unit test cannot do.
 
 ## Done when
 
