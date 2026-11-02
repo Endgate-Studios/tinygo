@@ -91,6 +91,13 @@ type TCPConn struct {
 	userClosed         bool
 	err                error
 
+	// txFull: the link refused the segment at sent (its transmit buffers
+	// were full), and the rest waits for the next ACK or timer tick.
+	txFull bool
+	// dupAcks counts the duplicate ACKs since the last that acknowledged
+	// anything new.
+	dupAcks int
+
 	rtoAt    time.Time
 	rto      time.Duration
 	retries  int
@@ -490,12 +497,23 @@ func (s *Stack) tcpOutput(c *TCPConn) {
 	if c.state != tcpEstablished && c.state != tcpCloseWait && c.state != tcpFinWait1 && c.state != tcpLastAck && c.state != tcpClosing {
 		return
 	}
+	c.txFull = false
 	for c.sent < c.sndLen {
 		n := min(c.sndLen-c.sent, c.mss, c.sndWnd-c.sent)
 		if n <= 0 {
 			break
 		}
-		s.tcpSend(c, tcpACK|tcpPSH, c.sndNxt, c.sent, n)
+		// A segment the link refuses isn't sent: counted as sent, it
+		// would be lost, and only the retransmission timeout (a second
+		// at least) would send it again, and all after it. The radio
+		// refuses at once when its transmit buffers are full, which a
+		// ring's worth of segments at a time does. So it stops here, and
+		// the next ACK, or the next tick, sends it.
+		if s.tcpSend(c, tcpACK|tcpPSH, c.sndNxt, c.sent, n) != nil {
+			c.txFull = true
+			s.stats.TCPTxFull++
+			break
+		}
 		c.sent += n
 		c.sndNxt += uint32(n)
 		s.armRTO(c)
@@ -504,7 +522,10 @@ func (s *Stack) tcpOutput(c *TCPConn) {
 		s.armRTO(c) // the peer window is full: the timeout probes it
 	}
 	if c.finQueued && !c.finSent && c.sent == c.sndLen {
-		s.tcpSend(c, tcpFIN|tcpACK, c.sndNxt, 0, 0)
+		if s.tcpSend(c, tcpFIN|tcpACK, c.sndNxt, 0, 0) != nil {
+			c.txFull = true
+			return
+		}
 		c.finSent = true
 		c.sndNxt++
 		s.armRTO(c)
@@ -528,7 +549,8 @@ func (s *Stack) tcpSendSYN(c *TCPConn) {
 
 // tcpSend writes a segment into s.tx and sends it to c.mac. The data is n
 // bytes of the send ring at offset off after its head. The caller holds s.mu.
-func (s *Stack) tcpSend(c *TCPConn, flags byte, seq uint32, off, n int) {
+// It gives the link's error: a segment it refused wasn't sent.
+func (s *Stack) tcpSend(c *TCPConn, flags byte, seq uint32, off, n int) error {
 	hl := tcpHdrLen
 	if flags&tcpSYN != 0 {
 		hl += 4 // MSS option
@@ -558,7 +580,7 @@ func (s *Stack) tcpSend(c *TCPConn, flags byte, seq uint32, off, n int) {
 	}
 	put16(t[16:], fold(checksum(pseudoHeader(s.cfg.Addr, c.raddr, protoTCP, len(t)), t)))
 	s.putIPv4Header(s.cfg.Addr, c.raddr, protoTCP, len(t))
-	s.sendEthernet(c.mac, etherIPv4, ipLen+len(t))
+	return s.sendEthernet(c.mac, etherIPv4, ipLen+len(t))
 }
 
 // tcpReset sends a RST and ends the connection with err. The caller holds
@@ -592,6 +614,9 @@ func (s *Stack) tcpTimeouts() {
 		if c.state == tcpTimeWait && now.After(c.waitDone) {
 			s.tcpDone(c, nil)
 			continue
+		}
+		if c.txFull {
+			s.tcpOutput(c) // the link refused a segment: again
 		}
 		if c.rtoAt.IsZero() || now.Before(c.rtoAt) {
 			continue
@@ -724,6 +749,7 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 		c.sent -= acked
 		c.sndUna = ack
 		c.retries, c.rto, c.rtoAt = 0, rtoInitial, time.Time{}
+		c.dupAcks = 0
 		if c.sndUna != c.sndNxt {
 			s.armRTO(c)
 		}
@@ -739,6 +765,20 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 			}
 		}
 		c.wake()
+	} else if ack == c.sndUna && c.sndUna != c.sndNxt && len(data) == 0 && flags&(tcpSYN|tcpFIN) == 0 && wnd == c.sndWnd {
+		// A duplicate ACK: the peer has had a segment past one it hasn't,
+		// lost on the way. At the third, RFC 5681's fast retransmit, the
+		// stack goes back to the first unacknowledged byte and sends
+		// again, as the timeout would, but now: the timeout is a second
+		// at least, and doubles each time it fires, so a few losses in a
+		// long transfer would stall it for seconds.
+		c.dupAcks++
+		if c.dupAcks == 3 {
+			s.stats.TCPFastRetransmits++
+			c.sent = 0
+			c.sndNxt = c.sndUna
+			c.finSent = false
+		}
 	}
 	if ack == c.sndUna {
 		c.sndWnd = wnd

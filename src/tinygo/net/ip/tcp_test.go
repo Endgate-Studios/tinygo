@@ -410,3 +410,78 @@ func TestTCPOutOfOrderStream(t *testing.T) {
 	}
 	t.Logf("%+v", s.stats)
 }
+
+// A segment the link refuses (its transmit buffers full) goes again at the
+// next timer tick, not the retransmission timeout, and the data arrives
+// whole and in order.
+func TestTCPLinkFull(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	s.arp.update(peerIP, peerMAC)
+	lis, _ := s.ListenTCP(82, 4096)
+	s.Input(tcpFrame(peerIP, myIP, seg{7000, 82, 1, 0, tcpSYN, 4096, nil}))
+	iss := readSeg(t, l).seq
+	s.Input(tcpFrame(peerIP, myIP, seg{7000, 82, 2, iss + 1, tcpACK, 4096, nil}))
+	c, _ := lis.Accept()
+	msg := make([]byte, 3*536)
+	for i := range msg {
+		msg[i] = byte(i * 7)
+	}
+	l.refuse.Store(2) // the first segment, and its first try again
+	start := time.Now()
+	go c.Write(msg)
+	var got []byte
+	for len(got) < len(msg) {
+		x := readSeg(t, l)
+		if x.seq != iss+1+uint32(len(got)) {
+			t.Fatalf("segment at %d, want %d", x.seq-iss-1, len(got))
+		}
+		got = append(got, x.data...)
+	}
+	if took := time.Since(start); took >= rtoInitial {
+		t.Errorf("took %v: the retransmission timeout, not the tick", took)
+	}
+	if !bytes.Equal(got, msg) {
+		t.Fatal("the data came out different")
+	}
+	if n := s.Stats().TCPTxFull; n != 2 {
+		t.Errorf("TCPTxFull %d, want 2", n)
+	}
+	s.Input(tcpFrame(peerIP, myIP, seg{7000, 82, 2, iss + 1 + uint32(len(msg)), tcpACK, 4096, nil}))
+}
+
+// Three duplicate ACKs send again from the first unacknowledged byte at
+// once, without waiting for the retransmission timeout.
+func TestTCPFastRetransmit(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	s.arp.update(peerIP, peerMAC)
+	lis, _ := s.ListenTCP(83, 4096)
+	s.Input(tcpFrame(peerIP, myIP, seg{7100, 83, 1, 0, tcpSYN, 4096, nil}))
+	iss := readSeg(t, l).seq
+	s.Input(tcpFrame(peerIP, myIP, seg{7100, 83, 2, iss + 1, tcpACK, 4096, nil}))
+	c, _ := lis.Accept()
+	msg := make([]byte, 4*536)
+	for i := range msg {
+		msg[i] = byte(i * 3)
+	}
+	start := time.Now()
+	go c.Write(msg)
+	for range 4 {
+		readSeg(t, l)
+	}
+	// The first segment is lost: the peer ACKs only up to it, for each of
+	// the other three.
+	for range 3 {
+		s.Input(tcpFrame(peerIP, myIP, seg{7100, 83, 2, iss + 1, tcpACK, 4096, nil}))
+	}
+	again := readSeg(t, l)
+	if again.seq != iss+1 || !bytes.Equal(again.data, msg[:536]) {
+		t.Fatalf("sent again at %d, %d bytes", again.seq-iss-1, len(again.data))
+	}
+	if took := time.Since(start); took >= rtoInitial {
+		t.Errorf("took %v: the retransmission timeout, not fast retransmit", took)
+	}
+	if n := s.Stats().TCPFastRetransmits; n != 1 {
+		t.Errorf("TCPFastRetransmits %d, want 1", n)
+	}
+	s.Input(tcpFrame(peerIP, myIP, seg{7100, 83, 2, iss + 1 + uint32(len(msg)), tcpACK, 4096, nil}))
+}

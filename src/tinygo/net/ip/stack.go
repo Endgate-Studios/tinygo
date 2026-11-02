@@ -71,6 +71,13 @@ type Stats struct {
 	// them for when the gap is filled, unless they are past the window or
 	// there are too many gaps: TCPOutOfOrderDropped counts those.
 	TCPOutOfOrder, TCPOutOfOrderDropped uint32
+	// TCPTxFull counts the data segments the link refused, its transmit
+	// buffers full: they're sent again at the next ACK or timer tick.
+	TCPTxFull uint32
+	// TCPFastRetransmits counts the times a third duplicate ACK had the
+	// stack send again from the first unacknowledged byte, before the
+	// retransmission timeout.
+	TCPFastRetransmits uint32
 }
 
 const (

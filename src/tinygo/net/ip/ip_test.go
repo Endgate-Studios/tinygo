@@ -2,6 +2,8 @@ package ip
 
 import (
 	"bytes"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,15 +20,26 @@ var (
 )
 
 // fakeLink puts sent frames on a channel. A test goroutine answers them with
-// Input, never from Send, because the stack holds its lock in Send.
-type fakeLink struct{ sent chan []byte }
+// Input, never from Send, because the stack holds its lock in Send. While
+// refuse is above 0, Send refuses a frame and counts it down, as a radio
+// whose transmit buffers are full does.
+type fakeLink struct {
+	sent   chan []byte
+	refuse atomic.Int32
+}
 
 func (l *fakeLink) MAC() [6]byte { return myMAC }
 
 func (l *fakeLink) Send(f []byte) error {
+	if l.refuse.Add(-1) >= 0 {
+		return errLinkFull
+	}
+	l.refuse.Store(0)
 	l.sent <- append([]byte(nil), f...)
 	return nil
 }
+
+var errLinkFull = errors.New("fakeLink: transmit buffers full")
 
 func newTestStack(t *testing.T) (*Stack, *fakeLink, *arena.Heap) {
 	t.Helper()
