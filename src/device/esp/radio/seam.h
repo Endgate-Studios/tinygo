@@ -150,6 +150,13 @@ int esp_wifi_scan_start(const void *config, bool block);
 int esp_wifi_scan_get_ap_num(uint16_t *number);
 int esp_wifi_scan_get_ap_records(uint16_t *number, wifi_ap_record_t *ap_records);
 
+// hal_get_tsf_time of libpp.a (hal_mac.o) gives a TSF in microseconds: TSF0 of
+// the station for 0, TSF1 of the soft-AP for other values. ESP-IDF has no
+// prototype. The ABI is from the disassembly: wifi_get_tsf_time_process of
+// libnet80211.a (ieee80211_ioctl.o), the code of esp_wifi_get_tsf_time, calls
+// it with (interface != 0) and stores a10:a11 as the int64_t result.
+int64_t hal_get_tsf_time(int interface);
+
 // libphy types and functions of ESP-IDF v5.3.2 esp_phy_init.h and
 // esp_private/phy.h.
 typedef struct {

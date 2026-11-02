@@ -229,6 +229,20 @@ Tested with one board:
 Reception, the acknowledgement of a real peer and decryption need two
 boards. See "Integration tests" below.
 
+## TSF
+
+`TSF` gives the TSF timer of the station in microseconds. All stations of one
+access point follow the TSF of its beacons, so boards can use it as a common
+clock. `ReadTSF` reads it between two readings of the runtime clock (the
+monotonic clock of `time.Now`), and `ReadTSFBest(n)` keeps the reading with
+the smallest window. Package `tsf` has the arithmetic and runs on the host.
+
+They call `hal_get_tsf_time` of `libpp.a`, as the interrupt path of
+`esp_wifi_get_tsf_time` does. The task path of `esp_wifi_get_tsf_time`
+allocates a message and waits for the Wi-Fi task. See `tsf.go` for the
+registers and the cores. Not measured on the board yet: the window of
+`ReadTSF` (about 1 to 3 µs expected) and the agreement of two boards.
+
 ## Stop and restart
 
 - `Stop` stops Wi-Fi, as `esp_wifi_stop`. `Start` starts it again.

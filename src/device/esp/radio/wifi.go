@@ -34,11 +34,12 @@ type Error int32
 
 // Errors of ESP-IDF v5.3.2 esp_err.h and esp_wifi.h.
 const (
-	ErrNoMem      Error = 0x101  // ESP_ERR_NO_MEM
-	ErrInvalidArg Error = 0x102  // ESP_ERR_INVALID_ARG
-	ErrNotInit    Error = 0x3001 // ESP_ERR_WIFI_NOT_INIT
-	ErrNotStarted Error = 0x3002 // ESP_ERR_WIFI_NOT_STARTED
-	ErrNotStopped Error = 0x3003 // ESP_ERR_WIFI_NOT_STOPPED
+	ErrNoMem        Error = 0x101  // ESP_ERR_NO_MEM
+	ErrInvalidArg   Error = 0x102  // ESP_ERR_INVALID_ARG
+	ErrNotInit      Error = 0x3001 // ESP_ERR_WIFI_NOT_INIT
+	ErrNotStarted   Error = 0x3002 // ESP_ERR_WIFI_NOT_STARTED
+	ErrNotStopped   Error = 0x3003 // ESP_ERR_WIFI_NOT_STOPPED
+	ErrNotConnected Error = 0x300F // ESP_ERR_WIFI_NOT_CONNECT
 )
 
 // ifStation is WIFI_IF_STA of wifi_interface_t.
@@ -62,6 +63,8 @@ func (e Error) text() string {
 		return "Wi-Fi is not started"
 	case ErrNotStopped:
 		return "Wi-Fi is not stopped"
+	case ErrNotConnected:
+		return "the station is not connected"
 	case ErrESPNowNotInit:
 		return "ESP-NOW is not initialized"
 	case ErrESPNowArg:
@@ -125,6 +128,7 @@ var wifiOn bool
 // Stop stops Wi-Fi, as esp_wifi_stop. Start starts it again.
 func Stop() error {
 	defer releaseThreadSemaphore()
+	staConnected.Store(false) // before the MAC stops, see TSF
 	return check(C.esp_wifi_stop())
 }
 
@@ -136,6 +140,7 @@ func Deinit() error {
 	if !wifiOn {
 		return nil
 	}
+	staConnected.Store(false)
 	if err := ESPNowDeinit(); err != nil {
 		return err
 	}

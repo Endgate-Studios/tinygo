@@ -47,6 +47,11 @@ var (
 	eventsDropped atomic.Uint32
 )
 
+// staConnected tells whether the station is connected: from EventStaConnected
+// to EventStaDisconnected, EventStaStop, Stop or Deinit. osiEventPost sets it
+// for all events, also the ones that Events drops. TSF uses it.
+var staConnected atomic.Bool
+
 // Events gives the events of the blobs. Read it often: when it is full, new
 // events are dropped, see EventsDropped.
 func Events() <-chan Event { return events }
@@ -60,6 +65,12 @@ func EventsDropped() uint32 { return eventsDropped.Load() }
 //export tinygo_wifi_event_post
 func osiEventPost(base *byte, id int32, data unsafe.Pointer, size uintptr, ticks uint32) int32 {
 	e := Event{ID: EventID(id)}
+	switch e.ID {
+	case EventStaConnected:
+		staConnected.Store(true)
+	case EventStaDisconnected, EventStaStop:
+		staConnected.Store(false)
+	}
 	if size > 0 && data != nil {
 		e.Data = append([]byte(nil), unsafe.Slice((*byte)(data), size)...)
 	}
