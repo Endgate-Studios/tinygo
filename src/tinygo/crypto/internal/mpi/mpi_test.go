@@ -106,3 +106,72 @@ func TestExp(t *testing.T) {
 		}
 	}
 }
+
+func TestAddSub(t *testing.T) {
+	r := rand.New(rand.NewSource(3))
+	for _, n := range []int{1, 2, 8, 96, 128} {
+		for k := 0; k < 10; k++ {
+			m := make([]uint32, n)
+			for i := range m {
+				m[i] = r.Uint32()
+			}
+			m[0] |= 1
+			if k == 0 {
+				for i := range m {
+					m[i] = 0xffffffff
+				}
+			}
+			if k == 1 && n > 1 {
+				// Top bit clear, so a sum below 2^(32n) can still reach m.
+				m[n-1] = 1
+			}
+			if m[n-1] == 0 {
+				m[n-1] = 1
+			}
+			var mod Modulus
+			if !mod.Init(m, make([]uint32, n)) {
+				t.Fatalf("%d words: Init failed", n)
+			}
+			mb := toBig(m)
+			max := new(big.Int).Sub(mb, big.NewInt(1))
+			for j := 0; j < 20; j++ {
+				xb := new(big.Int).Rand(r, mb)
+				yb := new(big.Int).Rand(r, mb)
+				switch j {
+				case 0:
+					xb.Set(max)
+					yb.Set(max)
+				case 1:
+					xb.SetInt64(0)
+					yb.Set(max)
+				case 2:
+					xb.SetInt64(0)
+					yb.SetInt64(0)
+				case 3:
+					xb.Set(max)
+					yb.SetInt64(1)
+				}
+				x, y, z := make([]uint32, n), make([]uint32, n), make([]uint32, n)
+				fromBig(x, xb)
+				fromBig(y, yb)
+				mod.Add(z, x, y)
+				want := new(big.Int).Add(xb, yb)
+				want.Mod(want, mb)
+				if toBig(z).Cmp(want) != 0 {
+					t.Fatalf("%d words: %x + %x mod %x = %x, want %x", n, xb, yb, mb, toBig(z), want)
+				}
+				mod.Sub(z, x, y)
+				want.Sub(xb, yb).Mod(want, mb)
+				if toBig(z).Cmp(want) != 0 {
+					t.Fatalf("%d words: %x - %x mod %x = %x, want %x", n, xb, yb, mb, toBig(z), want)
+				}
+				// In place: x = x + y, then x = x - y gives x back.
+				mod.Add(x, x, y)
+				mod.Sub(x, x, y)
+				if toBig(x).Cmp(xb) != 0 {
+					t.Fatalf("%d words: add then subtract in place gives %x, want %x", n, toBig(x), xb)
+				}
+			}
+		}
+	}
+}

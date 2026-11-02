@@ -126,6 +126,46 @@ func (k *Modulus) mont(z, x, y []uint32) {
 	clear(t)
 }
 
+// Add sets z = x + y mod m, for x and y below m. z can be x or y. The time
+// does not depend on the values.
+func (k *Modulus) Add(z, x, y []uint32) {
+	n := len(k.m)
+	var carry uint64
+	for i := 0; i < n; i++ {
+		v := uint64(x[i]) + uint64(y[i]) + carry
+		z[i], carry = uint32(v), v>>32
+	}
+	// Subtract m when the sum carried or is not below m.
+	var borrow uint64
+	for i := 0; i < n; i++ {
+		v := uint64(z[i]) - uint64(k.m[i]) - borrow
+		borrow = (v >> 32) & 1
+	}
+	mask := -(uint32(carry) | (uint32(borrow) ^ 1))
+	borrow = 0
+	for i := 0; i < n; i++ {
+		v := uint64(z[i]) - uint64(k.m[i]&mask) - borrow
+		z[i], borrow = uint32(v), (v>>32)&1
+	}
+}
+
+// Sub sets z = x - y mod m, for x and y below m. z can be x or y. The time
+// does not depend on the values.
+func (k *Modulus) Sub(z, x, y []uint32) {
+	n := len(k.m)
+	var borrow uint64
+	for i := 0; i < n; i++ {
+		v := uint64(x[i]) - uint64(y[i]) - borrow
+		z[i], borrow = uint32(v), (v>>32)&1
+	}
+	mask := -uint32(borrow) // all ones when x < y: add m back
+	var carry uint64
+	for i := 0; i < n; i++ {
+		v := uint64(z[i]) + uint64(k.m[i]&mask) + carry
+		z[i], carry = uint32(v), v>>32
+	}
+}
+
 func less(a, b []uint32) bool {
 	for i := len(a) - 1; i >= 0; i-- {
 		if a[i] != b[i] {
