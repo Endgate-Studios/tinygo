@@ -3,7 +3,6 @@
 package machine
 
 import (
-	"device"
 	"device/esp"
 	"errors"
 	"runtime/interrupt"
@@ -402,13 +401,10 @@ var (
 )
 
 func setupPinInterrupt() error {
-	// Route the source to the core that calls this, as ESP-IDF gpio_isr_register does.
-	// PRID is 0xCDCD on core 0 and 0xABAB on core 1, see ESP-IDF xt_utils_get_core_id.
-	if device.AsmFull("rsr {}, PRID", nil)>>13&1 == 0 {
-		esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
-	} else {
-		esp.INTERRUPT_CORE1.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
-	}
+	// Route the source to core 0, as runtime/interrupt does every peripheral:
+	// interrupt.Enable on core 1 enables the line on core 0, so a source
+	// routed to core 1 would never fire.
+	esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
 	return interrupt.New(cpuInterruptFromPin, func(interrupt.Interrupt) {
 		// Read and immediately clear interrupt status bits.
 		// Clearing before processing is critical for edge-triggered CPU
