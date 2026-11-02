@@ -212,20 +212,22 @@ func FuzzDHCPClient(f *testing.F) {
 	})
 }
 
-// FuzzDNS gives messages to the DNS answer parser and the mDNS responder.
+// FuzzDNS gives messages to the DNS answer parser, the mDNS responder and
+// the mDNS lookup parser.
 func FuzzDNS(f *testing.F) {
 	f.Add(mdnsQuery(0, "tinygo-node.local", dnsTypeA))
 	f.Add(mdnsQuery(7, "example.com", dnsTypeA))
-	ans := make([]byte, 128)
-	f.Add(ans[:putMDNSAnswer(ans, "tinygo-node", myIP, 1, nil)])
+	f.Add(mdnsQuery(0, "_airplay._tcp.local", dnsTypePTR))
+	r := newTestMDNS(f, &Stack{})
+	f.Add(append([]byte(nil), r.out[:r.unsolicited(myIP, 0, false)]...))
+	var found [2]ServiceInstance
 	f.Fuzz(func(t *testing.T, m []byte) {
 		if len(m) >= dnsHdrLen {
 			parseAnswer(m)
 		}
-		if q, ok := mdnsQuestion(m, "tinygo-node"); ok {
-			var out [256]byte
-			putMDNSAnswer(out[:], "tinygo-node", myIP, 1, q)
-		}
+		r.answer(r.out[:], m, myIP, false)
+		r.answer(r.out[:], m, myIP, true)
+		parseLookup(m, []byte("\x08_airplay\x04_tcp"), found[:], 0)
 	})
 }
 
