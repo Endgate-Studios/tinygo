@@ -1,8 +1,8 @@
-package x25519
+package field25519
 
-// add sets r = a + b mod p for a and b below p, in constant time. The code is
+// Add sets r = a + b mod p for a and b below p, in constant time. The code is
 // unrolled and the carries have no branches, because TinyGo builds with -opt=z.
-func add(r, a, b *fe) {
+func (r *Element) Add(a, b *Element) {
 	a0, a1, a2, a3, a4, a5, a6, a7 := a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
 	b0, b1, b2, b3, b4, b5, b6, b7 := b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
 	s0 := a0 + b0
@@ -49,9 +49,9 @@ func add(r, a, b *fe) {
 	r[7] = d7&mask | s7&^mask
 }
 
-// sub sets r = a - b mod p for a and b below p, in constant time, unrolled as
-// add.
-func sub(r, a, b *fe) {
+// Sub sets r = a - b mod p for a and b below p, in constant time, unrolled as
+// Add.
+func (r *Element) Sub(a, b *Element) {
 	a0, a1, a2, a3, a4, a5, a6, a7 := a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
 	b0, b1, b2, b3, b4, b5, b6, b7 := b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
 	d0 := a0 - b0
