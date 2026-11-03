@@ -39,6 +39,9 @@ func (c *Collector) MarkPointer(v uintptr) {
 		return
 	}
 	*mark |= bit
+	if c.kinds[(obj-c.pagesStart)>>c.pageShift] == kindBytesHead {
+		return
+	}
 	c.push(obj, obj+c.objectSize(obj))
 }
 
@@ -104,7 +107,7 @@ func (c *Collector) Sweep() {
 		case k >= kindSmall:
 			inuse += c.sweepSmall(page, int(k-kindSmall))
 			page++
-		case k == kindLargeHead:
+		case k == kindLargeHead || k == kindBytesHead:
 			n := uintptr(c.runs[page])
 			obj := c.pageAddr(page)
 			g := c.granuleOf(obj)
@@ -191,9 +194,9 @@ func (c *Collector) objectAt(v uintptr) (uintptr, bool) {
 			return 0, false // tail waste at the end of the page
 		}
 		return base + idx*classSizes[cls], true
-	case k == kindLargeHead:
+	case k == kindLargeHead || k == kindBytesHead:
 		return base, true
-	case k == kindLargeTail:
+	case k == kindLargeTail || k == kindBytesTail:
 		return c.pageAddr(uintptr(c.runs[page])), true
 	default:
 		return 0, false // free pages and unscanned reservations
@@ -209,7 +212,7 @@ func (c *Collector) objectSize(obj uintptr) uintptr {
 	return uintptr(c.runs[page]) * c.cfg.PageSize
 }
 
-// forEachObject calls fn with ctx for each allocated object of c. fn is not a closure,
+// forEachObject calls fn with ctx for each allocated object of c that may hold pointers. fn is not a closure,
 // so that the call does not allocate.
 func forEachObject[T any](c *Collector, ctx T, fn func(ctx T, obj, size uintptr)) {
 	for page := uintptr(0); page < c.nPages; {
@@ -229,7 +232,7 @@ func forEachObject[T any](c *Collector, ctx T, fn func(ctx T, obj, size uintptr)
 				fn(ctx, obj, n*c.cfg.PageSize)
 			}
 			page += n
-		case k == kindManualHead:
+		case k == kindManualHead || k == kindBytesHead:
 			page += uintptr(c.runs[page])
 		default:
 			page++

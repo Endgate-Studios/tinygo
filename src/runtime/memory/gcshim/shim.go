@@ -47,9 +47,24 @@ func initHeap() {
 	}
 }
 
+// pointerFree says a layout is of memory with no pointers, as in runtime/gc_precise.go.
+func pointerFree(layout unsafe.Pointer) bool {
+	const sizeFieldBits = 4 + unsafe.Sizeof(uintptr(0))/4
+	return uintptr(layout)&1 != 0 && uintptr(layout)>>(sizeFieldBits+1) == 0
+}
+
+// allocAny allocates from any span.
+func allocAny(size uintptr, noPointers bool) unsafe.Pointer {
+	if noPointers {
+		return shim.heap.AllocBytes(size)
+	}
+	return shim.heap.Alloc(size)
+}
+
 //go:linkname alloc runtime.alloc
 func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	checkAllocContext()
+	noPointers := pointerFree(layout)
 	shim.lock.Lock()
 	if stressEvery != 0 {
 		shim.allocCount++
@@ -63,19 +78,19 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		shim.lock.Unlock()
 		return p
 	}
-	p := allocFirst(size)
+	p := allocFirst(size, noPointers)
 	if p == nil && shim.allocated >= spillAfter {
 		// The first span is full, mostly of garbage by now: collect before
 		// spilling into the next one, or it fills with garbage too.
 		collect()
-		p = allocFirst(size)
+		p = allocFirst(size, noPointers)
 	}
 	if p == nil {
-		p = shim.heap.Alloc(size)
+		p = allocAny(size, noPointers)
 	}
 	if p == nil {
 		collect()
-		for p = shim.heap.Alloc(size); p == nil; p = shim.heap.Alloc(size) {
+		for p = allocAny(size, noPointers); p == nil; p = allocAny(size, noPointers) {
 			if !growArena(size) {
 				shim.lock.Unlock()
 				runtimePanic("out of memory")

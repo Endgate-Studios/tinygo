@@ -342,6 +342,106 @@ func TestReserveIsNeverScannedOrSwept(t *testing.T) {
 	h.check()
 }
 
+// Words in a large buffer of bytes aren't pointers, however much they look it: a chain of them must
+// not keep itself alive, while each is still freed and kept like any other object.
+func TestAllocBytesIsNotScanned(t *testing.T) {
+	h := newTestHeap(t, 256<<10, 1024, 64)
+	const size = 8 << 10
+	first := uintptr(h.c.AllocBytes(size))
+	second := uintptr(h.c.AllocBytes(size))
+	third := h.alloc(size)
+	if first == 0 || second == 0 {
+		t.Fatal("AllocBytes = nil")
+	}
+	// Scanned, third would keep second alive through this word. first holds it too, and doesn't.
+	*word(first, 7) = second
+	*word(third, 7) = 0
+	h.roots[0] = first + 100 // an interior pointer keeps a buffer as it does any object
+	h.collect()
+	if !h.allocated(first) {
+		t.Error("a buffer with a pointer to it was freed")
+	}
+	if h.allocated(second) {
+		t.Error("a word in a buffer kept another alive")
+	}
+	if h.allocated(third) {
+		t.Error("garbage survived")
+	}
+	if *word(first, 7) != second {
+		t.Error("a kept buffer was changed")
+	}
+	h.roots[0] = first + size - 8 // in its last page
+	h.collect()
+	if !h.allocated(first) {
+		t.Error("a pointer to a buffer's tail didn't keep it")
+	}
+	h.roots[0] = 0
+	h.collect()
+	if h.allocated(first) {
+		t.Error("a buffer nothing points to survived")
+	}
+	if got := h.c.Stats().HeapInuse; got != 0 {
+		t.Errorf("HeapInuse = %d, want 0", got)
+	}
+}
+
+// A scanned object can still point at a buffer, and that keeps it.
+func TestAllocBytesKeptByObject(t *testing.T) {
+	h := newTestHeap(t, 256<<10, 1024, 64)
+	buf := uintptr(h.c.AllocBytes(8 << 10))
+	holder := h.alloc(64)
+	*word(holder, 0) = buf
+	h.roots[0] = holder
+	h.collect()
+	if !h.allocated(buf) {
+		t.Error("a buffer an object points to was freed")
+	}
+	if !h.c.Free(unsafe.Pointer(buf)) {
+		t.Error("Free = false")
+	}
+	if h.c.Free(unsafe.Pointer(buf)) {
+		t.Error("a double Free = true")
+	}
+	h.check()
+}
+
+// Rescanning after an overflow reads only what can hold pointers.
+func TestAllocBytesThroughOverflow(t *testing.T) {
+	h := newTestHeap(t, 512<<10, 1024, 2)
+	garbage := uintptr(h.c.AllocBytes(8 << 10))
+	buf := uintptr(h.c.AllocBytes(8 << 10))
+	*word(buf, 0) = garbage
+	var head uintptr
+	for i := 0; i < 64; i++ {
+		obj := h.alloc(32)
+		*word(obj, 0) = head
+		*word(obj, 1) = buf
+		head = obj
+	}
+	h.roots[0] = head
+	h.collect()
+	if !h.allocated(buf) {
+		t.Error("the buffer was freed")
+	}
+	if h.allocated(garbage) {
+		t.Error("the rescan read a buffer")
+	}
+}
+
+// A small AllocBytes is scanned as usual: only a large one's worth the kinds of page.
+func TestAllocBytesSmall(t *testing.T) {
+	h := newTestHeap(t, 128<<10, 1024, 64)
+	small := uintptr(h.c.AllocBytes(64))
+	if small == 0 {
+		t.Fatal("AllocBytes = nil")
+	}
+	h.roots[0] = small
+	h.collect()
+	if !h.allocated(small) {
+		t.Error("it was freed")
+	}
+}
+
 func TestGrow(t *testing.T) {
 	span := testSpan(t, 256<<10)
 	start := uintptr(unsafe.Pointer(&span[0]))

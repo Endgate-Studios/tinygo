@@ -11,7 +11,7 @@ import (
 type gcHeap = collector.Collector
 
 // allocFirst is the span's Alloc: there is no other span.
-func allocFirst(size uintptr) unsafe.Pointer { return shim.heap.Alloc(size) }
+func allocFirst(size uintptr, noPointers bool) unsafe.Pointer { return allocAny(size, noPointers) }
 
 // heapSpans is empty, because shim.heap holds the only collector.
 type heapSpans struct{}

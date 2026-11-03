@@ -16,12 +16,15 @@ func (c *Collector) Check() error {
 				return ErrCorrupt
 			}
 			page++
-		case k == kindLargeHead || k == kindManualHead:
+		case k == kindLargeHead || k == kindManualHead || k == kindBytesHead:
 			n := uintptr(c.runs[page])
 			if n == 0 || page+n > c.nPages {
 				return ErrCorrupt
 			}
 			tail := kindLargeTail
+			if k == kindBytesHead {
+				tail = kindBytesTail
+			}
 			if k == kindManualHead {
 				tail = kindManualTail
 			}

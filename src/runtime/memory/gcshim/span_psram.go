@@ -13,7 +13,12 @@ import (
 type gcHeap = collector.Set
 
 // allocFirst allocates from internal DRAM only.
-func allocFirst(size uintptr) unsafe.Pointer { return shim.heap.AllocPrimary(size) }
+func allocFirst(size uintptr, noPointers bool) unsafe.Pointer {
+	if noPointers {
+		return shim.heap.AllocPrimaryBytes(size)
+	}
+	return shim.heap.AllocPrimary(size)
+}
 
 // heapSpans holds the two collectors. It is in shim, so markRoots skips their counters.
 type heapSpans struct {

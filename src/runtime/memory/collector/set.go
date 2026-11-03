@@ -49,6 +49,19 @@ func (s *Set) Alloc(size uintptr) unsafe.Pointer {
 	return s.secondary.Alloc(size)
 }
 
+// AllocBytes is Alloc for memory that holds no pointers. See Collector.AllocBytes.
+func (s *Set) AllocBytes(size uintptr) unsafe.Pointer {
+	if p := s.primary.AllocBytes(size); p != nil || s.secondary == nil {
+		return p
+	}
+	return s.secondary.AllocBytes(size)
+}
+
+// AllocPrimaryBytes is AllocBytes on the primary span only.
+func (s *Set) AllocPrimaryBytes(size uintptr) unsafe.Pointer {
+	return s.primary.AllocBytes(size)
+}
+
 // AllocPrimary tries the primary span only.
 func (s *Set) AllocPrimary(size uintptr) unsafe.Pointer {
 	return s.primary.Alloc(size)

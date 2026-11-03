@@ -28,6 +28,8 @@ const (
 	kindLargeTail               // continuation page of a large object
 	kindManualHead              // first page of an unscanned reservation
 	kindManualTail              // continuation page of an unscanned reservation
+	kindBytesHead               // first page of a large object that holds no pointers
+	kindBytesTail               // continuation page of a large object that holds no pointers
 	kindSmall      uint8 = 16   // kindSmall + class index
 )
 
@@ -212,6 +214,17 @@ func (c *Collector) Limit() uintptr {
 // Alloc returns size zeroed bytes with 16-byte alignment, or nil if the heap is full.
 // On nil, the caller decides whether to collect or grow.
 func (c *Collector) Alloc(size uintptr) unsafe.Pointer {
+	return c.alloc(size, kindLargeHead, kindLargeTail)
+}
+
+// AllocBytes is Alloc for memory that holds no pointers. A large one is never scanned, so what's
+// in it can't keep anything alive: compressed images look like random words, and any of those can
+// look like a pointer. A small one is scanned as usual, as it can only hold a few such words.
+func (c *Collector) AllocBytes(size uintptr) unsafe.Pointer {
+	return c.alloc(size, kindBytesHead, kindBytesTail)
+}
+
+func (c *Collector) alloc(size uintptr, head, tail uint8) unsafe.Pointer {
 	if size == 0 {
 		return unsafe.Pointer(&c.zeroSized)
 	}
@@ -231,11 +244,11 @@ func (c *Collector) Alloc(size uintptr) unsafe.Pointer {
 		if n == 0 {
 			return nil // overflow
 		}
-		head, ok := c.takeRun(n, kindLargeHead, kindLargeTail)
+		first, ok := c.takeRun(n, head, tail)
 		if !ok {
 			return nil
 		}
-		obj = c.pageAddr(head)
+		obj = c.pageAddr(first)
 		objSize = n * c.cfg.PageSize
 	}
 	setBit(c.allocBits, c.granuleOf(obj))
@@ -273,7 +286,7 @@ func (c *Collector) Free(p unsafe.Pointer) bool {
 		*(*uintptr)(unsafe.Pointer(obj)) = c.freeLists[cls]
 		c.freeLists[cls] = obj
 		c.stats.HeapInuse -= uint64(size)
-	case k == kindLargeHead:
+	case k == kindLargeHead || k == kindBytesHead:
 		g := c.granuleOf(obj)
 		if obj != pageAddr || !getBit(c.allocBits, g) {
 			return false
