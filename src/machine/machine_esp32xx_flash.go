@@ -26,7 +26,7 @@ type flashBlockDevice struct {
 
 // ReadAt reads the given number of bytes from the block device.
 func (f flashBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
-	if readAddress(off)+uintptr(len(p)) > FlashDataEnd() {
+	if readAddress(off)+uintptr(len(p)) > flashEnd() {
 		return 0, errFlashCannotReadPastEOF
 	}
 
@@ -47,7 +47,7 @@ func (f flashBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
 
 // Size returns the number of bytes in this block device.
 func (f flashBlockDevice) Size() int64 {
-	return int64(FlashDataEnd() - FlashDataStart())
+	return int64(flashEnd() - FlashDataStart())
 }
 
 const writeBlockSize = 4
@@ -111,13 +111,18 @@ var romSpiflashLegacyData *romSpiflashChip
 
 var flashSizeSet bool
 
-// setFlashSize gives the ROM flash routines the chip size from the image
-// header, as update_flash_config in the esp-idf bootloader does.
+// setFlashSize gives the ROM flash routines the chip size, as update_flash_config
+// in the esp-idf bootloader does: what the chip says if it can, as a build can't
+// know which chip it will run on, or else what the image header says.
 func setFlashSize() {
 	if flashSizeSet {
 		return
 	}
 	flashSizeSet = true
+	if size := flashChipSize(); size != 0 {
+		romSpiflashLegacyData.chipSize = size
+		return
+	}
 	var header uint32
 	if C.esp_rom_spiflash_read(0, (*C.uint32_t)(unsafe.Pointer(&header)), 4) != 0 {
 		return
@@ -130,7 +135,7 @@ func setFlashSize() {
 }
 
 func (f flashBlockDevice) writeAt(p []byte, off int64) (n int, err error) {
-	if readAddress(off)+uintptr(len(p)) > FlashDataEnd() {
+	if readAddress(off)+uintptr(len(p)) > flashEnd() {
 		return 0, errFlashCannotWritePastEOF
 	}
 
@@ -153,7 +158,7 @@ func (f flashBlockDevice) writeAt(p []byte, off int64) (n int, err error) {
 
 func (f flashBlockDevice) eraseBlocks(start, length int64) error {
 	address := writeAddress(start * f.EraseBlockSize())
-	if readAddress((start+length)*f.EraseBlockSize()) > FlashDataEnd() {
+	if readAddress((start+length)*f.EraseBlockSize()) > flashEnd() {
 		return errFlashCannotErasePastEOF
 	}
 

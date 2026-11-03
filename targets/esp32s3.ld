@@ -254,8 +254,10 @@ _drom_mmu_pages = (_drom_end - 0x3C000000 + 0xFFFF) / 0x10000 - _drom_mmu_index;
 _drom_flash_start = _drom_flash_offset - _drom_flash_offset % 0x10000 + _drom_start % 0x10000;
 _drom_flash_end = (_drom_flash_start < _drom_flash_offset ? _drom_flash_start + 0x10000 : _drom_flash_start) + (_drom_end - _drom_start);
 __flash_data_phys = ALIGN(_drom_flash_end, 4096);
-_flash_data_phys_end = MAX(__flash_data_phys, 4M);
 _flash_data_mmu_index = _drom_mmu_index + _drom_mmu_pages;
+/* As far as the largest chip used, or the MMU's flash entries, reach. A smaller
+ * chip's bound is found at run time: see flashEnd in machine_esp32s3_flashsize.go. */
+_flash_data_phys_end = MAX(__flash_data_phys, MIN(16M, (__flash_data_phys / 0x10000 + 256 - _flash_data_mmu_index) * 0x10000));
 _flash_data_mmu_pages = (_flash_data_phys_end + 0xFFFF) / 0x10000 - __flash_data_phys / 0x10000;
 PROVIDE(__flash_data_start = 0x3C000000 + _flash_data_mmu_index * 0x10000 + __flash_data_phys % 0x10000);
 PROVIDE(__flash_data_end = __flash_data_start + (_flash_data_phys_end - __flash_data_phys));
