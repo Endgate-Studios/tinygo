@@ -253,6 +253,7 @@ const (
 
 // wifi_scan_method_t and wifi_sort_method_t of ESP-IDF v5.3.2 esp_wifi_types_generic.h.
 const (
+	scanFast        = 0 // WIFI_FAST_SCAN
 	scanAllChannels = 1 // WIFI_ALL_CHANNEL_SCAN
 	sortBySignal    = 0 // WIFI_CONNECT_AP_BY_SIGNAL
 )
@@ -262,6 +263,17 @@ const (
 // password is a passphrase of 8 to 63 characters or a PSK of 64 hex digits. EventStaConnected tells when it is
 // connected.
 func Connect(ssid, password string) error {
+	return connect(ssid, password, nil, 0)
+}
+
+// ConnectTo is Connect to one access point of the network, on the channel it was last on.
+// It doesn't scan the other channels if the access point's there, so it's quicker. If it
+// isn't, EventStaDisconnected tells, and Connect finds whatever's there now.
+func ConnectTo(ssid, password string, bssid [6]byte, channel uint8) error {
+	return connect(ssid, password, &bssid, channel)
+}
+
+func connect(ssid, password string, bssid *[6]byte, channel uint8) error {
 	defer releaseThreadSemaphore()
 	var conf C.wifi_config_t
 	sta := (*C.wifi_sta_config_t)(unsafe.Pointer(&conf))
@@ -275,10 +287,16 @@ func Connect(ssid, password string) error {
 		sta.threshold.authmode = C.int(AuthWPA2PSK)
 	}
 	// The strongest access point of the network, not the first to answer: with several
-	// on one channel that's a different one each time. A mesh goes on sending to the one
-	// a restarted station left, so moving costs about two minutes of its traffic.
+	// on one channel that's a different one each time, and a station that moves between
+	// the nodes of a mesh can lose what's behind the old one for about two minutes.
 	sta.scan_method = scanAllChannels
 	sta.sort_method = sortBySignal
+	if bssid != nil {
+		sta.scan_method = scanFast
+		sta.bssid_set = true
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&sta.bssid[0])), len(sta.bssid)), bssid[:])
+		sta.channel = C.uint8_t(channel)
+	}
 	if err := prepareSupplicant(ssid, password); err != nil {
 		return err
 	}
@@ -293,6 +311,16 @@ func Connect(ssid, password string) error {
 func Reconnect() error {
 	defer releaseThreadSemaphore()
 	return check(C.esp_wifi_connect_internal())
+}
+
+// Signal gives the strength in dBm of the access point the station is connected to.
+func Signal() (int8, error) {
+	defer releaseThreadSemaphore()
+	var ap C.wifi_ap_record_t
+	if err := check(C.esp_wifi_sta_get_ap_info(&ap)); err != nil {
+		return 0, err
+	}
+	return int8(ap.rssi), nil
 }
 
 // Disconnect disconnects the station.

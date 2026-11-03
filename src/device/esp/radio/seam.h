@@ -148,6 +148,7 @@ int esp_wifi_set_ps(int type);
 int esp_wifi_disconnect_internal(void);
 int esp_wifi_scan_start(const void *config, bool block);
 int esp_wifi_scan_get_ap_num(uint16_t *number);
+int esp_wifi_sta_get_ap_info(wifi_ap_record_t *ap_info);
 int esp_wifi_scan_get_ap_records(uint16_t *number, wifi_ap_record_t *ap_records);
 
 // hal_get_tsf_time of libpp.a (hal_mac.o) gives a TSF in microseconds: TSF0 of
