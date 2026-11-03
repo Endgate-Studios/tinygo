@@ -128,6 +128,14 @@ func New(link Link, mem Memory) *Stack {
 	return &Stack{link: link, mem: mem, mac: link.MAC()}
 }
 
+// Seed gives the stack randomness for its ports and sequence numbers. It has
+// only the time since boot without it, which is much the same on every boot.
+func (s *Stack) Seed(v uint32) {
+	s.mu.Lock()
+	s.isnSeed ^= v
+	s.mu.Unlock()
+}
+
 // Config gives the current address configuration.
 func (s *Stack) Config() Config {
 	s.mu.Lock()

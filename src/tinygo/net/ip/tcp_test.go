@@ -176,6 +176,36 @@ func TestTCPActiveRetransmitAndTimeWait(t *testing.T) {
 	}
 }
 
+// A peer with an old connection on the same ports answers a SYN with an ACK of its own. A reset has
+// to end that, and the SYN's retransmission then connects.
+func TestTCPActiveStaleConnection(t *testing.T) {
+	s, l, _ := newTestStack(t)
+	s.arp.update(peerIP, peerMAC)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.DialTCP(peerIP, 8080, 256, 5*time.Second)
+		done <- err
+	}()
+	syn := readSeg(t, l)
+	const stale = 90000
+	s.Input(tcpFrame(peerIP, myIP, seg{8080, syn.sport, 5000, stale, tcpACK, 4096, nil}))
+	rst := readSeg(t, l)
+	if rst.flags != tcpRST || rst.seq != stale {
+		t.Fatalf("reset %+v", rst)
+	}
+	again := readSeg(t, l)
+	if again.flags != tcpSYN || again.seq != syn.seq {
+		t.Fatalf("retransmission %+v", again)
+	}
+	s.Input(tcpFrame(peerIP, myIP, seg{8080, syn.sport, 7000, syn.seq + 1, tcpSYN | tcpACK, 4096, nil}))
+	if a := readSeg(t, l); a.flags != tcpACK || a.ack != 7001 {
+		t.Fatalf("ACK %+v", a)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTCPPeerWindow(t *testing.T) {
 	s, l, _ := newTestStack(t)
 	s.arp.update(peerIP, peerMAC)

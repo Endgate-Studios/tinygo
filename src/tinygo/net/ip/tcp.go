@@ -270,8 +270,8 @@ func (s *Stack) DialTCP(addr Addr, port uint16, bufSize int, timeout time.Durati
 	}
 }
 
-// freeTCPPort gives a free local port. The first one is random (RFC 6056),
-// so a new boot does not reuse the ports of the last one.
+// freeTCPPort gives a free local port. The first one is random (RFC 6056), so a
+// new boot is unlikely to reuse the ports of the last one, if the stack has a Seed.
 func (s *Stack) freeTCPPort() uint16 {
 	if s.tcpPort == 0 {
 		s.isnSeed = s.isnSeed*1103515245 + uint32(time.Now().UnixNano())
@@ -706,7 +706,14 @@ func (s *Stack) inputTCP(srcMAC [6]byte, src, dst Addr, p []byte) {
 
 	switch c.state {
 	case tcpSynSent:
-		if flags&(tcpSYN|tcpACK) != tcpSYN|tcpACK || ack != c.iss+1 {
+		// RFC 9293 3.10.7.3. An ACK of what wasn't sent is a peer that still has a connection on
+		// these ports, as after a restart that picked them again. The reset ends it, and the
+		// SYN's retransmission then gets through: without it, this waits for the peer to give up.
+		if flags&tcpACK != 0 && ack != c.iss+1 {
+			s.tcpSend(c, tcpRST, ack, 0, 0)
+			return
+		}
+		if flags&(tcpSYN|tcpACK) != tcpSYN|tcpACK {
 			return
 		}
 		c.rcvNxt = seq + 1
