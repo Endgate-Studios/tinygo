@@ -42,6 +42,16 @@ func (e Event) DisconnectReason() uint8 {
 	return e.Data[39]
 }
 
+// AccessPoint gives the BSSID and channel of an EventStaConnected, which on a network of
+// several access points says which one it was.
+func (e Event) AccessPoint() (bssid [6]byte, channel uint8) {
+	// The bssid and channel fields of wifi_event_sta_connected_t.
+	if e.ID != EventStaConnected || len(e.Data) < 40 {
+		return bssid, 0
+	}
+	return [6]byte(e.Data[33:39]), e.Data[39]
+}
+
 var (
 	events        = make(chan Event, 16)
 	eventsDropped atomic.Uint32

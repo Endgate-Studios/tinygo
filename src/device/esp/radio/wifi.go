@@ -251,6 +251,12 @@ const (
 	AuthOWE            AuthMode = 9
 )
 
+// wifi_scan_method_t and wifi_sort_method_t of ESP-IDF v5.3.2 esp_wifi_types_generic.h.
+const (
+	scanAllChannels = 1 // WIFI_ALL_CHANNEL_SCAN
+	sortBySignal    = 0 // WIFI_CONNECT_AP_BY_SIGNAL
+)
+
 // Connect starts to connect the station to a network. An empty password
 // selects an open network, and other networks need WPA2-PSK with CCMP. The
 // password is a passphrase of 8 to 63 characters or a PSK of 64 hex digits. EventStaConnected tells when it is
@@ -268,6 +274,11 @@ func Connect(ssid, password string) error {
 	if password != "" {
 		sta.threshold.authmode = C.int(AuthWPA2PSK)
 	}
+	// The strongest access point of the network, not the first to answer: with several
+	// on one channel that's a different one each time. A mesh goes on sending to the one
+	// a restarted station left, so moving costs about two minutes of its traffic.
+	sta.scan_method = scanAllChannels
+	sta.sort_method = sortBySignal
 	if err := prepareSupplicant(ssid, password); err != nil {
 		return err
 	}
