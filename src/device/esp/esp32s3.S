@@ -101,6 +101,13 @@
     .long _drom_mmu_pages
 .Lflash_data_phys:
     .long __flash_data_phys
+// What a boot stage leaves in RTC_CNTL_STORE2: 0xDEC0 in the top half, and in the bottom half the 64 KB page
+// the image is at. Without a boot stage the image is at 0. It also means the stage has seen to the RTC
+// watchdog, which may be on, to bring back firmware that hangs while it's starting.
+.Lboot_store:
+    .long 0x60008058
+.Lboot_magic:
+    .long 0xDEC0
 .Lflash_data_mmu_index:
     .long _flash_data_mmu_index
 .Lflash_data_mmu_pages:
@@ -151,7 +158,13 @@ call_start_cpu0:
     l32r a3, .Lwdt_key
     movi a4, 0
 
-    // RTC WDT
+    // RTC WDT, unless a boot stage has it
+    l32r a5, .Lboot_store
+    memw
+    l32i a5, a5, 0
+    srli a5, a5, 16
+    l32r a6, .Lboot_magic
+    beq  a5, a6, .Lrtc_wdt_done
     l32r a2, .Lrtc_wdt_protect
     memw
     s32i a3, a2, 0
@@ -160,6 +173,7 @@ call_start_cpu0:
     s32i a4, a5, 0
     memw
     s32i a4, a2, 0
+.Lrtc_wdt_done:
 
     // TIMG0 WDT
     l32r a2, .Ltimg0_wdt_protect
@@ -289,10 +303,23 @@ call_start_cpu0:
     //     entries from a10 with physical pages counting up from a9.
     l32r a8, .Lmmu_table_base
 
+    // Where a boot stage says the image is, in 64 KB pages, in a3. The page store and settings, which are
+    // where they are on the chip whichever slot's running, don't move with it.
+    l32r a3, .Lboot_store
+    memw
+    l32i a3, a3, 0
+    srli a4, a3, 16
+    l32r a5, .Lboot_magic
+    extui a3, a3, 0, 16
+    beq  a4, a5, .Lboot_page_done
+    movi a3, 0
+.Lboot_page_done:
+
     mov  a10, a8
     l32r a9, .Lirom_flash_addr
     l32i a9, a9, 0
     srli a9, a9, 16
+    add  a9, a9, a3
     l32r a2, .Lirom_mmu_pages
 .Lirom_map_loop:
     beqz a2, .Lirom_map_done
@@ -308,6 +335,7 @@ call_start_cpu0:
     l32r a9, .Ldrom_flash_addr
     l32i a9, a9, 0
     srli a9, a9, 16
+    add  a9, a9, a3
     l32r a2, .Ldrom_mmu_pages
 .Ldrom_map_loop:
     beqz a2, .Ldrom_map_done
