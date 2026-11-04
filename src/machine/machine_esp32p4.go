@@ -284,6 +284,18 @@ func setupPinInterrupt() error {
 	}).Enable()
 }
 
+// enableVO4 turns on the VO4 on-chip regulator at 3.3V. It is off at reset.
+// See ESP-IDF esp_ldo_acquire_channel and hal/esp32p4/include/hal/ldo_ll.h.
+func enableVO4() {
+	esp.PMU.SetEXT_LDO_P1_0P2A_ANA_ANA_0P2A_DREF_1(15)
+	esp.PMU.SetEXT_LDO_P1_0P2A_ANA_ANA_0P2A_MUL_1(7)
+	esp.PMU.SetEXT_LDO_P1_0P2A__0P2A_TIEH_SEL_1(0)
+	esp.PMU.SetEXT_LDO_P1_0P2A__0P2A_TIEH_1(0)
+	esp.PMU.SetEXT_LDO_P1_0P2A__0P2A_FORCE_TIEH_SEL_1(1)
+	esp.PMU.SetEXT_LDO_P1_0P2A_ANA_ANA_0P2A_EN_VDET_1(1)
+	esp.PMU.SetEXT_LDO_P1_0P2A__0P2A_XPD_1(1)
+}
+
 var (
 	DefaultUART = UART0
 
