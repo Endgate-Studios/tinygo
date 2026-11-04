@@ -86,26 +86,16 @@ func WithPoison(on bool) HeapOption {
 // NewHeap makes a Heap over mem. The Heap owns mem, and mem must stay alive
 // while the Heap is in use.
 func NewHeap(mem []byte, opts ...HeapOption) (*Heap, error) {
-	h := &Heap{}
-	if err := h.Init(mem, opts...); err != nil {
+	h := &Heap{heapOptions: heapOptions{locker: noLock{}, poison: debugPoison}}
+	for _, opt := range opts {
+		if err := opt(&h.heapOptions); err != nil {
+			return nil, err
+		}
+	}
+	if err := h.addSpan(mem); err != nil {
 		return nil, err
 	}
 	return h, nil
-}
-
-// Init is NewHeap without an allocation, for -gc=none. h is memory that the
-// caller owns, for example a global. Call Init before you use h.
-func (h *Heap) Init(mem []byte, opts ...HeapOption) error {
-	*h = Heap{heapOptions: heapOptions{locker: noLock{}, poison: debugPoison}}
-	for _, opt := range opts {
-		if err := opt(&h.heapOptions); err != nil {
-			return err
-		}
-	}
-	if len(mem) == 0 {
-		return ErrArenaTooSmall
-	}
-	return h.addSpan(mem)
 }
 
 // Grow adds mem to the heap as a new span. The Heap owns mem, and mem must stay

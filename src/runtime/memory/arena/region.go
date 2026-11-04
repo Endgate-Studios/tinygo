@@ -18,9 +18,8 @@ type RegionStats struct {
 // Region is not safe for concurrent use. Give each goroutine its own Region.
 type Region struct {
 	stats          RegionStats // first, for 8-byte alignment
-	mem            []byte      // keeps the memory alive under a precise GC
 	base, off, end uintptr
-	poison         bool
+	regionOptions
 }
 
 // RegionOption configures a Region.
@@ -38,20 +37,28 @@ func WithRegionPoison(on bool) RegionOption {
 	}
 }
 
-// NewRegion makes a Region over mem. mem must stay alive while the Region is in use.
+// NewRegion makes a Region at the start of mem and allocates from the rest, so it
+// needs no allocator and works with -gc=none. It writes to mem, so mem must be usable
+// when NewRegion runs. A Region holds no pointers, and the result keeps mem alive.
 func NewRegion(mem []byte, opts ...RegionOption) (*Region, error) {
-	o := regionOptions{poison: debugPoison}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			return nil, err
-		}
-	}
 	if len(mem) == 0 {
 		return nil, ErrEmptyRegion
 	}
-	base := uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
-	r := &Region{mem: mem, base: base, off: base, end: base + uintptr(len(mem)), poison: o.poison}
-	r.stats.Cap = uintptr(len(mem))
+	start := uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
+	end := start + uintptr(len(mem))
+	head := alignUp(start, unsafe.Alignof(Region{}))
+	if head > end || end-head < unsafe.Sizeof(Region{}) {
+		return nil, ErrArenaTooSmall
+	}
+	base := head + unsafe.Sizeof(Region{})
+	r := (*Region)(unsafe.Pointer(head))
+	*r = Region{base: base, off: base, end: end, regionOptions: regionOptions{poison: debugPoison}}
+	for _, opt := range opts {
+		if err := opt(&r.regionOptions); err != nil {
+			return nil, err
+		}
+	}
+	r.stats.Cap = end - base
 	return r, nil
 }
 

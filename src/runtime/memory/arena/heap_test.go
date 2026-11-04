@@ -445,3 +445,49 @@ func regionOps(t *testing.T, seed int64, steps uint16) {
 		}
 	}
 }
+
+func TestRegionInMem(t *testing.T) {
+	if _, err := NewRegion(nil); err != ErrEmptyRegion {
+		t.Errorf("NewRegion(nil) error = %v, want %v", err, ErrEmptyRegion)
+	}
+	if _, err := NewRegion(make([]byte, 8)); err != ErrArenaTooSmall {
+		t.Errorf("NewRegion(8 bytes) error = %v, want %v", err, ErrArenaTooSmall)
+	}
+
+	mem := make([]byte, 1024)
+	for _, start := range []int{0, 1, 2, 3} {
+		m := mem[start:]
+		r, err := NewRegion(m, WithRegionPoison(true))
+		if err != nil {
+			t.Fatalf("start %d: %v", start, err)
+		}
+		lo := uintptr(unsafe.Pointer(&m[0]))
+		hi := lo + uintptr(len(m))
+		if p := uintptr(unsafe.Pointer(r)); p < lo || p >= hi {
+			t.Errorf("start %d: Region at %#x, outside [%#x, %#x)", start, p, lo, hi)
+		}
+		c := r.Stats().Cap
+		if c == 0 || c >= uintptr(len(m)) {
+			t.Errorf("start %d: Cap = %d, len(mem) = %d", start, c, len(m))
+		}
+		// The whole capacity is usable and writing all of it leaves the Region intact.
+		p := r.Alloc(c, 1)
+		if p == nil {
+			t.Fatalf("start %d: Alloc(Cap) = nil", start)
+		}
+		if a := uintptr(p); a < lo || a+c > hi {
+			t.Errorf("start %d: Alloc at %#x, outside [%#x, %#x)", start, a, lo, hi)
+		}
+		fillBytes(uintptr(p), c, 0xFF)
+		if r.Alloc(1, 1) != nil {
+			t.Errorf("start %d: Alloc past the end did not fail", start)
+		}
+		r.Reset()
+		if got := r.Stats(); got.Cap != c || got.Used != 0 || got.Resets != 1 {
+			t.Errorf("start %d: after Reset Stats = %+v", start, got)
+		}
+		if r.Alloc(c, 1) == nil {
+			t.Errorf("start %d: Alloc(Cap) after Reset = nil", start)
+		}
+	}
+}

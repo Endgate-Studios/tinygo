@@ -120,9 +120,9 @@ func TestFreeIntoArenaReleasesBackingArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := r.Alloc(64, 8)
+	p := unsafe.Pointer(r)
 	if p != unsafe.Pointer(unsafe.SliceData(sink)) {
-		t.Fatal("the first allocation is not the start of the backing array")
+		t.Fatal("the Region is not at the start of the backing array")
 	}
 	before := frees()
 	Free((*byte)(p))
