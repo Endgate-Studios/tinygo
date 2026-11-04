@@ -327,6 +327,7 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		"esp32c3": 0x0005,
 		"esp32c6": 0x000d,
 		"esp32h2": 0x0010,
+		"esp32p4": 0x0012,
 		"esp32s3": 0x0009,
 	}[chip]
 
@@ -339,12 +340,13 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		"esp32c3": 0x1f, // 80MHz=0x0F, 2MB=0x10
 		"esp32c6": 0x10, // 80MHz=0x00, 2MB=0x10 (C6 uses different freq encoding)
 		"esp32h2": 0x1f, // 48MHz=0x0F, 2MB=0x10
+		"esp32p4": 0x1f, // 80MHz=0x0F, 2MB=0x10
 		"esp32s3": 0x1f, // 80MHz=0x0F, 2MB=0x10
 	}[chip]
 
 	// Image header.
 	switch chip {
-	case "esp32", "esp32c3", "esp32s3", "esp32c6", "esp32h2":
+	case "esp32", "esp32c3", "esp32s3", "esp32c6", "esp32h2", "esp32p4":
 		// Header format:
 		// https://github.com/espressif/esp-idf/blob/v4.3/components/bootloader_support/include/esp_app_format.h#L71
 		// Note: not adding a SHA256 hash as the binary is modified by
