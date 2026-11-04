@@ -348,7 +348,9 @@ func lenToCap(b []byte) []byte {
 	return b[:len(b):len(b)]
 }
 
-func EnableCDC(txHandler func(), rxHandler func([]byte), setupHandler func(usb.Setup) bool) {
+// EnableCDC sets up the CDC endpoints. rxHandler returns false to leave the host waiting, until
+// AckUsbOutTransfer of the OUT endpoint.
+func EnableCDC(txHandler func(), rxHandler func([]byte) bool, setupHandler func(usb.Setup) bool) {
 	if len(usbDescriptor.Device) == 0 {
 		usbDescriptor = descriptor.CDC
 	}
@@ -361,10 +363,10 @@ func EnableCDC(txHandler func(), rxHandler func([]byte), setupHandler func(usb.S
 				Type:  usb.ENDPOINT_TYPE_INTERRUPT,
 			},
 			{
-				Index:     usb.CDC_ENDPOINT_OUT,
-				IsIn:      false,
-				Type:      usb.ENDPOINT_TYPE_BULK,
-				RxHandler: rxHandler,
+				Index:          usb.CDC_ENDPOINT_OUT,
+				IsIn:           false,
+				Type:           usb.ENDPOINT_TYPE_BULK,
+				DelayRxHandler: rxHandler,
 			},
 			{
 				Index:     usb.CDC_ENDPOINT_IN,
