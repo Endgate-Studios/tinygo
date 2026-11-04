@@ -6,6 +6,10 @@ import (
 )
 
 func tweakDevice(d *Device, pkgName string) {
+	if d.Metadata.NameLower == "esp32p4" {
+		esp32p4FixAHBDMANames(d)
+	}
+
 	if pkgName != "stm32" {
 		// no-op for device types that do not need tweaks
 		return
@@ -51,6 +55,24 @@ func tweakDevice(d *Device, pkgName string) {
 			// generated .go file, a constant for TXE is added here
 			// in case TXFNF is defined.
 			stm32EnsureBit(isr, "TXE", "TXFNF", "USART_ISR_")
+		}
+	}
+}
+
+// esp32p4FixAHBDMANames gives the right channel to two AHB_DMA registers. The
+// SVD has OUT_CONF0_CH%s at 0x190 with no dimIndex, for channels 1 and 2, so the
+// first name is the same as the channel 0 register at 0xD0.
+func esp32p4FixAHBDMANames(d *Device) {
+	p := d.PeripheralDict["AHB_DMA"]
+	if p == nil {
+		return
+	}
+	for _, r := range p.Registers {
+		switch r.Address - p.BaseAddress {
+		case 0x190:
+			r.Name = "OUT_CONF0_CH1"
+		case 0x250:
+			r.Name = "OUT_CONF0_CH2"
 		}
 	}
 }
