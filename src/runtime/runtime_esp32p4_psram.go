@@ -8,7 +8,7 @@ import (
 	"unsafe"
 )
 
-// This starts the hex PSRAM with a 40 MHz clock and no timing tuning, before the heap, which is
+// This starts the hex PSRAM with an 80 MHz clock and no timing tuning, before the heap, which is
 // in PSRAM with this build tag. A full memory test of 32 MB passed at this clock on chip revision 1.3.
 // See ESP-IDF v5.3.2 esp_psram/device/esp_psram_impl_ap_hex.c and soc/esp32p4/include/soc/spi_mem_s_reg.h.
 const (
@@ -42,7 +42,7 @@ const (
 	psramReadDummy    = 2 * (10 - 1)
 	psramWriteDummy   = 2 * (5 - 1)
 
-	psramBusDivider = 10 // 400 MHz MPLL to 40 MHz
+	psramBusDivider = 5 // 400 MHz MPLL to 80 MHz
 	psramSPINum     = 3
 	psramModeOPIDTR = 7
 	psramCSMask     = 1 << 1
