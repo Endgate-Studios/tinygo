@@ -195,6 +195,29 @@ var link struct {
 	waiting chan rpcMessage
 
 	mac [6]byte
+
+	stats    HostedStats
+	lastPoll time.Time
+	lastIn   time.Time
+}
+
+// HostedStats count what's gone between the P4 and the C6, for finding out where a wait is.
+type HostedStats struct {
+	Polls, Packets      uint32        // reads of the C6's registers, and of the bytes it had
+	FramesIn, FramesOut uint32        // Ethernet frames
+	RoomWaits           uint32        // sends that waited for the C6 to have a buffer
+	RoomWaitWorst       time.Duration // and the longest of those waits
+	PollGapWorst        time.Duration // the longest between two reads of the registers
+	ReplyWorst          time.Duration // from a frame coming to the next going, if that was under a second
+}
+
+// Stats is what's been counted since the last call.
+func Stats() HostedStats {
+	link.mu.Lock()
+	defer link.mu.Unlock()
+	s := link.stats
+	link.stats = HostedStats{}
+	return s
 }
 
 var (
@@ -416,8 +439,10 @@ func transfer(addr uint32, buf []byte, write bool) error {
 	return nil
 }
 
-// receive reads what the C6 has, for as long as the board runs.
+// receive reads what the C6 has, for as long as the board runs. It's on core 0, as the S3's radio is: a sleep on a core that's waiting
+// for work of its own wakes only when it's given some.
 func receive() {
+	machine.AssignCore(0)
 	idle := 0
 	for {
 		got, _ := receiveOnce()
@@ -440,6 +465,12 @@ func receive() {
 func receiveOnce() (bool, error) {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	now := time.Now()
+	if !link.lastPoll.IsZero() {
+		link.stats.PollGapWorst = max(link.stats.PollGapWorst, now.Sub(link.lastPoll))
+	}
+	link.lastPoll = now
+	link.stats.Polls++
 	regs := link.regs[:20]
 	if err := transfer(regIntRaw, regs, false); err != nil {
 		return false, err
@@ -464,6 +495,7 @@ func receiveOnce() (bool, error) {
 	if n == 0 {
 		return false, nil
 	}
+	link.stats.Packets++
 	// Read it all, a buffer at a time: what's left at the address that's that much short of the end.
 	left := n
 	var err error
@@ -523,6 +555,8 @@ func deliver(h hostedHeader, data []byte) {
 			return
 		}
 		n := copy(buf[:], data)
+		link.stats.FramesIn++
+		link.lastIn = time.Now()
 		select {
 		case frames <- Frame{buf: buf, n: n}:
 		default:
@@ -610,6 +644,12 @@ func event(m rpcMessage) {
 func send(ifType, privType uint8, data []byte) error {
 	link.mu.Lock()
 	defer link.mu.Unlock()
+	if ifType == hostedIfSTA {
+		link.stats.FramesOut++
+		if since := time.Since(link.lastIn); since < time.Second {
+			link.stats.ReplyWorst = max(link.stats.ReplyWorst, since)
+		}
+	}
 	for {
 		n := min(len(data), hostedMaxData)
 		h := hostedHeader{ifType: ifType, length: uint16(n), privType: privType, seq: link.seq}
@@ -645,6 +685,13 @@ func send(ifType, privType uint8, data []byte) error {
 // waitForRoom waits until the C6 has a buffer for what's going: sdio_is_write_buffer_available. link.mu is held.
 func waitForRoom() error {
 	wait := 400 * time.Microsecond
+	if link.txFree == 0 {
+		start := time.Now()
+		defer func() {
+			link.stats.RoomWaits++
+			link.stats.RoomWaitWorst = max(link.stats.RoomWaitWorst, time.Since(start))
+		}()
+	}
 	for tries := 0; link.txFree == 0; tries++ {
 		regs := link.regs[:4]
 		if err := transfer(regTokenRData, regs, false); err != nil {
@@ -807,6 +854,24 @@ func SetPowerSave(ps PowerSave) error {
 	}
 	_, err := call(rpcWifiSetPs, func(w *pbWriter) { w.int(1, int32(ps)) }, rpcTimeout)
 	return err
+}
+
+// PowerSaveMode is the modem's power save, as the C6 has it.
+func PowerSaveMode() (PowerSave, error) {
+	if !link.started {
+		return 0, ErrNotStarted
+	}
+	answer, err := call(rpcWifiGetPs, func(*pbWriter) {}, rpcTimeout)
+	if err != nil {
+		return 0, err
+	}
+	var ps PowerSave
+	pbFields(answer, func(f pbField) {
+		if f.num == 2 {
+			ps = PowerSave(int32(f.v))
+		}
+	})
+	return ps, nil
 }
 
 // Events are what's happened.

@@ -146,6 +146,7 @@ const (
 	rpcGetMACAddress    = 257
 	rpcSetWifiMode      = 260
 	rpcWifiSetPs        = 270
+	rpcWifiGetPs        = 271
 	rpcWifiInit         = 278
 	rpcWifiStart        = 280
 	rpcWifiConnect      = 282
