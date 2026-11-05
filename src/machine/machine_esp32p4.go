@@ -19,6 +19,10 @@ const maxPin = 55
 const (
 	cpuInterruptFromPin  = 7
 	cpuInterruptFromUART = 13
+
+	// The interrupt matrix takes the CLIC line, which is the CPU interrupt plus 16.
+	// See ESP-IDF components/riscv/interrupt_clic.c, intr_matrix_route.
+	clicExternalStart = 16
 )
 
 // CPUFrequency returns the current CPU frequency of the chip. The runtime
@@ -266,7 +270,7 @@ var (
 )
 
 func setupPinInterrupt() error {
-	esp.INTERRUPT_CORE0.GPIO_INT0_MAP.Set(cpuInterruptFromPin)
+	esp.INTERRUPT_CORE0.GPIO_INT0_MAP.Set(cpuInterruptFromPin + clicExternalStart)
 	return interrupt.New(cpuInterruptFromPin, func(interrupt.Interrupt) {
 		status := esp.GPIO.STATUS.Get()
 		esp.GPIO.STATUS_W1TC.Set(status)
@@ -477,7 +481,7 @@ func (uart *UART) setupPins(config UARTConfig, signal uint32) {
 func (uart *UART) configureInterrupt(intrMapReg *volatile.Register32) {
 	uart.Bus.INT_ENA.ClearBits(0x0ffff)
 
-	intrMapReg.Set(cpuInterruptFromUART)
+	intrMapReg.Set(cpuInterruptFromUART + clicExternalStart)
 	onceUart.Do(func() {
 		_ = interrupt.New(cpuInterruptFromUART, func(i interrupt.Interrupt) {
 			UART0.serveInterrupt(0)

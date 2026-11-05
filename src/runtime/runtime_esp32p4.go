@@ -104,9 +104,6 @@ func abort() {
 func interruptInit() {
 	riscv.DisableInterrupts()
 
-	// The ROM can leave a value here, and interrupt.In reads it.
-	riscv.MCAUSE.Set(0)
-
 	const mtvecModeCLIC = 3
 	riscv.MTVEC.Set(uintptr(unsafe.Pointer(&_vector_table)) | mtvecModeCLIC)
 
@@ -139,7 +136,7 @@ func timerAlarmHandler(interrupt.Interrupt) {
 }
 
 func initTimerInterrupt() {
-	esp.INTERRUPT_CORE0.TIMERGRP0_T0_INT_MAP.Set(timerAlarmCPUInterrupt)
+	esp.INTERRUPT_CORE0.TIMERGRP0_T0_INT_MAP.Set(timerAlarmCPUInterrupt + clicExternalStart)
 	esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
 	timerAlarmInterrupt = interrupt.New(timerAlarmCPUInterrupt, timerAlarmHandler)
 	timerAlarmInterrupt.Enable()
@@ -161,11 +158,12 @@ func sleepTicks(d timeUnit) {
 //go:extern _vector_table
 var _vector_table [0]uintptr
 
-// External interrupts start at line 16 of the CLIC.
-// See ESP-IDF components/soc/esp32p4/include/soc/clic_reg.h.
+// External interrupts start at line 16 of the CLIC, and the interrupt matrix
+// takes the line number. See ESP-IDF components/riscv/interrupt_clic.c.
 const (
-	clicExternalCtrl = 0x20801000 + 16*4
-	clicIE           = 1 << 8
+	clicExternalStart = 16
+	clicExternalCtrl  = 0x20801000 + clicExternalStart*4
+	clicIE            = 1 << 8
 )
 
 // clicThreshold is CLIC_INT_THRESH_REG, a register on this chip and not a CSR.

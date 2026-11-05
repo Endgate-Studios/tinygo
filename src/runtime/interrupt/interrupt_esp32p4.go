@@ -27,16 +27,21 @@ const (
 	// See ESP-IDF components/riscv/include/esp_private/vectors_const.h.
 	mcauseInterrupt  = 1 << 31
 	mcauseReasonMask = 0xfff
+
+	// mintstatus is at a non-standard address on this chip, with the current
+	// level in the top byte. See ESP-IDF esp_private/interrupt_clic.h.
+	mintstatus    = riscv.CSR(0x346)
+	mintstatusMIL = 24
 )
 
 func clicCtrl(num int) *volatile.Register32 {
 	return (*volatile.Register32)(unsafe.Pointer(uintptr(clicCtrlBase + (num+clicExternalStart)*4)))
 }
 
-// In returns whether the system is currently in an interrupt. The CLIC keeps
-// other state in the high bits of mcause, so those are not part of this check.
+// In returns whether the system is currently in an interrupt. It reads the
+// interrupt level, because mcause keeps its value after the handler returns.
 func In() bool {
-	return riscv.MCAUSE.Get()&(mcauseInterrupt|mcauseReasonMask) != 0
+	return mintstatus.Get()>>mintstatusMIL != 0
 }
 
 // Enable enables a level triggered CPU interrupt, in the range 1 through 31.
@@ -170,14 +175,15 @@ func handleInterrupt() {
 		return
 	}
 
-	// Writing mcause can change the fields that mstatus shares with it.
 	mstatus := riscv.MSTATUS.Get()
 	mepc := riscv.MEPC.Get()
 
 	callHandler(reason - clicExternalStart)
 	signalInterrupt()
 
-	riscv.MCAUSE.Set(0)
+	// mret restores the interrupt level from mcause, so it must keep its value.
+	// See ESP-IDF components/riscv/vectors.S, _interrupt_handler.
+	riscv.MCAUSE.Set(mcause)
 	riscv.MSTATUS.Set(mstatus)
 	riscv.MEPC.Set(mepc)
 }
