@@ -165,7 +165,7 @@ var CDC = Descriptor{
 		ClassSpecificCDCUnion.Bytes(),
 		EndpointIN(EndpointEP1, TransferTypeInterrupt, 0x10, 0x10).Bytes(),
 		InterfaceCDCData.Bytes(),
-		EndpointOUT(EndpointEP2, TransferTypeBulk, 0x40, 0x00).Bytes(),
-		EndpointIN(EndpointEP2, TransferTypeBulk, 0x40, 0x00).Bytes(),
+		EndpointOUT(EndpointEP2, TransferTypeBulk, cdcBulkPacket, 0x00).Bytes(),
+		EndpointIN(EndpointEP2, TransferTypeBulk, cdcBulkPacket, 0x00).Bytes(),
 	}),
 }

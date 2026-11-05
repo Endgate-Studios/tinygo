@@ -26,8 +26,6 @@ const (
 	EndpointOut = 0x00
 	EndpointIn  = 0x80
 
-	EndpointPacketSize = 64 // 64 for Full Speed, EPT size max is 1024
-
 	// bRequest - standard requests
 	GET_STATUS        = 0
 	CLEAR_FEATURE     = 1

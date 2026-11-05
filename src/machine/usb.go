@@ -1,4 +1,4 @@
-//go:build sam || nrf52840 || rp2040 || rp2350 || stm32f4 || stm32f7 || stm32h7 || mimxrt1062 || (esp32s3 && usbotg)
+//go:build sam || nrf52840 || rp2040 || rp2350 || stm32f4 || stm32f7 || stm32h7 || mimxrt1062 || (esp32s3 && usbotg) || (esp32p4 && usbotg)
 
 package machine
 
@@ -56,6 +56,9 @@ type Serialer interface {
 }
 
 var usbDescriptor descriptor.Descriptor
+
+// usbDeviceQualifier is a high speed device's device qualifier descriptor, or nil for full speed.
+var usbDeviceQualifier func() []byte
 
 func usbVendorID() uint16 {
 	if usb.VendorID != 0 {
@@ -118,10 +121,10 @@ var (
 var udd_ep_control_cache_buffer [256]uint8
 
 //go:align 4
-var udd_ep_in_cache_buffer [NumberOfUSBEndpoints][64]uint8
+var udd_ep_in_cache_buffer [NumberOfUSBEndpoints][usb.EndpointPacketSize]uint8
 
 //go:align 4
-var udd_ep_out_cache_buffer [NumberOfUSBEndpoints][64]uint8
+var udd_ep_out_cache_buffer [NumberOfUSBEndpoints][usb.EndpointPacketSize]uint8
 
 // usb_trans_buffer max size is 255 since that is max size
 // for a descriptor (bLength is 1 byte), and the biggest use
@@ -188,6 +191,10 @@ func sendDescriptor(setup usb.Setup) {
 			return
 		}
 	case descriptor.TypeDeviceQualifier:
+		if usbDeviceQualifier != nil {
+			sendDescriptorData(usbDeviceQualifier(), setup.WLength)
+			return
+		}
 		// Full-speed-only device: STALL to signal no high-speed capability (USB 2.0 §9.6.2).
 		USBDev.SetStallEPIn(0)
 		return
