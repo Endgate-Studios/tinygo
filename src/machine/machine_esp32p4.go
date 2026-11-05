@@ -25,16 +25,9 @@ const (
 	clicExternalStart = 16
 )
 
-// GetRNG returns 32 bits from the hardware random number generator. With no radio
-// clock on, it has less entropy, so it is not for keys. See the ESP32-P4 TRM, chapter on RNG.
-func GetRNG() (uint32, error) {
-	return esp.LP_SYS.RNG_DATA.Get(), nil
-}
-
-// CPUFrequency returns the current CPU frequency of the chip. The runtime
-// selects the 40MHz crystal at startup.
+// CPUFrequency returns the current CPU frequency of the chip.
 func CPUFrequency() uint32 {
-	return 40e6
+	return cpuFrequency
 }
 
 const (
