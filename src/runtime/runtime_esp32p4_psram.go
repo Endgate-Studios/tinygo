@@ -253,12 +253,14 @@ func enablePSRAMSupply() {
 	esp.PMU.SetEXT_LDO_P1_0P1A__0P1A_XPD_1(1)
 }
 
-// raiseClock runs the CPU and buses from the CPU PLL over 4. This measures 80 MHz on chip revision 1.3.
-// The buses on the crystal are too slow for the MIPI DSI bridge to read a frame at 60 MHz.
-// See ESP-IDF esp_hw_support/port/esp32p4/rtc_clk.c, rtc_clk_cpu_freq_to_cpll_mhz.
+// raiseClock runs the CPU at 360 MHz, memory at 180 MHz and APB at 90 MHz. 360 MHz is the most for chips
+// below revision 3.0. The core supply values and PLL settings are the ones ESP-IDF v5.3.2 uses.
+// See esp_hw_support/port/esp32p4/rtc_clk.c, pmu_param.c, and hal/esp32p4/include/hal/clk_tree_ll.h.
 func raiseClock() {
-	// The SVD merges the PLLs of these fields. See soc/esp32p4/include/soc/pmu_reg.h, and
-	// hal/esp32p4/include/hal/clk_tree_ll.h for the order.
+	esp.PMU.SetHP_ACTIVE_BIAS_HP_ACTIVE_DCM_VSET(27)
+	esp.PMU.SetHP_ACTIVE_BIAS_HP_ACTIVE_DCM_MODE(1)
+
+	// The SVD merges the PLLs of these fields. See soc/esp32p4/include/soc/pmu_reg.h.
 	const xpdCPLL, xpdCPLLI2C, globalCPLLICG = 1 << 27, 1 << 23, 1 << 17
 	esp.PMU.IMM_HP_CK_POWER.Set(xpdCPLL | xpdCPLLI2C)
 	esp.PMU.IMM_HP_CK_POWER.Set(globalCPLLICG)
@@ -266,18 +268,53 @@ func raiseClock() {
 	}
 
 	clk := esp.HP_SYS_CLKRST
+	clk.SetANA_PLL_CTRL0_REG_CPU_PLL_CAL_STOP(0)
+	writeCPLL(2, 5<<4)        // I2C_CPLL_OC_REF_DIV, with dchgp 5
+	writeCPLL(3, 9)           // I2C_CPLL_OC_DIV_7_0, for 360 MHz from revision 1.0
+	writeCPLL(6, 1<<6|3<<4|3) // I2C_CPLL_OC_DCUR
+	for end := ticks() + nanosecondsToTicks(100e6); clk.GetANA_PLL_CTRL0_REG_CPU_PLL_CAL_END() == 0 && ticks() < end; {
+	}
+	for end := ticks() + nanosecondsToTicks(10e3); ticks() < end; {
+	}
+	clk.SetANA_PLL_CTRL0_REG_CPU_PLL_CAL_STOP(1)
+
 	update := func() {
 		clk.SetROOT_CLK_CTRL0_REG_SOC_CLK_DIV_UPDATE(1)
 		for clk.GetROOT_CLK_CTRL0_REG_SOC_CLK_DIV_UPDATE() != 0 {
 		}
 	}
-	clk.SetROOT_CLK_CTRL2_REG_APB_CLK_DIV_NUM(0)
+	clk.SetROOT_CLK_CTRL2_REG_APB_CLK_DIV_NUM(2 - 1)
 	update()
 	clk.SetROOT_CLK_CTRL1_REG_SYS_CLK_DIV_NUM(0)
 	update()
-	clk.SetROOT_CLK_CTRL1_REG_MEM_CLK_DIV_NUM(0)
+	clk.SetROOT_CLK_CTRL1_REG_MEM_CLK_DIV_NUM(2 - 1)
 	update()
-	clk.SetROOT_CLK_CTRL0_REG_CPU_CLK_DIV_NUM(4 - 1)
+	clk.SetROOT_CLK_CTRL0_REG_CPU_CLK_DIV_NUM(0)
 	update()
 	esp.LP_AON_CLKRST.SetLP_AONCLKRST_HP_CLK_CTRL_LP_AONCLKRST_HP_ROOT_CLK_SRC_SEL(1)
+}
+
+// writeCPLL writes a register of the CPU PLL over the analog I2C bus.
+// See ESP-IDF components/esp_rom/patches/esp_rom_regi2c_esp32p4.c.
+func writeCPLL(reg, data uint32) {
+	const (
+		anaMaster = 0x50124000
+		conf1     = anaMaster + 0x1c
+		conf2     = anaMaster + 0x20
+		clk160    = anaMaster + 0x34
+		cpllBlock = 0x67
+		cpllSel   = 1 << 11
+		busy      = 1 << 25
+		write     = 1 << 24
+	)
+	psramSet(clk160, 0)
+	psramReg(conf2).ClearBits(0xffffff)
+	psramReg(conf1).ClearBits(0xffffff)
+	psramReg(conf2).SetBits(cpllSel)
+	ctrl := psramReg(anaMaster)
+	for ctrl.Get()&busy != 0 {
+	}
+	ctrl.Set(cpllBlock | reg<<8 | write | data<<16)
+	for ctrl.Get()&busy != 0 {
+	}
 }
