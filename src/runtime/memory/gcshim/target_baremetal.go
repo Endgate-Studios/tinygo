@@ -1,4 +1,4 @@
-//go:build gc.custom && baremetal && (esp32 || esp32s3 || esp32c3 || scheduler.cores)
+//go:build gc.custom && baremetal && (esp32 || esp32s3 || esp32c3 || esp32p4 || scheduler.cores)
 
 package gcshim
 
