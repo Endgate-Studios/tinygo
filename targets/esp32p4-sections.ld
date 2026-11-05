@@ -12,6 +12,8 @@ SECTIONS
         . = ALIGN(16);
         . += _stack_size;
         _stack_top = .;
+        . += _stack_size;
+        _stack1_top = .;
     } >SRAM
 
     .bss (NOLOAD) : ALIGN(4)

@@ -49,12 +49,32 @@ func (i Interrupt) Enable() error {
 	if i.num < 1 || i.num > 31 || i.num == cpuInterruptReserved {
 		return errors.New("interrupt must be in range of 1 through 31, and not 6")
 	}
-	mask := riscv.DisableInterrupts()
-	clicCtrl(i.num).Set(clicLevel1 | clicModeMachine | clicIE)
-	riscv.Asm("fence")
-	riscv.EnableInterrupts(mask)
+	// The interrupt matrix sends peripheral interrupts to core 0.
+	if currentCPU() != 0 {
+		enableOnCore0(uint32(i.num))
+		return nil
+	}
+	enableLocal(1 << uint32(i.num))
 	return nil
 }
+
+// enableLocal enables CPU interrupts on this core. Each core has its own CLIC.
+func enableLocal(mask uint32) {
+	state := riscv.DisableInterrupts()
+	for num := 1; num < 32; num++ {
+		if mask&(1<<uint32(num)) != 0 {
+			clicCtrl(num).Set(clicLevel1 | clicModeMachine | clicIE)
+		}
+	}
+	riscv.Asm("fence")
+	riscv.EnableInterrupts(state)
+}
+
+//go:linkname currentCPU runtime.currentCPU
+func currentCPU() uint32
+
+//go:linkname enableOnCore0 runtime.enableInterruptOnCore0
+func enableOnCore0(num uint32)
 
 //go:linkname callHandlers runtime/interrupt.callHandlers
 func callHandlers(num int)

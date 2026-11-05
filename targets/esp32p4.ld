@@ -11,6 +11,8 @@ MEMORY
 }
 
 /* ROM functions of these chips. See ESP-IDF components/esp_rom/esp32p4/ld/esp32p4.rom.ld. */
+PROVIDE(ets_set_appcpu_boot_addr = 0x4fc000a8);
+PROVIDE(Cache_Enable_L1_CORE1_ICache = 0x4fc004e4);
 PROVIDE(esp_rom_spi_cmd_config = 0x4fc00108);
 PROVIDE(esp_rom_spi_cmd_start = 0x4fc0010c);
 PROVIDE(esp_rom_spi_set_op_mode = 0x4fc00110);

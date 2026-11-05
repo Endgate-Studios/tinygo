@@ -84,10 +84,13 @@ func initTimerClock() {
 // The timer runs in a different clock domain, so wait for the captured value.
 // See ESP-IDF timer_ll_trigger_soft_capture in hal/esp32p4/include/hal/timer_ll.h.
 func ticks() timeUnit {
+	mask := lockTicks()
 	esp.TIMG0.T0UPDATE.Set(esp.TIMG_T0UPDATE_UPDATE)
 	for esp.TIMG0.T0UPDATE.HasBits(esp.TIMG_T0UPDATE_UPDATE) {
 	}
-	return timeUnit(uint64(esp.TIMG0.T0LO.Get()) | uint64(esp.TIMG0.T0HI.Get())<<32)
+	t := timeUnit(uint64(esp.TIMG0.T0LO.Get()) | uint64(esp.TIMG0.T0HI.Get())<<32)
+	unlockTicks(mask)
+	return t
 }
 
 func init() {

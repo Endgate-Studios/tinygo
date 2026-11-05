@@ -32,6 +32,23 @@ call_start_cpu0:
     addi t0, t0, %lo(_start)
     jr   t0
 
+// The ROM starts core 1 here, when ets_set_appcpu_boot_addr has been given this address.
+.section .iram.startup, "ax"
+.global call_start_cpu1
+.type call_start_cpu1,@function
+call_start_cpu1:
+    .option push
+    .option norelax
+    lui  gp, %hi(__global_pointer$)
+    addi gp, gp, %lo(__global_pointer$)
+    .option pop
+    lui  sp, %hi(_stack1_top)
+    addi sp, sp, %lo(_stack1_top)
+    .weak tinygo_runCore1
+    lui  t0, %hi(tinygo_runCore1)
+    addi t0, t0, %lo(tinygo_runCore1)
+    jr   t0
+
 // Traps and non-vectored interrupts jump to the MTVEC base, which must be
 // aligned to 64 bytes. See ESP-IDF components/riscv/vectors_clic.S.
 .section .text.exception_vectors
