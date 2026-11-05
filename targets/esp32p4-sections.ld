@@ -34,26 +34,26 @@ SECTIONS
         _edata = ABSOLUTE(.);
     } >SRAM
 
-    .text : ALIGN(4)
-    {
-        *(.init)
-        *(.text .text.*)
-        . = ALIGN (4);
-    } >SRAM
-
     .rodata : ALIGN(4)
     {
         *(.rodata*)
         *(.srodata*)
         . = ALIGN (4);
+        _erodata = ABSOLUTE(.);
     } >SRAM
+
+    .text : ALIGN(4)
+    {
+        *(.init)
+        *(.text .text.*)
+        . = ALIGN (4);
+    } >CODE
 
     /* Goroutine stacks come from the heap and need 16 byte alignment
      * (RISC-V ELF psABI, integer calling convention).
      */
-    . = ALIGN(16);
-    _heap_start = ABSOLUTE(.);
-    _heap_end = ORIGIN(SRAM) + LENGTH(SRAM);
+    PROVIDE(_heap_start = ALIGN(_erodata, 16));
+    PROVIDE(_heap_end = ORIGIN(SRAM) + LENGTH(SRAM));
 
     /DISCARD/ :
     {

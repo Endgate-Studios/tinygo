@@ -7,7 +7,8 @@
 
 MEMORY
 {
-    SRAM (rwx) : ORIGIN = 0x4FF20000, LENGTH = 0x8DFC0
+    SRAM (rwx) : ORIGIN = 0x4FF20000, LENGTH = 0x40000
+    CODE (rwx) : ORIGIN = 0x4FF60000, LENGTH = 0x4DFC0
 }
 
 INCLUDE "targets/esp32p4-sections.ld"

@@ -25,6 +25,12 @@ const (
 	clicExternalStart = 16
 )
 
+// GetRNG returns 32 bits from the hardware random number generator. With no radio
+// clock on, it has less entropy, so it is not for keys. See the ESP32-P4 TRM, chapter on RNG.
+func GetRNG() (uint32, error) {
+	return esp.LP_SYS.RNG_DATA.Get(), nil
+}
+
 // CPUFrequency returns the current CPU frequency of the chip. The runtime
 // selects the 40MHz crystal at startup.
 func CPUFrequency() uint32 {
@@ -321,6 +327,9 @@ type UART struct {
 	ParityErrorDetected  bool // set when parity error detected
 	DataErrorDetected    bool // set when data corruption detected
 	DataOverflowDetected bool // set when data overflow detected in UART FIFO buffer or RingBuffer
+
+	// OnReceive takes each received byte in the interrupt, in place of Buffer.
+	OnReceive func(byte)
 }
 
 const (
@@ -500,7 +509,10 @@ func (uart *UART) serveInterrupt(num int) {
 
 	if flags&esp.UART_INT_ENA_RXFIFO_FULL_INT_ENA != 0 {
 		for uart.Bus.GetSTATUS_RXFIFO_CNT() > 0 {
-			if !uart.Buffer.Put(byte(uart.Bus.GetFIFO_RXFIFO_RD_BYTE())) {
+			b := byte(uart.Bus.GetFIFO_RXFIFO_RD_BYTE())
+			if uart.OnReceive != nil {
+				uart.OnReceive(b)
+			} else if !uart.Buffer.Put(b) {
 				uart.DataOverflowDetected = true
 			}
 		}

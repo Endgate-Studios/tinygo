@@ -34,6 +34,7 @@ func main() {
 	interruptInit()
 	initTimer()
 	initTimerInterrupt()
+	initPSRAM()
 	run()
 
 	exit(0)

@@ -1,0 +1,5 @@
+{
+	"inherits": ["crowpanel-advanced-9-p4"],
+	"build-tags": ["numa_psram_hex"],
+	"linkerscript": "targets/esp32p4-psram.ld"
+}
