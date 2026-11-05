@@ -338,6 +338,7 @@ const (
 	defaultParity   = ParityNone
 
 	uartInterrupts = esp.UART_INT_ENA_RXFIFO_FULL_INT_ENA |
+		esp.UART_INT_ENA_RXFIFO_TOUT_INT_ENA |
 		esp.UART_INT_ENA_PARITY_ERR_INT_ENA |
 		esp.UART_INT_ENA_FRM_ERR_INT_ENA |
 		esp.UART_INT_ENA_RXFIFO_OVF_INT_ENA |
@@ -507,7 +508,7 @@ func (uart *UART) serveInterrupt(num int) {
 
 	uart.Bus.INT_ENA.ClearBits(uartInterrupts)
 
-	if flags&esp.UART_INT_ENA_RXFIFO_FULL_INT_ENA != 0 {
+	if flags&(esp.UART_INT_ENA_RXFIFO_FULL_INT_ENA|esp.UART_INT_ENA_RXFIFO_TOUT_INT_ENA) != 0 {
 		for uart.Bus.GetSTATUS_RXFIFO_CNT() > 0 {
 			b := byte(uart.Bus.GetFIFO_RXFIFO_RD_BYTE())
 			if uart.OnReceive != nil {
@@ -535,6 +536,16 @@ func (uart *UART) enableTransmitter() {
 	uart.Bus.SetCONF0_SYNC_TXFIFO_RST(1)
 	uart.Bus.SetCONF0_SYNC_TXFIFO_RST(0)
 	uart.Bus.SetCONF1_TXFIFO_EMPTY_THRHD(10)
+}
+
+// SetReceiveBatch interrupts when the receive FIFO holds this many bytes, or when the line has
+// been idle for a short time. At a high baud rate, one interrupt per byte takes most of the CPU.
+func (uart *UART) SetReceiveBatch(bytes uint32) {
+	const idleBits = 40
+	uart.Bus.SetCONF1_RXFIFO_FULL_THRHD(bytes)
+	uart.Bus.SetTOUT_CONF_SYNC_RX_TOUT_THRHD(idleBits)
+	uart.Bus.SetTOUT_CONF_SYNC_RX_TOUT_EN(1)
+	uart.update()
 }
 
 func (uart *UART) enableReceiver() {
