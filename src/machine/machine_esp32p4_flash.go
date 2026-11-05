@@ -42,7 +42,3 @@ func (rawFlash) ReadAt(p []byte, addr uint32) error { return errFlashNotOnP4 }
 func (rawFlash) WriteAt(p []byte, addr uint32) error { return errFlashNotOnP4 }
 
 func (rawFlash) EraseSector(addr uint32) error { return errFlashNotOnP4 }
-
-// EnterBootloader does nothing yet. Download mode is the BOOT and RESET buttons, or the UART port's
-// DTR and RTS lines.
-func EnterBootloader() {}

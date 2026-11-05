@@ -255,7 +255,3 @@ func (rawFlash) EraseSector(addr uint32) error {
 	flashInvalidate(addr, eraseBlockSizeValue)
 	return nil
 }
-
-// EnterBootloader does nothing yet. Download mode is the BOOT and RESET buttons, or the UART port's
-// DTR and RTS lines.
-func EnterBootloader() {}
