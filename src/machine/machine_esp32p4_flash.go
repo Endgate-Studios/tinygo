@@ -1,12 +1,11 @@
-//go:build esp32p4
+//go:build esp32p4 && !p4flash
 
 package machine
 
 import "errors"
 
-// This has the API of machine.Flash and machine.RawFlash, and refuses every access for now.
-// Writing while running from flash needs code in RAM with the cache off, and a mistake there can
-// overwrite the program. See ESP-IDF esp_flash and spi_flash_os_func_app.c.
+// This has the API of machine.Flash and machine.RawFlash, and refuses every access. The p4flash tag has
+// the real one, in machine_esp32p4_flash_rom.go.
 
 var errFlashNotOnP4 = errors.New("machine: flash storage is not written yet on the ESP32-P4")
 

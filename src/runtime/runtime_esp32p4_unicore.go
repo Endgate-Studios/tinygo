@@ -22,3 +22,11 @@ func unlockTicks(interrupt.State) {
 
 func enableInterruptOnCore0(num uint32) {
 }
+
+func esp32p4EnterFlashSafeSection() (interrupt.State, bool) {
+	return interrupt.Disable(), false
+}
+
+func esp32p4ExitFlashSafeSection(state interrupt.State, _ bool) {
+	interrupt.Restore(state)
+}

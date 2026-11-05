@@ -16,6 +16,10 @@ MEMORY
 
 /* ROM functions of these chips. See ESP-IDF components/esp_rom/esp32p4/ld/esp32p4.rom.ld. */
 PROVIDE(ets_set_appcpu_boot_addr = 0x4fc000a8);
+PROVIDE(rtc_get_reset_reason = 0x4fc00018);
+PROVIDE(Cache_WriteBack_Addr = 0x4fc003f4);
+PROVIDE(Cache_Invalidate_Addr = 0x4fc003e4);
+PROVIDE(rom_spiflash_legacy_data = 0x4ff3ffe8);
 PROVIDE(Cache_Enable_L1_CORE1_ICache = 0x4fc004e4);
 PROVIDE(esp_rom_spi_cmd_config = 0x4fc00108);
 PROVIDE(esp_rom_spi_cmd_start = 0x4fc0010c);
@@ -114,8 +118,12 @@ _flash_map_pages = (_flash_end - ORIGIN(FLASH) + 0xFFFF) / 0x10000;
 _heap_start = _psram_end;
 _heap_end = _psram_end + 8M;
 
-/* Where machine.Flash would start, past any firmware this size. */
-__flash_data_phys = 0x400000;
+/* machine.Flash starts past the program, which starts at 0x10000, or further if the RAM part is over 60 KB.
+ * This allows for 120 KB. pkg/wifinet/flashstore's sectors are just under 2 MB, and it needs them past this.
+ * The whole chip is mapped at 0x41000000 for reads. */
+__flash_data_phys = ALIGN(_flash_end - ORIGIN(FLASH) + 0x20000, 0x1000);
+__flash_data_start = 0x41000000 + __flash_data_phys;
+__flash_data_end = 0x42000000;
 
 /* For the GC and scheduler. */
 _globals_start = _sbss;

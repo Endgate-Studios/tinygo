@@ -7,6 +7,7 @@ import (
 	"device/riscv"
 	"internal/task"
 	"runtime/interrupt"
+	"runtime/volatile"
 	"sync/atomic"
 	"unsafe"
 )
@@ -94,6 +95,54 @@ func crossCoreHandler(interrupt.Interrupt) {
 	if gcPauseRequest[core].Swap(0) != 0 {
 		gcInterruptHandler(core)
 	}
+	if flashPauseRequest[core].Swap(0) != 0 {
+		tinygo_flashPark(&flashParkState)
+	}
+}
+
+// Values of flashParkState, shared with tinygo_flashPark in esp32p4.S.
+const (
+	flashParkIdle    = 0
+	flashParkLocked  = 1
+	flashParkRelease = 2
+)
+
+var (
+	flashSafeLock     spinLock
+	flashPauseRequest [numCPU]atomic.Uint32
+	flashParkState    uint32
+)
+
+//export tinygo_flashPark
+func tinygo_flashPark(state *uint32)
+
+// esp32p4EnterFlashSafeSection parks the other core in RAM before a flash erase or write. It must not be
+// called from an interrupt or with interrupts disabled. Interrupts go off first: a GC pause here would wait
+// for the other core while that waits in RAM.
+func esp32p4EnterFlashSafeSection() (interrupt.State, bool) {
+	if secondaryCoresReady.Load() == 0 {
+		return interrupt.Disable(), false
+	}
+	flashSafeLock.Lock()
+	state := interrupt.Disable()
+	other := 1 - currentCPU()
+	flashPauseRequest[other].Store(1)
+	signalCore(other, 1)
+	for volatile.LoadUint32(&flashParkState) != flashParkLocked {
+		spinLoopWait()
+	}
+	return state, true
+}
+
+func esp32p4ExitFlashSafeSection(state interrupt.State, multicore bool) {
+	if multicore {
+		volatile.StoreUint32(&flashParkState, flashParkRelease)
+		for volatile.LoadUint32(&flashParkState) != flashParkIdle {
+			spinLoopWait()
+		}
+		flashSafeLock.Unlock()
+	}
+	interrupt.Restore(state)
 }
 
 // enableInterruptOnCore0 enables a CPU interrupt on core 0, where the interrupt matrix sends them.
