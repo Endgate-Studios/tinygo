@@ -9,6 +9,8 @@
 MEMORY
 {
     SRAM (rwx)  : ORIGIN = 0x4FF00000, LENGTH = 0x2BBD0
+    SRAM2 (rw)  : ORIGIN = 0x4FF40000, LENGTH = 0x40000
+    PSRAM (rw)  : ORIGIN = 0x48400000, LENGTH = 28M
     FLASH (rx)  : ORIGIN = 0x40010000, LENGTH = 16M - 64K
 }
 
@@ -16,6 +18,7 @@ MEMORY
 PROVIDE(esp_rom_spi_cmd_config = 0x4fc00108);
 PROVIDE(esp_rom_spi_cmd_start = 0x4fc0010c);
 PROVIDE(esp_rom_spi_set_op_mode = 0x4fc00110);
+PROVIDE(esp_rom_software_reset_system = 0x4fc00094);
 
 ENTRY(call_start_cpu0)
 
@@ -29,6 +32,12 @@ SECTIONS
         _stack_top = .;
     } >SRAM
 
+    /* Large buffers with no pointers: the GC doesn't scan these, and nothing clears them. */
+    .bss_large (NOLOAD) : ALIGN(16)
+    {
+        *(.bss.main.stripMem .bss.main.wifiArena)
+    } >SRAM
+
     .bss (NOLOAD) : ALIGN(4)
     {
         . = ALIGN (4);
@@ -37,7 +46,7 @@ SECTIONS
         *(.bss .bss.*)
         . = ALIGN (4);
         _ebss = ABSOLUTE(.);
-    } >SRAM
+    } >SRAM2
 
     .data : ALIGN(4)
     {
@@ -49,7 +58,15 @@ SECTIONS
         _flash_map_addr = ABSOLUTE(.);
         LONG(0);
         _edata = ABSOLUTE(.);
-    } >SRAM
+    } >SRAM2
+
+    .psram (NOLOAD) : ALIGN(16)
+    {
+        _psram_start = ABSOLUTE(.);
+        *(.psram .psram.*)
+        . = ALIGN (16);
+        _psram_end = ABSOLUTE(.);
+    } >PSRAM
 
     .iram : ALIGN(4)
     {
@@ -90,8 +107,11 @@ SECTIONS
 
 _flash_map_pages = (_flash_end - ORIGIN(FLASH) + 0xFFFF) / 0x10000;
 
-_heap_start = 0x48400000;
-_heap_end = 0x48C00000;
+_heap_start = _psram_end;
+_heap_end = _psram_end + 8M;
+
+/* Where machine.Flash would start, past any firmware this size. */
+__flash_data_phys = 0x400000;
 
 /* For the GC and scheduler. */
 _globals_start = _sbss;

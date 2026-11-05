@@ -1,3 +1,5 @@
+//go:build !esp32p4
+
 // The ESP-NOW seam: the callbacks and the peer struct of ESP-IDF v5.3.2
 // components/esp_wifi/include/esp_now.h. libespnow.a has the protocol.
 

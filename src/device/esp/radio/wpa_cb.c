@@ -1,3 +1,5 @@
+//go:build !esp32p4
+
 // The struct wpa_funcs table of ESP-IDF v5.3.2
 // wpa_supplicant/esp_supplicant/src/esp_wifi_driver.h. supplicant.go has the
 // station supplicant and ap.go the soft-AP authenticator. The other entries that esp_supplicant_init sets report

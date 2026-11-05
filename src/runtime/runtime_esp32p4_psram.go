@@ -169,7 +169,14 @@ func initPSRAM() {
 		// SOC_MMU_PSRAM_VALID and SOC_MMU_ACCESS_PSRAM, from soc/ext_mem_defs.h.
 		psramReg(psramMMUContent).Set(i | 1<<11 | 1<<10)
 	}
+	memzero(unsafe.Pointer(&_psram_start), uintptr(unsafe.Pointer(&_psram_end))-uintptr(unsafe.Pointer(&_psram_start)))
 }
+
+//go:extern _psram_start
+var _psram_start [0]byte
+
+//go:extern _psram_end
+var _psram_end [0]byte
 
 func setPSRAMModeRegisters() uint32 {
 	v := psramReadMode(0, 16)

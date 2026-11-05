@@ -1,3 +1,5 @@
+//go:build !esp32p4
+
 #include <stdio.h>
 #include <string.h>
 

@@ -1,3 +1,5 @@
+//go:build !esp32p4
+
 // The coexistence adapter of ESP-IDF v5.3.2
 // components/esp_coex/esp32s3/esp_coex_adapter.c for libcoexist.
 

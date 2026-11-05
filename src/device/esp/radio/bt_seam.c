@@ -1,3 +1,5 @@
+//go:build !esp32p4
+
 // The Bluetooth LE controller seam: the OS function table, the controller
 // config and the VHCI callbacks of ESP-IDF v5.3.2
 // components/bt/controller/esp32c3/bt.c, which the ESP32-S3 also uses.
