@@ -1,4 +1,4 @@
-//go:build esp32 || esp32c3 || esp32s3
+//go:build esp32 || esp32c3 || esp32s3 || esp32p4
 
 // PWM on ESP32 chips uses the LEDC peripheral. LEDC means "LED Control", but it
 // works for any PWM job, not only LEDs.
@@ -29,8 +29,6 @@ import (
 	"device/esp"
 	"errors"
 )
-
-const ledcApbClock = 80_000000
 
 const ledcDutyFracBits = 4 // DUTY register has 4 fractional bits; write value<<4
 
