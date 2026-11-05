@@ -98,6 +98,7 @@ func init() {
 }
 
 func abort() {
+	crashRestart()
 	for {
 		riscv.Asm("wfi")
 	}

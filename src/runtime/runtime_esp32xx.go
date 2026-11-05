@@ -46,6 +46,7 @@ func ticksToNanoseconds(ticks timeUnit) int64 {
 }
 
 func putchar(c byte) {
+	crashKeep(c)
 	machine.Serial.WriteByte(c)
 }
 

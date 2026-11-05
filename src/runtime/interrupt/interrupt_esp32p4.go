@@ -223,7 +223,8 @@ func handleException(mcause uintptr) {
 	case riscv.StoreOrAMOAccessFault:
 		println("***     write address:", riscv.MTVAL.Get())
 	}
-	for {
-		riscv.Asm("wfi")
-	}
+	runtimeAbort()
 }
+
+//go:linkname runtimeAbort runtime.abort
+func runtimeAbort()
