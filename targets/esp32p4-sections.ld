@@ -44,6 +44,7 @@ SECTIONS
 
     .text : ALIGN(4)
     {
+        *(.iram.startup)
         *(.init)
         *(.text .text.*)
         . = ALIGN (4);
@@ -72,6 +73,9 @@ SECTIONS
 }
 
 /* For the GC and scheduler. */
+_flash_map_pages = 0;
+_flash_map_addr = 0;
+
 _globals_start = _sbss;
 _globals_end = _edata;
 
