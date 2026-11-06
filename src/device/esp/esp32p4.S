@@ -70,22 +70,50 @@ call_start_cpu1:
     jr   t0
 
 // tinygo_flashPark holds a core in RAM during another core's flash write. It takes the address of the
-// state: 1 says it's parked, 2 lets it go, and 0 says it's gone. It uses no stack, as that can be in PSRAM.
+// state: 1 says it's parked, 2 lets it go, and 0 says it's gone. Its stack is its own, in RAM, as the
+// caller's can be in PSRAM. While it waits it calls tinygo_flashParkPoll, if a program has one: what has
+// to go on during the write that an interrupt would otherwise do, such as starting a display's DMA on
+// its next frame. That has to be in RAM, call nothing that isn't, and touch no PSRAM or flash.
 .global tinygo_flashPark
 .type tinygo_flashPark,@function
 tinygo_flashPark:
+    mv   t2, sp
+    lui  sp, %hi(tinygo_flashParkStackTop)
+    addi sp, sp, %lo(tinygo_flashParkStackTop)
+    addi sp, sp, -16
+    sw   t2, 0(sp)
+    sw   ra, 4(sp)
+    sw   s0, 8(sp)
+    mv   s0, a0
     li   t0, 1
     fence
-    sw   t0, 0(a0)
+    sw   t0, 0(s0)
     fence
-    li   t1, 2
 1:
-    lw   t0, 0(a0)
+    .weak tinygo_flashParkPoll
+    lui  t0, %hi(tinygo_flashParkPoll)
+    addi t0, t0, %lo(tinygo_flashParkPoll)
+    beqz t0, 2f
+    jalr t0
+2:
+    lw   t0, 0(s0)
+    li   t1, 2
     bne  t0, t1, 1b
     fence
-    sw   zero, 0(a0)
+    sw   zero, 0(s0)
     fence
+    lw   s0, 8(sp)
+    lw   ra, 4(sp)
+    lw   sp, 0(sp)
     ret
+
+// The parked core's stack, in RAM.
+.section .bss.tinygo_flashParkStack, "aw", @nobits
+.balign 16
+tinygo_flashParkStack:
+    .space 1024
+tinygo_flashParkStackTop:
+.section .iram.startup, "ax"
 
 // tinygo_flashCall(fn, a, b, c, stackTop) calls the ROM function fn(a, b, c) with the L2 cache suspended and
 // branch prediction off, which would otherwise read flash. See spi_flash_disable_cache in ESP-IDF
