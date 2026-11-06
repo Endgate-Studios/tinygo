@@ -24,10 +24,10 @@ func init() {
 	machine.ConfigureUSBEndpoint(hid.Descriptor,
 		[]usb.EndpointConfig{
 			{
-				Index:     usb.RAWHID_ENDPOINT_OUT,
-				IsIn:      false,
-				Type:      usb.ENDPOINT_TYPE_INTERRUPT,
-				RxHandler: received,
+				Index:          usb.RAWHID_ENDPOINT_OUT,
+				IsIn:           false,
+				Type:           usb.ENDPOINT_TYPE_INTERRUPT,
+				DelayRxHandler: received,
 			},
 			{
 				Index: usb.RAWHID_ENDPOINT_IN,
@@ -43,12 +43,13 @@ func init() {
 		})
 }
 
-// received keeps a report from the host, over one that hasn't been read. The host waits for an answer to
-// each before it sends another, so none are lost that way.
-func received(b []byte) {
+// received keeps a report from the host. The endpoint isn't made ready for another until it's been
+// read, so the host waits, and none is lost or answered out of turn.
+func received(b []byte) bool {
 	n := copy(in[:], b)
 	clear(in[n:])
 	waiting.Set(1)
+	return false
 }
 
 // Receive copies the report the host last sent into p, if there's one that hasn't been read.
@@ -58,6 +59,7 @@ func Receive(p *[ReportSize]byte) bool {
 	}
 	*p = in
 	waiting.Set(0)
+	machine.AckUsbOutTransfer(usb.RAWHID_ENDPOINT_OUT)
 	return true
 }
 
