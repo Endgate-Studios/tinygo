@@ -16,8 +16,8 @@ import (
 
 const NumberOfUSBEndpoints = 8
 
-// Physical endpoints in use. TinyGo classes only use endpoints 0 to 3.
-const otgNumEndpoints = 4
+// Physical endpoints in use: TinyGo's classes use 0 to 3, and raw HID 4.
+const otgNumEndpoints = 5
 
 const cpuInterruptFromUSB = 8
 
@@ -61,7 +61,8 @@ type otgRegisters struct {
 	DIEPTXF1  volatile.Register32 // 0x104
 	DIEPTXF2  volatile.Register32 // 0x108
 	DIEPTXF3  volatile.Register32 // 0x10C
-	_         [444]uint32
+	DIEPTXF4  volatile.Register32 // 0x110
+	_         [443]uint32
 	DCFG      volatile.Register32 // 0x800
 	DCTL      volatile.Register32 // 0x804
 	_         [2]uint32
@@ -206,6 +207,7 @@ const (
 	tx1FIFOWords = 32
 	tx2FIFOWords = 256
 	tx3FIFOWords = 256
+	tx4FIFOWords = 32
 )
 
 var (
@@ -294,6 +296,8 @@ func (dev *USBDevice) Configure(config UARTConfig) {
 	otg.DIEPTXF2.Set(tx2FIFOWords<<16 | start)
 	start += tx2FIFOWords
 	otg.DIEPTXF3.Set(tx3FIFOWords<<16 | start)
+	start += tx3FIFOWords
+	otg.DIEPTXF4.Set(tx4FIFOWords<<16 | start)
 	flushRxFIFO()
 	flushTxFIFO(0x10)
 

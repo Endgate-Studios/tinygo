@@ -30,11 +30,15 @@ type hidDevicer interface {
 var devices [5]hidDevicer
 var size int
 
+// Descriptor is what the device says it is, CDC and HID unless raw HID's been asked for too. Whichever
+// of them is set up last sets the device's descriptor, so it's this, whatever the order.
+var Descriptor = descriptor.CDCHID
+
 // SetHandler sets the handler. Only the first time it is called, it
 // calls machine.EnableHID for USB configuration
 func SetHandler(d hidDevicer) {
 	if size == 0 {
-		machine.ConfigureUSBEndpoint(descriptor.CDCHID,
+		machine.ConfigureUSBEndpoint(Descriptor,
 			[]usb.EndpointConfig{
 				{
 					Index:     usb.HID_ENDPOINT_OUT,

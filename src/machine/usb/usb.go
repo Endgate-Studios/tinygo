@@ -62,23 +62,26 @@ const (
 	CONFIG_REMOTE_WAKEUP = 0x20
 
 	// Interface
-	NumberOfInterfaces = 3
+	NumberOfInterfaces = 4
 	CDC_ACM_INTERFACE  = 0 // CDC ACM
 	CDC_DATA_INTERFACE = 1 // CDC Data
 	CDC_FIRST_ENDPOINT = 1
 	HID_INTERFACE      = 2 // HID
+	RAWHID_INTERFACE   = 3 // raw HID, a vendor page with 32-byte reports each way, as QMK's
 
 	// Endpoint
-	CONTROL_ENDPOINT  = 0
-	CDC_ENDPOINT_ACM  = 1
-	CDC_ENDPOINT_OUT  = 2
-	CDC_ENDPOINT_IN   = 2
-	HID_ENDPOINT_IN   = 3 // for Interrupt In
-	HID_ENDPOINT_OUT  = 3 // for Interrupt Out
-	MIDI_ENDPOINT_IN  = 3 // for Bulk In
-	MIDI_ENDPOINT_OUT = 3 // for Bulk Out
-	MSC_ENDPOINT_IN   = 3 // for Bulk In
-	MSC_ENDPOINT_OUT  = 3 // for Bulk Out
+	CONTROL_ENDPOINT    = 0
+	CDC_ENDPOINT_ACM    = 1
+	CDC_ENDPOINT_OUT    = 2
+	CDC_ENDPOINT_IN     = 2
+	HID_ENDPOINT_IN     = 3 // for Interrupt In
+	HID_ENDPOINT_OUT    = 3 // for Interrupt Out
+	RAWHID_ENDPOINT_IN  = 4 // for Interrupt In
+	RAWHID_ENDPOINT_OUT = 4 // for Interrupt Out
+	MIDI_ENDPOINT_IN    = 3 // for Bulk In
+	MIDI_ENDPOINT_OUT   = 3 // for Bulk Out
+	MSC_ENDPOINT_IN     = 3 // for Bulk In
+	MSC_ENDPOINT_OUT    = 3 // for Bulk Out
 
 	// bmRequestType
 	REQUEST_HOSTTODEVICE = 0x00
