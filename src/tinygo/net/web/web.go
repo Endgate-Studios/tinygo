@@ -376,12 +376,23 @@ var ErrBadBody = errors.New("web: bad chunked body")
 // arrives. The body ends at its Content-Length, at the last chunk of a
 // chunked body, or when the server closes. It gives the status code.
 func Do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []byte, body io.Writer) (int, error) {
+	status, _, err := do(conn, method, host, path, header, reqBody, buf, body, nil)
+	return status, err
+}
+
+// DoRedirect is Do, and for a redirect, a status from 300 to 399, it copies the Location header's value into location
+// and gives its length, and leaves the body unread. A Location longer than location is ErrHeadTooLarge.
+func DoRedirect(conn io.ReadWriter, method, host, path, header string, reqBody, buf []byte, body io.Writer, location []byte) (status, n int, err error) {
+	return do(conn, method, host, path, header, reqBody, buf, body, location)
+}
+
+func do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []byte, body io.Writer, location []byte) (int, int, error) {
 	// Copy into buf instead of append, because append links slice growth,
 	// which allocates.
 	n := 0
 	for _, part := range [...]string{method, " ", path, " HTTP/1.1\r\nHost: ", host, "\r\nConnection: close\r\n", header} {
 		if n+len(part) > len(buf) {
-			return 0, ErrHeadTooLarge
+			return 0, 0, ErrHeadTooLarge
 		}
 		n += copy(buf[n:], part)
 	}
@@ -393,7 +404,7 @@ func Do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []by
 			digits++
 		}
 		if n+len("Content-Length: \r\n")+digits > len(buf) {
-			return 0, ErrHeadTooLarge
+			return 0, 0, ErrHeadTooLarge
 		}
 		n += copy(buf[n:], "Content-Length: ")
 		for i, x := n+digits-1, len(reqBody); i >= n; i, x = i-1, x/10 {
@@ -403,46 +414,53 @@ func Do(conn io.ReadWriter, method, host, path, header string, reqBody, buf []by
 		n += copy(buf[n:], "\r\n")
 	}
 	if n+2 > len(buf) {
-		return 0, ErrHeadTooLarge
+		return 0, 0, ErrHeadTooLarge
 	}
 	n += copy(buf[n:], "\r\n")
 	if _, err := conn.Write(buf[:n]); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(reqBody) > 0 {
 		if _, err := conn.Write(reqBody); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 
 	head, rest, err := readHead(conn, buf)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	line, fields := cutLine(head)
 	if len(line) < 12 || line[8] != ' ' {
-		return 0, ErrBadHead
+		return 0, 0, ErrBadHead
 	}
 	status, ok := atoi(line[9:12])
 	if !ok {
-		return 0, ErrBadHead
+		return 0, 0, ErrBadHead
 	}
 	chunked := equalFold(findHeader(fields, "Transfer-Encoding"), "chunked")
 	length := -1
 	if v := findHeader(fields, "Content-Length"); v != nil && !chunked {
 		if length, ok = atoi(v); !ok {
-			return status, ErrBadHead
+			return status, 0, ErrBadHead
 		}
 	}
+	if location != nil && status >= 300 && status < 400 {
+		v := findHeader(fields, "Location")
+		if len(v) > len(location) {
+			return status, 0, ErrHeadTooLarge
+		}
+		return status, copy(location, v), nil
+	}
 	if method == "HEAD" || status == 204 || status == 304 {
-		return status, nil
+		return status, 0, nil
 	}
 	// The head is used, so buf now buffers the body.
 	r := &bodyReader{r: conn, buf: buf, end: copy(buf, rest)}
 	if chunked {
-		return status, r.chunks(body)
+		return status, 0, r.chunks(body)
 	}
-	return status, r.copyN(body, length)
+	return status, 0, r.copyN(body, length)
 }
 
 // bodyReader reads the body of a response through the buffer of Do.

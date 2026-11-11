@@ -53,6 +53,31 @@ func TestDo(t *testing.T) {
 	}
 }
 
+// DoRedirect gives a redirect's Location and leaves its body, and is Do for anything else.
+func TestDoRedirect(t *testing.T) {
+	for _, tc := range []struct {
+		name, resp     string
+		status         int
+		location, body string
+		err            error
+		room           int
+	}{
+		{"moved", "HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/new\r\nContent-Length: 5\r\n\r\nmoved", 301, "https://example.com/new", "", nil, 64},
+		{"relative", "HTTP/1.1 302 Found\r\nlocation: /other\r\n\r\n", 302, "/other", "", nil, 64},
+		{"none", "HTTP/1.1 303 See Other\r\n\r\n", 303, "", "", nil, 64},
+		{"too long", "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/a/long/way\r\n\r\n", 307, "", "", ErrHeadTooLarge, 8},
+		{"not a redirect", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", 200, "", "hello", nil, 64},
+	} {
+		c := &scriptConn{resp: []byte(tc.resp)}
+		var body bytes.Buffer
+		location := make([]byte, tc.room)
+		status, n, err := DoRedirect(c, "GET", "example.com", "/x", "", nil, make([]byte, 128), &body, location)
+		if status != tc.status || err != tc.err || string(location[:n]) != tc.location || body.String() != tc.body {
+			t.Errorf("%s: %d %v %q %q, want %d %v %q %q", tc.name, status, err, location[:n], body.String(), tc.status, tc.err, tc.location, tc.body)
+		}
+	}
+}
+
 func TestDoRequest(t *testing.T) {
 	c := &scriptConn{resp: []byte("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")}
 	status, err := Do(c, "POST", "example.com", "/api", "Content-Type: application/json\r\n", []byte(`{"a":1}`), make([]byte, 256), io.Discard)

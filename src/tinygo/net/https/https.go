@@ -66,9 +66,19 @@ func (c *Client) Post(host, path, contentType string, data []byte, body io.Write
 
 // Do sends a request as web.Do does, on a new TLS connection to host.
 func (c *Client) Do(method, host, path, header string, data []byte, body io.Writer) (int, error) {
+	status, _, err := c.do(method, host, path, header, data, body, nil)
+	return status, err
+}
+
+// DoRedirect is Do, and for a redirect gives its Location in location, as web.DoRedirect does.
+func (c *Client) DoRedirect(method, host, path, header string, data []byte, body io.Writer, location []byte) (status, n int, err error) {
+	return c.do(method, host, path, header, data, body, location)
+}
+
+func (c *Client) do(method, host, path, header string, data []byte, body io.Writer, location []byte) (int, int, error) {
 	name, port, err := splitHost(host)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -76,7 +86,7 @@ func (c *Client) Do(method, host, path, header string, data []byte, body io.Writ
 	}
 	raw, err := c.connect(name, port, timeout)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer func() {
 		if cl, ok := raw.(io.Closer); ok {
@@ -92,16 +102,16 @@ func (c *Client) Do(method, host, path, header string, data []byte, body io.Writ
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(timeout))
 	if err := conn.Handshake(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	buf := c.Buf
 	if buf == nil {
 		if buf = memory.MakeSlice[byte](c.Mem, DefaultBufSize); buf == nil {
-			return 0, tls.ErrNoMemory
+			return 0, 0, tls.ErrNoMemory
 		}
 		defer memory.FreeSlice(c.Mem, buf)
 	}
-	return web.Do(&deadlineConn{conn, timeout}, method, name, path, header, data, buf, body)
+	return web.DoRedirect(&deadlineConn{conn, timeout}, method, name, path, header, data, buf, body, location)
 }
 
 func (c *Client) connect(name string, port uint16, timeout time.Duration) (tls.RawConn, error) {
