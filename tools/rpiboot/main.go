@@ -5,15 +5,23 @@
 // RPI_BOOT_FILES is the folder with bootcode.bin, start.elf and fixup.dat from
 // github.com/raspberrypi/firmware/tree/master/boot. RPIBOOT is rpiboot's path, when it's
 // not on PATH or in its installer's folder.
+//
+// RPI_FIRMWARE_FILES, if set, is a folder whose files go in a bundle that config.txt loads
+// at 0x0F000000, where machine.FirmwareFile finds them: the Wi-Fi chip's firmware,
+// CLM blob and NVRAM text from github.com/RPi-Distro/firmware-nonfree.
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 )
+
+const bundleAddress = "0x0f000000"
 
 const configTxt = `arm_64bit=1
 kernel=kernel8.img
@@ -57,7 +65,14 @@ func run(kernel string) error {
 	if err := copyFile(kernel, filepath.Join(dir, "kernel8.img")); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.txt"), []byte(configTxt), 0o644); err != nil {
+	config := configTxt
+	if fw := os.Getenv("RPI_FIRMWARE_FILES"); fw != "" {
+		if err := writeBundle(fw, filepath.Join(dir, "firmware.bin")); err != nil {
+			return err
+		}
+		config += "initramfs firmware.bin " + bundleAddress + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.txt"), []byte(config), 0o644); err != nil {
 		return err
 	}
 	cmd := exec.Command(tool, "-d", dir)
@@ -82,6 +97,44 @@ func findRpiboot() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("rpiboot not found: install it from github.com/raspberrypi/usbboot or set RPIBOOT")
+}
+
+// writeBundle packs the files of dir as "TGFW", a count, 64 byte entries of a 56 byte
+// name, offset and size, then the files at 16 byte boundaries.
+func writeBundle(dir, out string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.Type().IsRegular() && len(e.Name()) < 56 {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	head := make([]byte, 8+64*len(names))
+	copy(head, "TGFW")
+	binary.LittleEndian.PutUint32(head[4:], uint32(len(names)))
+	var body []byte
+	offset := (len(head) + 15) &^ 15
+	for i, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return err
+		}
+		e := head[8+64*i:]
+		copy(e[:56], name)
+		binary.LittleEndian.PutUint32(e[56:], uint32(offset+len(body)))
+		binary.LittleEndian.PutUint32(e[60:], uint32(len(data)))
+		body = append(body, data...)
+		for len(body)%16 != 0 {
+			body = append(body, 0)
+		}
+	}
+	file := append(head, make([]byte, offset-len(head))...)
+	file = append(file, body...)
+	return os.WriteFile(out, file, 0o644)
 }
 
 func copyFile(from, to string) error {

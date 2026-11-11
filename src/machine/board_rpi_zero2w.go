@@ -43,4 +43,7 @@ const (
 	GPIO26 Pin = 26
 	GPIO27 Pin = 27
 	GPIO29 Pin = 29
+
+	// WL_REG_ON of the CYW43436 (bcm2710-rpi-zero-2-w.dts, wifi_pwrseq).
+	WIFI_ON = Pin(41)
 )
