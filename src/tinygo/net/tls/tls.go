@@ -1,8 +1,12 @@
-// Package tls is a TLS 1.3 client (RFC 8446) with TLS_AES_128_GCM_SHA256,
-// key exchange on X25519, or secp256r1 after a HelloRetryRequest, server certificates with ECDSA P-256 or RSA,
+// Package tls is a TLS 1.3 client (RFC 8446) with TLS_AES_128_GCM_SHA256, key
+// exchange on X25519, or secp256r1 after a HelloRetryRequest, server certificates with ECDSA P-256 or RSA,
 // with SHA-256, and CA keys on P-256, P-384 or RSA. It checks the server name, the validity, the certificate
 // chain up to a configured CA key or a pinned server key, and the
 // CertificateVerify signature. Its buffers come from an injected allocator.
+//
+// A server without 1.3 gets TLS 1.2 (RFC 5246, tls12.go): ECDHE on the same
+// curves, signed with the same keys, then AES-128-GCM, with the same checks of
+// the chain.
 package tls
 
 import (
@@ -49,6 +53,7 @@ const (
 	ErrFinished    Error = "tls: the server Finished is wrong"
 	ErrClosed      Error = "tls: connection closed"
 	ErrTooLarge    Error = "tls: handshake message larger than the buffer"
+	ErrDowngrade   Error = "tls: the server has TLS 1.3 but chose 1.2: someone between took 1.3 out"
 )
 
 // Record content types (section 5.1).
@@ -137,8 +142,9 @@ type Conn struct {
 	cAP, sAP    [sha256.Size]byte // the application traffic secrets
 	resMaster   [sha256.Size]byte // the resumption master secret
 	resumed     bool
-	sendLimit   int // the most plaintext in a record to the server, or 0
-	recvLimit   int // the most plaintext in a record from the server, or 0
+	v12         bool // the server chose TLS 1.2
+	sendLimit   int  // the most plaintext in a record to the server, or 0
+	recvLimit   int  // the most plaintext in a record from the server, or 0
 
 	data       []byte // decrypted application data not yet read
 	transcript sha256.Digest
@@ -189,6 +195,12 @@ func (c *Conn) Read(b []byte) (int, error) {
 		case recordData:
 			c.data = content
 		case recordHandshake:
+			if c.v12 {
+				if !helloRequests(content) {
+					return 0, ErrHandshake
+				}
+				continue // no renegotiation: the request is passed over (RFC 5246 section 7.4.1.1)
+			}
 			if err := c.postHandshake(content); err != nil {
 				return 0, err
 			}
@@ -214,7 +226,10 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return 0, ErrClosed
 	}
 	sent := 0
-	max := len(c.tx) - headerLen - 1 - tagLen
+	max := len(c.tx) - headerLen - 1 - tagLen // 1.3: the content type, then the tag
+	if c.v12 {
+		max = len(c.tx) - headerLen - explicitLen - tagLen
+	}
 	for len(b) > 0 {
 		n := min(len(b), max, maxPlain)
 		if c.sendLimit > 0 {
@@ -298,6 +313,9 @@ func (c *Conn) readRecord() (byte, []byte, error) {
 		if !c.read.on {
 			return typ, body, nil
 		}
+		if c.v12 {
+			return c.open12(h, body)
+		}
 		if typ != recordData || n < tagLen+1 {
 			return 0, nil, ErrRecord
 		}
@@ -333,6 +351,9 @@ func (c *Conn) writeRecord(typ byte, data []byte) error {
 		b[0], b[1], b[2], b[3], b[4] = typ, 3, 3, byte(n>>8), byte(n)
 		copy(b[headerLen:], data)
 		return writeFull(c.raw, b[:headerLen+n])
+	}
+	if c.v12 {
+		return c.seal12(typ, data)
 	}
 	total := n + 1 + tagLen
 	if headerLen+total > len(b) {

@@ -24,18 +24,28 @@ const (
 	hsFinished            = 20
 	hsMessageHash         = 254
 	hsKeyUpdate           = 24
+
+	// TLS 1.2 only (RFC 5246 section 7.4).
+	hsHelloRequest       = 0
+	hsServerKeyExchange  = 12
+	hsCertificateRequest = 13
+	hsServerHelloDone    = 14
+	hsClientKeyExchange  = 16
 )
 
 const (
 	suiteAES128GCMSHA256 = 0x1301
-	groupSecp256r1       = 0x0017
-	groupX25519          = 0x001d
-	sigECDSAP256SHA256   = 0x0403
-	sigRSAPSSSHA256      = 0x0804 // rsa_pss_rsae_sha256
-	sigRSAPKCS1SHA256    = 0x0401 // only for certificates
-	sigECDSAP384SHA384   = 0x0503 // only for certificates
-	maxCerts             = 4
-	maxCookie            = 256
+	// The TLS 1.2 suites (RFC 5289): ECDHE, then AES-128-GCM with SHA-256.
+	suiteECDHEECDSAAES128GCMSHA256 = 0xc02b
+	suiteECDHERSAAES128GCMSHA256   = 0xc02f
+	groupSecp256r1                 = 0x0017
+	groupX25519                    = 0x001d
+	sigECDSAP256SHA256             = 0x0403
+	sigRSAPSSSHA256                = 0x0804 // rsa_pss_rsae_sha256
+	sigRSAPKCS1SHA256              = 0x0401 // only for certificates
+	sigECDSAP384SHA384             = 0x0503 // only for certificates
+	maxCerts                       = 4
+	maxCookie                      = 256
 )
 
 // helloRetry is the random of a HelloRetryRequest (section 4.1.3).
@@ -70,6 +80,17 @@ type hsState struct {
 	leafN [rsa.MaxBits / 8]byte
 	leafE uint32
 	nLen  int
+
+	// TLS 1.2 (RFC 5246): the version the server chose, its suite and random,
+	// whether it agreed to extended_master_secret (RFC 7627) and asked for a
+	// client certificate, and the master secret and the key block.
+	v12          bool
+	suite        int
+	serverRandom [32]byte
+	ems          bool
+	certReq      bool
+	master       [48]byte
+	keyBlock     [2*keyLen + 2*saltLen]byte
 }
 
 // Handshake runs the TLS 1.3 handshake. It does not go on after an error of
@@ -142,12 +163,15 @@ func (c *Conn) handshake(st *hsState) error {
 		if typ != hsServerHello {
 			return ErrHandshake
 		}
-		retry, err := parseServerHello(body, st, &peerX, &peerY)
+		retry, err := parseServerHello(body, st, &peerX, &peerY, c.cfg.RecordSizeLimit)
 		if err != nil {
 			return err
 		}
 		if !retry {
 			c.addTranscript()
+			if st.v12 {
+				return c.handshake12(st)
+			}
 			break
 		}
 		if st.offer != groupX25519 {
@@ -222,7 +246,7 @@ func (c *Conn) handshake(st *hsState) error {
 		if typ != hsCertificate {
 			return ErrHandshake
 		}
-		if err := parseCertificates(body, st); err != nil {
+		if err := parseCertificates(body, st, false); err != nil {
 			return err
 		}
 		if err := c.checkChain(st); err != nil {
@@ -356,7 +380,10 @@ func (c *Conn) sendClientHello(st *hsState) error {
 	b = put(b, st.random[:]...)
 	b = put(b, 32)
 	b = put(b, st.sessionID[:]...)
-	b = put(b, 0, 2, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff, 1, 0)
+	// TLS 1.3's suite, then TLS 1.2's, for a server without 1.3.
+	b = put(b, 0, 6, suiteAES128GCMSHA256>>8, suiteAES128GCMSHA256&0xff,
+		suiteECDHEECDSAAES128GCMSHA256>>8, suiteECDHEECDSAAES128GCMSHA256&0xff,
+		suiteECDHERSAAES128GCMSHA256>>8, suiteECDHERSAAES128GCMSHA256&0xff, 1, 0)
 	ext := len(b)
 	b = put(b, 0, 0)
 	// No SNI for an IP address (RFC 6066 section 3).
@@ -369,7 +396,12 @@ func (c *Conn) sendClientHello(st *hsState) error {
 	b = put(b, 0, 0x0d, 0, 10, 0, 8, sigECDSAP256SHA256>>8, sigECDSAP256SHA256&0xff,
 		sigRSAPSSSHA256>>8, sigRSAPSSSHA256&0xff, sigRSAPKCS1SHA256>>8, sigRSAPKCS1SHA256&0xff,
 		sigECDSAP384SHA384>>8, sigECDSAP384SHA384&0xff)
-	b = put(b, 0, 0x2b, 0, 3, 2, 3, 4)
+	b = put(b, 0, 0x2b, 0, 5, 4, 3, 4, 3, 3) // supported_versions: 1.3, then 1.2
+	// For TLS 1.2: uncompressed points only (RFC 8422 section 5.1.2), the
+	// extended master secret (RFC 7627), and no renegotiation (RFC 5746).
+	b = put(b, 0, 0x0b, 0, 2, 1, 0)
+	b = put(b, 0, 0x17, 0, 0)
+	b = put(b, 0xff, 0x01, 0, 1, 0)
 	if l := c.cfg.RecordSizeLimit; l > 0 {
 		v := min(max(l, minRecordLimit), maxPlain) + 1 // with the content type (RFC 8449 section 4)
 		b = put(b, 0, 0x1c, 0, 2, byte(v>>8), byte(v))
@@ -449,35 +481,58 @@ func (c *Conn) addTranscript() {
 
 // parseServerHello reads a ServerHello, or a HelloRetryRequest, which it
 // reports with retry. A HelloRetryRequest must ask for secp256r1, and its
-// cookie goes into st (section 4.1.4).
-func parseServerHello(b []byte, st *hsState, x, y *[32]byte) (retry bool, err error) {
-	if len(b) < 2+32+1+32+2+1+2 {
+// cookie goes into st (section 4.1.4). A ServerHello with no
+// supported_versions is TLS 1.2's, which sets st.v12 (parseServerHello12).
+// limit is Config.RecordSizeLimit.
+func parseServerHello(b []byte, st *hsState, x, y *[32]byte, limit int) (retry bool, err error) {
+	if len(b) < 2+32+1 {
 		return false, ErrHandshake
 	}
-	retry = [32]byte(b[2:34]) == helloRetry
-	if b[34] != 32 || [32]byte(b[35:67]) != st.sessionID {
+	random := [32]byte(b[2:34])
+	retry = random == helloRetry
+	sidLen := int(b[34])
+	if sidLen > 32 || len(b) < 35+sidLen+3 {
 		return false, ErrHandshake
 	}
-	if int(b[67])<<8|int(b[68]) != suiteAES128GCMSHA256 || b[69] != 0 {
+	sameSID := sidLen == 32 && [32]byte(b[35:67]) == st.sessionID
+	rest := b[35+sidLen:]
+	suite := int(rest[0])<<8 | int(rest[1])
+	if rest[2] != 0 {
 		return false, ErrUnsupported
 	}
-	ext := b[70:]
-	if len(ext) < 2 || int(ext[0])<<8|int(ext[1]) != len(ext)-2 {
+	ext := rest[3:]
+	if len(ext) > 0 { // a TLS 1.2 ServerHello may have no extensions
+		if len(ext) < 2 || int(ext[0])<<8|int(ext[1]) != len(ext)-2 {
+			return false, ErrHandshake
+		}
+		ext = ext[2:]
+	}
+	sv, ok, err := findExtension(ext, 0x2b) // supported_versions
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		if retry {
+			return false, ErrUnsupported
+		}
+		return false, parseServerHello12(b[:2], &random, sameSID, suite, ext, st, limit)
+	}
+	if len(sv) != 2 || sv[0] != 3 || sv[1] != 4 {
+		return false, ErrUnsupported
+	}
+	if !sameSID {
 		return false, ErrHandshake
 	}
-	ext = ext[2:]
-	version, key := false, false
+	if suite != suiteAES128GCMSHA256 {
+		return false, ErrUnsupported
+	}
+	key := false
 	st.cookieLen = 0
 	for len(ext) >= 4 {
 		typ, n := int(ext[0])<<8|int(ext[1]), int(ext[2])<<8|int(ext[3])
-		if 4+n > len(ext) {
-			return false, ErrHandshake
-		}
 		v := ext[4 : 4+n]
 		ext = ext[4+n:]
 		switch typ {
-		case 0x2b: // supported_versions
-			version = n == 2 && v[0] == 3 && v[1] == 4
 		case 0x2c: // cookie
 			if !retry || n < 2 || int(v[0])<<8|int(v[1]) != n-2 || n-2 > maxCookie {
 				return false, ErrUnsupported
@@ -507,10 +562,86 @@ func parseServerHello(b []byte, st *hsState, x, y *[32]byte) (retry bool, err er
 			key = true
 		}
 	}
-	if !version || !key || len(ext) != 0 {
+	if !key {
 		return false, ErrUnsupported
 	}
 	return retry, nil
+}
+
+// downgrade is the end of the random of a TLS 1.3 server that answers with
+// TLS 1.2, which a client that offered 1.3 refuses (RFC 8446 section 4.1.3):
+// someone between has taken 1.3 out of the ClientHello.
+var downgrade = [7]byte{'D', 'O', 'W', 'N', 'G', 'R', 'D'}
+
+// parseServerHello12 reads the rest of a TLS 1.2 ServerHello: its version,
+// suite and extensions (RFC 5246 section 7.4.1.3).
+func parseServerHello12(version []byte, random *[32]byte, sameSID bool, suite int, ext []byte, st *hsState, limit int) error {
+	if version[0] != 3 || version[1] != 3 {
+		return ErrUnsupported // nothing before 1.2
+	}
+	if [7]byte(random[24:31]) == downgrade && random[31] <= 1 {
+		return ErrDowngrade
+	}
+	if sameSID {
+		return ErrUnsupported // resuming a session this client never had
+	}
+	if suite != suiteECDHEECDSAAES128GCMSHA256 && suite != suiteECDHERSAAES128GCMSHA256 {
+		return ErrUnsupported
+	}
+	st.v12, st.suite, st.serverRandom = true, suite, *random
+	for len(ext) >= 4 {
+		typ, n := int(ext[0])<<8|int(ext[1]), int(ext[2])<<8|int(ext[3])
+		v := ext[4 : 4+n]
+		ext = ext[4+n:]
+		switch typ {
+		case 0x17: // extended_master_secret
+			if n != 0 {
+				return ErrHandshake
+			}
+			st.ems = true
+		case 0xff01: // renegotiation_info, empty on a first handshake (RFC 5746)
+			if n != 1 || v[0] != 0 {
+				return ErrHandshake
+			}
+		case 0x1c: // record_size_limit (RFC 8449): in the ServerHello in 1.2
+			if limit == 0 || n != 2 {
+				return ErrUnsupported
+			}
+			if st.peerLimit = int(v[0])<<8 | int(v[1]); st.peerLimit < minRecordLimit {
+				return ErrHandshake
+			}
+		case 0x01: // max_fragment_length
+			code := fragCode(limit)
+			if code == 0 || n != 1 || v[0] != code {
+				return ErrUnsupported
+			}
+			st.fragLimit = 1 << (8 + code)
+		case 0x29, 0x2c, 0x33: // TLS 1.3's
+			return ErrUnsupported
+		}
+	}
+	return nil
+}
+
+// findExtension gives the body of the extension typ in ext, and checks that
+// every extension's length fits.
+func findExtension(ext []byte, typ int) ([]byte, bool, error) {
+	var found []byte
+	ok := false
+	for len(ext) > 0 {
+		if len(ext) < 4 {
+			return nil, false, ErrHandshake
+		}
+		t, n := int(ext[0])<<8|int(ext[1]), int(ext[2])<<8|int(ext[3])
+		if 4+n > len(ext) {
+			return nil, false, ErrHandshake
+		}
+		if t == typ {
+			found, ok = ext[4:4+n], true
+		}
+		ext = ext[4+n:]
+	}
+	return found, ok, nil
 }
 
 // fragCode gives the max_fragment_length code of the largest size from 512
@@ -562,13 +693,21 @@ func (c *Conn) parseEncryptedExtensions(b []byte, st *hsState) error {
 	return nil
 }
 
-// parseCertificates reads the chain of the Certificate message.
-func parseCertificates(b []byte, st *hsState) error {
-	if len(b) < 4 || b[0] != 0 { // an empty certificate_request_context
+// parseCertificates reads the chain of the Certificate message: TLS 1.3's,
+// or with v12 TLS 1.2's, which has no request context and no extensions of
+// each certificate.
+func parseCertificates(b []byte, st *hsState, v12 bool) error {
+	if !v12 {
+		if len(b) < 1 || b[0] != 0 { // an empty certificate_request_context
+			return ErrHandshake
+		}
+		b = b[1:]
+	}
+	if len(b) < 3 {
 		return ErrHandshake
 	}
-	list := b[4:]
-	if int(b[1])<<16|int(b[2])<<8|int(b[3]) != len(list) {
+	list := b[3:]
+	if int(b[0])<<16|int(b[1])<<8|int(b[2]) != len(list) {
 		return ErrHandshake
 	}
 	for len(list) > 0 {
@@ -576,15 +715,19 @@ func parseCertificates(b []byte, st *hsState) error {
 			return ErrHandshake
 		}
 		n := int(list[0])<<16 | int(list[1])<<8 | int(list[2])
-		if 3+n+2 > len(list) {
+		if 3+n > len(list) || !v12 && 3+n+2 > len(list) {
 			return ErrHandshake
 		}
 		der := list[3 : 3+n]
-		e := int(list[3+n])<<8 | int(list[4+n])
-		if 3+n+2+e > len(list) {
-			return ErrHandshake
+		if v12 {
+			list = list[3+n:]
+		} else {
+			e := int(list[3+n])<<8 | int(list[4+n])
+			if 3+n+2+e > len(list) {
+				return ErrHandshake
+			}
+			list = list[3+n+2+e:]
 		}
-		list = list[3+n+2+e:]
 		if st.nCerts == maxCerts {
 			continue // the anchor must be in the first certificates
 		}
