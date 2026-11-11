@@ -1,0 +1,6 @@
+{
+	"inherits": ["bcm2710"],
+	"build-tags": ["rpi_zero2w"],
+	"flash-method": "command",
+	"flash-command": "go run ./tools/rpiboot {bin}"
+}
