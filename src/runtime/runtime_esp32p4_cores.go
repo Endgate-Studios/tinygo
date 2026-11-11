@@ -116,6 +116,22 @@ var (
 //export tinygo_flashPark
 func tinygo_flashPark(state *uint32)
 
+// parkOtherCore parks the other core in RAM, as esp32p4EnterFlashSafeSection does, so that it runs nothing more, a watchdog's
+// feed included, before resetWholeChip's reset. It waits a while at most: a core that's stuck with its interrupts off never parks,
+// and the reset's to come anyway. It's for a crash, so it takes no lock.
+func parkOtherCore() {
+	interrupt.Disable()
+	if secondaryCoresReady.Load() == 0 {
+		return
+	}
+	other := 1 - currentCPU()
+	flashPauseRequest[other].Store(1)
+	signalCore(other, 1)
+	for i := 0; i < 1<<22 && volatile.LoadUint32(&flashParkState) != flashParkLocked; i++ {
+		spinLoopWait()
+	}
+}
+
 // esp32p4EnterFlashSafeSection parks the other core in RAM before a flash erase or write. It must not be
 // called from an interrupt or with interrupts disabled. Interrupts go off first: a GC pause here would wait
 // for the other core while that waits in RAM.

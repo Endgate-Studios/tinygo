@@ -25,6 +25,7 @@ func checkAllocContext() {
 	if interrupt.In() {
 		runtimePanic("heap alloc in interrupt")
 	}
+	checkInterrupts()
 }
 
 func initArena() error {
