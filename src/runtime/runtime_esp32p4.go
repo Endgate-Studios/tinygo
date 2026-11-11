@@ -59,6 +59,27 @@ func disableWatchdogs() {
 	esp.LP_WDT.SetSWD_CONFIG_SWD_DISABLE(1)
 }
 
+// resetWholeChip restarts the chip by the LP watchdog, which resets the LP domain as well as the rest. After the ROM's
+// esp_rom_software_reset_system a CrowPanel crashed again within seconds, every time, or hung at startup with USB gone; after the LP
+// watchdog's reset it always came back as from power on.
+//
+// That reset doesn't reset the watchdog itself, so it goes off again unless the next start turns it off first, as disableWatchdogs
+// does: it's set for about three seconds, which a start takes far less than to get there.
+func resetWholeChip() {
+	parkOtherCore() // or a program that feeds the watchdog puts the reset off
+	wdt := esp.LP_WDT
+	wdt.WPROTECT.Set(wdtKey)
+	wdt.CONFIG0.Set(0)
+	wdt.SetCONFIG1(3 * 65000)              // the slow clock's about 65 kHz
+	wdt.SetCONFIG0_WDT_STG0(3)             // reset the system: RTC_WDT_STAGE_ACTION_RESET_SYSTEM
+	wdt.SetCONFIG0_WDT_SYS_RESET_LENGTH(7) // the longest
+	wdt.SetCONFIG0_WDT_CPU_RESET_LENGTH(7)
+	wdt.SetCONFIG0_WDT_EN(1)
+	wdt.SetFEED(1)
+	for {
+	}
+}
+
 // selectCrystalClock runs the CPU and the buses at 40MHz, which needs no PLL.
 // See ESP-IDF rtc_clk_cpu_freq_to_xtal in esp_hw_support/port/esp32p4/rtc_clk.c.
 func selectCrystalClock() {

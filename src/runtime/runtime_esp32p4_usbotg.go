@@ -29,10 +29,7 @@ func crashKeep(c byte) {
 	crashWord(crashNext).Set(next + 1)
 }
 
-//export esp_rom_software_reset_system
-func romSoftwareResetSystem()
-
 func crashRestart() {
 	crashWord(crashFlag).Set(crashMagic)
-	romSoftwareResetSystem()
+	resetWholeChip()
 }

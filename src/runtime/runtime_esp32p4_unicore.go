@@ -27,6 +27,11 @@ func esp32p4EnterFlashSafeSection() (interrupt.State, bool) {
 	return interrupt.Disable(), false
 }
 
+// parkOtherCore has no other core to park: it only turns interrupts off.
+func parkOtherCore() {
+	interrupt.Disable()
+}
+
 func esp32p4ExitFlashSafeSection(state interrupt.State, _ bool) {
 	interrupt.Restore(state)
 }
