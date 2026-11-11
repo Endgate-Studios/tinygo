@@ -86,3 +86,44 @@ tinygo_swapTask:
     ldp     x21, x22, [sp, #16]
     ldp     x19, x20, [sp], #160
     ret
+
+#ifdef __MACH__
+.global _tinygo_swapTaskCores
+_tinygo_swapTaskCores:
+#else
+#ifdef __ELF__
+.section .text.tinygo_swapTaskCores
+.hidden tinygo_swapTaskCores
+#endif
+.global tinygo_swapTaskCores
+tinygo_swapTaskCores:
+#endif
+    // tinygo_swapTask for the cores scheduler. x2, when not nil, is the core's
+    // system stack pointer, cleared once this core is on that stack.
+    stp     x19, x20, [sp, #-160]!
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x25, x26, [sp, #48]
+    stp     x27, x28, [sp, #64]
+    stp     x29, x30, [sp, #80]
+    stp     d8,  d9,  [sp, #96]
+    stp     d10, d11, [sp, #112]
+    stp     d12, d13, [sp, #128]
+    stp     d14, d15, [sp, #144]
+    mov     x8, sp
+    str     x8, [x1]
+    mov     sp, x0
+    cbz     x2, 1f
+    str     xzr, [x2]
+1:
+    ldp     d14, d15, [sp, #144]
+    ldp     d12, d13, [sp, #128]
+    ldp     d10, d11, [sp, #112]
+    ldp     d8, d9, [sp, #96]
+    ldp     x29, x30, [sp, #80]
+    ldp     x27, x28, [sp, #64]
+    ldp     x25, x26, [sp, #48]
+    ldp     x23, x24, [sp, #32]
+    ldp     x21, x22, [sp, #16]
+    ldp     x19, x20, [sp], #160
+    ret

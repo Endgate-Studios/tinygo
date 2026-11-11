@@ -190,3 +190,11 @@ func CPUReset() {
 func EnterBootloader() {
 	CPUReset()
 }
+
+// NumCores returns the number of Cortex-A53 cores, 4.
+func NumCores() int { return 4 }
+
+// CurrentCore returns the core this runs on, from MPIDR_EL1's Aff0.
+func CurrentCore() int {
+	return int(arm64.AsmFull("mrs {}, mpidr_el1", nil) & 3)
+}

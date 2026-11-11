@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"device/arm64"
+	"device/bcm2710"
 	"machine"
 	_ "machine/usb/cdc"
 )
@@ -24,7 +25,14 @@ const zeroSizeAllocPtr uintptr = 16
 func preinit() {}
 
 func initPeripherals() {
+	enableCoreInterrupts(0)
 	machine.InitSerial()
+}
+
+// enableCoreInterrupts lets the core's physical timer and its mailbox 0 interrupt it.
+func enableCoreInterrupts(core uint32) {
+	bcm2710.LOCAL.TIMER_INT_CTL[core].Set(bcm2710.LOCAL_IRQ_CNTPNS)
+	bcm2710.LOCAL.MAILBOX_INT_CTL[core].Set(1)
 }
 
 func putchar(c byte) {
@@ -56,10 +64,27 @@ func ticks() timeUnit {
 	return timeUnit(arm64.AsmFull("mrs {}, cntpct_el0", nil))
 }
 
+// setTimer starts this core's physical timer for the given time. Its interrupt stops it.
+func setTimer(target timeUnit) {
+	arm64.AsmFull("msr cntp_cval_el0, {t}", map[string]interface{}{"t": uintptr(target)})
+	arm64.AsmFull("msr cntp_ctl_el0, {c}", map[string]interface{}{"c": uintptr(1)})
+	arm64.Asm("isb")
+}
+
+// waitForInterrupt sleeps until an interrupt is pending and lets it run, with IRQs
+// masked before and after so a wake isn't lost between a check and the wfi.
+func waitForInterrupt() {
+	arm64.Asm("wfi")
+	arm64.Asm("msr daifclr, #2")
+	arm64.Asm("isb")
+	arm64.Asm("msr daifset, #2")
+}
+
 func sleepTicks(d timeUnit) {
 	end := ticks() + d
 	for ticks() < end {
-		arm64.Asm("yield")
+		setTimer(end)
+		arm64.Asm("wfi")
 	}
 }
 

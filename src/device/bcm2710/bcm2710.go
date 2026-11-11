@@ -121,6 +121,29 @@ type EMMC_Type struct {
 	SLOTISR_VER volatile.Register32
 }
 
+// LOCAL_Type is the ARM local block at 0x40000000: per core timer and mailbox interrupts,
+// interrupt sources, and 4 mailboxes per core (BCM2836 ARM-local peripherals, QA7_rev3.4).
+type LOCAL_Type struct {
+	CONTROL         volatile.Register32
+	_               uint32
+	PRESCALER       volatile.Register32
+	GPU_IRQ_ROUTING volatile.Register32
+	_               [12]uint32
+	TIMER_INT_CTL   [4]volatile.Register32
+	MAILBOX_INT_CTL [4]volatile.Register32
+	IRQ_SOURCE      [4]volatile.Register32
+	FIQ_SOURCE      [4]volatile.Register32
+	MAILBOX_SET     [16]volatile.Register32
+	MAILBOX_CLR     [16]volatile.Register32
+}
+
+// IRQ_SOURCE bits (QA7_rev3.4 section 4.10).
+const (
+	LOCAL_IRQ_CNTPNS   = 1 << 1
+	LOCAL_IRQ_MAILBOX0 = 1 << 4
+	LOCAL_IRQ_GPU      = 1 << 8
+)
+
 // CM_GP is a general purpose clock's control and divider (BCM2835 ARM Peripherals section 6.3).
 type CM_GP struct {
 	CTL volatile.Register32
@@ -140,6 +163,8 @@ var (
 	MBOX = (*MBOX_Type)(unsafe.Pointer(uintptr(PeripheralBase + 0xb880)))
 	IRQ  = (*IRQ_Type)(unsafe.Pointer(uintptr(PeripheralBase + 0xb200)))
 	EMMC = (*EMMC_Type)(unsafe.Pointer(uintptr(PeripheralBase + 0x300000)))
+
+	LOCAL = (*LOCAL_Type)(unsafe.Pointer(uintptr(LocalBase)))
 )
 
 // The DMA region start.S maps uncached, for buffers the VideoCore or a DMA engine reads.

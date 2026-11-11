@@ -22,14 +22,19 @@ func Restore(state State) {
 	arm64.AsmFull("msr daif, {state}", map[string]interface{}{"state": uintptr(state)})
 }
 
-var inInterrupt bool
+var inInterrupt [4]bool
 
-// In returns whether the CPU is running an interrupt handler.
+func currentCore() uint32 {
+	return uint32(arm64.AsmFull("mrs {}, mpidr_el1", nil)) & 3
+}
+
+// In returns whether this core is running an interrupt handler.
 func In() bool {
-	return inInterrupt
+	return inInterrupt[currentCore()]
 }
 
 // Enable lets the GPU interrupt irq.num reach the ARM (BCM2835 ARM Peripherals section 7.5).
+// GPU interrupts go to core 0, GPU_IRQ_ROUTING's reset value.
 func (irq Interrupt) Enable() {
 	if irq.num < 32 {
 		bcm2710.IRQ.ENABLE1.Set(1 << uint(irq.num))
@@ -38,19 +43,37 @@ func (irq Interrupt) Enable() {
 	}
 }
 
+// crossCore is the runtime's handler for this core's mailbox 0.
+//
+//go:linkname crossCore runtime.bcm2710CrossCore
+func crossCore(core uint32)
+
 //export handleInterrupt
 func handleInterrupt() {
-	inInterrupt = true
-	pending := uint64(bcm2710.IRQ.PENDING1.Get()) | uint64(bcm2710.IRQ.PENDING2.Get())<<32
-	for pending != 0 {
-		n := 0
-		for pending&(1<<uint(n)) == 0 {
-			n++
-		}
-		pending &^= 1 << uint(n)
-		callInterruptHandler(n)
+	core := currentCore()
+	inInterrupt[core] = true
+	source := bcm2710.LOCAL.IRQ_SOURCE[core].Get()
+	if source&bcm2710.LOCAL_IRQ_CNTPNS != 0 {
+		// The sleep that set the timer checks the time itself, so stopping it is enough.
+		arm64.Asm("msr cntp_ctl_el0, xzr")
 	}
-	inInterrupt = false
+	if source&bcm2710.LOCAL_IRQ_MAILBOX0 != 0 {
+		bits := bcm2710.LOCAL.MAILBOX_CLR[core*4].Get()
+		bcm2710.LOCAL.MAILBOX_CLR[core*4].Set(bits)
+		crossCore(core)
+	}
+	if source&bcm2710.LOCAL_IRQ_GPU != 0 {
+		pending := uint64(bcm2710.IRQ.PENDING1.Get()) | uint64(bcm2710.IRQ.PENDING2.Get())<<32
+		for pending != 0 {
+			n := 0
+			for pending&(1<<uint(n)) == 0 {
+				n++
+			}
+			pending &^= 1 << uint(n)
+			callInterruptHandler(n)
+		}
+	}
+	inInterrupt[core] = false
 }
 
 //go:linkname callHandlers runtime/interrupt.callHandlers

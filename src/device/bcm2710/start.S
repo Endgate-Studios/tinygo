@@ -1,5 +1,6 @@
 // Startup for the BCM2710 (Cortex-A53) as the firmware's armstub8 enters it: core 0
-// only, at EL2, with the MMU off. Cores 1 to 3 wait in the armstub's spin table.
+// only, at EL2, with the MMU off. Cores 1 to 3 wait in the armstub's spin table at
+// 0xE0, 0xE8 and 0xF0 until the cores scheduler starts them (armstub8.S, spin_cpu1 to 3).
 
 #define SCTLR_EL1_RES1  0x30d00800
 #define SCTLR_M         (1 << 0)
@@ -25,19 +26,12 @@
 #define DMA_START       0x10000000
 #define DMA_END         0x10800000
 
-.section .text.boot, "ax"
-.global _start
-_start:
-    mrs     x1, mpidr_el1
-    and     x1, x1, #3
-    cbnz    x1, park
-
+// to_el1 leaves EL2 for EL1 at label, with the counters and FP/SIMD open to EL1.
+.macro to_el1 label
     mrs     x1, CurrentEL
     lsr     x1, x1, #2
     cmp     x1, #2
-    b.ne    el1
-
-    // Leave EL2 for EL1, with the counters and FP/SIMD open to EL1.
+    b.ne    \label
     mov     x1, #3
     msr     cnthctl_el2, x1
     msr     cntvoff_el2, xzr
@@ -50,17 +44,48 @@ _start:
     msr     sctlr_el1, x1
     mov     x1, #0x3c5
     msr     spsr_el2, x1
-    adr     x1, el1
+    adr     x1, \label
     msr     elr_el2, x1
     eret
+.endm
 
-el1:
+// el1_setup turns on FP/SIMD and sets the vectors.
+.macro el1_setup
     mov     x1, #(3 << 20)
     msr     cpacr_el1, x1
     ldr     x1, =exception_vectors
     msr     vbar_el1, x1
     isb
+.endm
 
+// mmu_on starts the MMU and caches with the tables core 0 built.
+.macro mmu_on
+    ldr     x1, =MAIR_VALUE
+    msr     mair_el1, x1
+    ldr     x1, =TCR_VALUE
+    msr     tcr_el1, x1
+    ldr     x1, =page_table_l1
+    msr     ttbr0_el1, x1
+    dsb     ish
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    ldr     x1, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I)
+    msr     sctlr_el1, x1
+    isb
+.endm
+
+.section .text.boot, "ax"
+.global _start
+_start:
+    mrs     x1, mpidr_el1
+    and     x1, x1, #3
+    cbnz    x1, park
+    to_el1  el1
+
+el1:
+    el1_setup
     ldr     x1, =_stack_top
     mov     sp, x1
 
@@ -103,25 +128,36 @@ el1:
     cmp     x3, #512
     b.lo    3b
 
-    ldr     x1, =MAIR_VALUE
-    msr     mair_el1, x1
-    ldr     x1, =TCR_VALUE
-    msr     tcr_el1, x1
-    ldr     x1, =page_table_l1
-    msr     ttbr0_el1, x1
-    dsb     ish
-    isb
-    tlbi    vmalle1
-    dsb     ish
-    isb
-    ldr     x1, =(SCTLR_EL1_RES1 | SCTLR_M | SCTLR_C | SCTLR_I)
-    msr     sctlr_el1, x1
-    isb
-
+    mmu_on
     bl      main
 park:
     wfe
     b       park
+
+// Cores 1 to 3 start here when the runtime writes this address to the armstub's spin table.
+.global tinygo_secondaryStart
+tinygo_secondaryStart:
+    to_el1  secondary_el1
+secondary_el1:
+    el1_setup
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
+    ldr     x1, =secondary_stacks
+    ldr     x1, [x1, x0, lsl #3]
+    mov     sp, x1
+    mmu_on
+    mrs     x0, mpidr_el1
+    and     x0, x0, #3
+    bl      tinygo_runSecondary
+    b       park
+
+.section .rodata.secondary_stacks, "a"
+.balign 8
+secondary_stacks:
+    .quad _stack_top
+    .quad _stack1_top
+    .quad _stack2_top
+    .quad _stack3_top
 
 // Every exception goes to handleException(kind, esr, elr, far), which doesn't return.
 .macro vector kind
