@@ -2,7 +2,10 @@
 
 package interrupt
 
-import "device/arm64"
+import (
+	"device/arm64"
+	"device/bcm2710"
+)
 
 // State represents the previous global interrupt state.
 type State uintptr
@@ -19,7 +22,59 @@ func Restore(state State) {
 	arm64.AsmFull("msr daif, {state}", map[string]interface{}{"state": uintptr(state)})
 }
 
-// In returns whether the CPU is handling an interrupt. No interrupts are taken yet.
+var inInterrupt bool
+
+// In returns whether the CPU is running an interrupt handler.
 func In() bool {
-	return false
+	return inInterrupt
+}
+
+// Enable lets the GPU interrupt irq.num reach the ARM (BCM2835 ARM Peripherals section 7.5).
+func (irq Interrupt) Enable() {
+	if irq.num < 32 {
+		bcm2710.IRQ.ENABLE1.Set(1 << uint(irq.num))
+	} else {
+		bcm2710.IRQ.ENABLE2.Set(1 << uint(irq.num-32))
+	}
+}
+
+//export handleInterrupt
+func handleInterrupt() {
+	inInterrupt = true
+	pending := uint64(bcm2710.IRQ.PENDING1.Get()) | uint64(bcm2710.IRQ.PENDING2.Get())<<32
+	for pending != 0 {
+		n := 0
+		for pending&(1<<uint(n)) == 0 {
+			n++
+		}
+		pending &^= 1 << uint(n)
+		callInterruptHandler(n)
+	}
+	inInterrupt = false
+}
+
+//go:linkname callHandlers runtime/interrupt.callHandlers
+func callHandlers(num int)
+
+// The compiler needs a constant number in each callHandlers call.
+func callInterruptHandler(n int) {
+	switch n {
+	case bcm2710.IRQ_TIMER1:
+		callHandlers(bcm2710.IRQ_TIMER1)
+	case bcm2710.IRQ_TIMER3:
+		callHandlers(bcm2710.IRQ_TIMER3)
+	case bcm2710.IRQ_USB:
+		callHandlers(bcm2710.IRQ_USB)
+	case bcm2710.IRQ_AUX:
+		callHandlers(bcm2710.IRQ_AUX)
+	case bcm2710.IRQ_EMMC:
+		callHandlers(bcm2710.IRQ_EMMC)
+	default:
+		// Mask what no handler takes, or it fires forever.
+		if n < 32 {
+			bcm2710.IRQ.DISABLE1.Set(1 << uint(n))
+		} else {
+			bcm2710.IRQ.DISABLE2.Set(1 << uint(n-32))
+		}
+	}
 }

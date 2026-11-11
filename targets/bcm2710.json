@@ -7,7 +7,7 @@
 	"goarch": "arm64",
 	"gc": "conservative",
 	"scheduler": "tasks",
-	"serial": "uart",
+	"serial": "usb",
 	"linker": "ld.lld",
 	"rtlib": "compiler-rt",
 	"libc": "picolibc",

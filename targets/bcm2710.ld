@@ -1,5 +1,5 @@
 /* The firmware loads kernel8.img at 0x80000 with arm_64bit=1.
- * RAM above 0x10000000 is left for DMA buffers, and the GPU's share is at the top. */
+ * RAM above 0x10000000 is for DMA buffers, and the GPU's share is at the top. */
 MEMORY
 {
     RAM (rwx) : ORIGIN = 0x80000, LENGTH = 0x10000000 - 0x80000
@@ -56,7 +56,8 @@ SECTIONS
     } >RAM
 
     _heap_start = ALIGN(16);
-    _heap_end = ORIGIN(RAM) + LENGTH(RAM);
+    /* 0x0F000000 up is the firmware bundle that config.txt loads, see device/bcm2710. */
+    _heap_end = 0x0f000000;
 
     /DISCARD/ :
     {

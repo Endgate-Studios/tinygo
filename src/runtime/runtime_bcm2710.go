@@ -5,11 +5,13 @@ package runtime
 import (
 	"device/arm64"
 	"machine"
+	_ "machine/usb/cdc"
 )
 
 //export main
 func main() {
 	preinit()
+	arm64.Asm("msr daifclr, #2")
 	initPeripherals()
 	run()
 	exit(0)

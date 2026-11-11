@@ -138,7 +138,8 @@ exception_vectors:
     vector 2
     vector 3
     vector 4
-    vector 5
+    .balign 0x80
+    b       irq_entry
     vector 6
     vector 7
     vector 8
@@ -149,6 +150,71 @@ exception_vectors:
     vector 13
     vector 14
     vector 15
+
+// irq_entry saves what a call may change, runs handleInterrupt and returns to where the IRQ came.
+irq_entry:
+    sub     sp, sp, #608
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x9, [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x29, [sp, #144]
+    mrs     x0, elr_el1
+    mrs     x1, spsr_el1
+    stp     x30, x0, [sp, #160]
+    mrs     x0, fpcr
+    mrs     x2, fpsr
+    stp     x1, x0, [sp, #176]
+    str     x2, [sp, #192]
+    stp     q0, q1, [sp, #208]
+    stp     q2, q3, [sp, #240]
+    stp     q4, q5, [sp, #272]
+    stp     q6, q7, [sp, #304]
+    stp     q16, q17, [sp, #336]
+    stp     q18, q19, [sp, #368]
+    stp     q20, q21, [sp, #400]
+    stp     q22, q23, [sp, #432]
+    stp     q24, q25, [sp, #464]
+    stp     q26, q27, [sp, #496]
+    stp     q28, q29, [sp, #528]
+    stp     q30, q31, [sp, #560]
+    bl      handleInterrupt
+    ldp     q30, q31, [sp, #560]
+    ldp     q28, q29, [sp, #528]
+    ldp     q26, q27, [sp, #496]
+    ldp     q24, q25, [sp, #464]
+    ldp     q22, q23, [sp, #432]
+    ldp     q20, q21, [sp, #400]
+    ldp     q18, q19, [sp, #368]
+    ldp     q16, q17, [sp, #336]
+    ldp     q6, q7, [sp, #304]
+    ldp     q4, q5, [sp, #272]
+    ldp     q2, q3, [sp, #240]
+    ldp     q0, q1, [sp, #208]
+    ldr     x2, [sp, #192]
+    ldp     x1, x0, [sp, #176]
+    msr     fpsr, x2
+    msr     fpcr, x0
+    msr     spsr_el1, x1
+    ldp     x30, x0, [sp, #160]
+    msr     elr_el1, x0
+    ldp     x18, x29, [sp, #144]
+    ldp     x16, x17, [sp, #128]
+    ldp     x14, x15, [sp, #112]
+    ldp     x12, x13, [sp, #96]
+    ldp     x10, x11, [sp, #80]
+    ldp     x8, x9, [sp, #64]
+    ldp     x6, x7, [sp, #48]
+    ldp     x4, x5, [sp, #32]
+    ldp     x2, x3, [sp, #16]
+    ldp     x0, x1, [sp, #0]
+    add     sp, sp, #608
+    eret
 
 exception_common:
     mrs     x1, esr_el1

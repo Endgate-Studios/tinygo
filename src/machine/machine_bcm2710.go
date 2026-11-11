@@ -6,6 +6,8 @@ import (
 	"device/arm64"
 	"device/bcm2710"
 	"errors"
+	"runtime/volatile"
+	"unsafe"
 )
 
 const deviceName = "BCM2710"
@@ -162,3 +164,29 @@ func (uart *UART) Read(data []byte) (int, error) {
 }
 
 var errUARTEmpty = errors.New("UART buffer empty")
+
+// The power manager's watchdog, as Linux drivers/watchdog/bcm2835_wdt.c drives it.
+var (
+	pmRSTC = (*volatile.Register32)(unsafe.Pointer(uintptr(bcm2710.PeripheralBase + 0x10001c)))
+	pmWDOG = (*volatile.Register32)(unsafe.Pointer(uintptr(bcm2710.PeripheralBase + 0x100024)))
+)
+
+const (
+	pmPassword        = 0x5a000000
+	pmRSTCFullReset   = 0x20
+	pmRSTCConfigClear = 0xffffffcf
+)
+
+// CPUReset restarts the chip with the watchdog.
+func CPUReset() {
+	pmWDOG.Set(pmPassword | 10)
+	pmRSTC.Set(pmPassword | pmRSTCConfigClear&pmRSTC.Get() | pmRSTCFullReset)
+	for {
+		arm64.Asm("wfe")
+	}
+}
+
+// EnterBootloader restarts the chip. With no SD card the boot ROM then waits for rpiboot on USB.
+func EnterBootloader() {
+	CPUReset()
+}
