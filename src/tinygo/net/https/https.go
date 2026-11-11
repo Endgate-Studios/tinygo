@@ -1,5 +1,5 @@
 // Package https is a small HTTPS client: DNS and TCP with tinygo/net/ip,
-// TLS 1.3 with tinygo/net/tls and HTTP/1.1 with tinygo/net/web. Each request
+// TLS 1.3, or 1.2, with tinygo/net/tls and HTTP/1.1 with tinygo/net/web. Each request
 // has its own connection, and its memory is free again after it.
 package https
 
