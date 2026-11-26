@@ -141,8 +141,9 @@ call_start_cpu0:
     wsr.ps a2
     rsync
 
-    // Enable FPU (coprocessor 0).
-    movi a2, 1
+    // Enable the FPU (CP0) and PIE (CP3), see XCHAL_CP_MASK in ESP-IDF
+    // components/xtensa/esp32s3/include/xtensa/config/tie.h.
+    movi a2, 9
     wsr.cpenable a2
     rsync
 
@@ -416,8 +417,8 @@ call_start_cpu1:
     wsr.ps a2
     rsync
 
-    // Enable FPU (coprocessor 0).
-    movi a2, 1
+    // Enable the FPU and PIE, as on core 0.
+    movi a2, 9
     wsr.cpenable a2
     rsync
 
