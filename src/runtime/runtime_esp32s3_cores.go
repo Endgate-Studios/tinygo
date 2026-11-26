@@ -211,7 +211,8 @@ func runCore1() {
 	interruptInit()
 	ets_set_appcpu_boot_addr(0)
 
-	interruptEnableLocal(1 << crossCoreCPUInterrupt)
+	// sleepTicksMulticore routes the timer alarm to the core that sleeps.
+	interruptEnableLocal(1<<crossCoreCPUInterrupt | 1<<timerAlarmCPUInterrupt)
 	core1Started.Store(1)
 
 	waitForSecondaryCoresReady()
@@ -284,19 +285,44 @@ func hasSleepingCore() bool {
 	return sleepingCore != 0xff
 }
 
-// Almost identical to sleepTicks, except that it will unlock/lock the scheduler
-// while sleeping and is interruptible by interruptSleepTicksMulticore.
-// This may only be called with the scheduler lock held.
+// Like sleepTicks, but it unlocks the scheduler while it sleeps and
+// interruptSleepTicksMulticore can stop it. Call with the scheduler lock held.
 func sleepTicksMulticore(d timeUnit) {
 	core := currentCPU()
 	sleepingCore = uint8(core)
 	sleepWake[core].Store(0)
+	routeTimerAlarm(core)
+	target := ticks() + d
 
+	// waiti enables interrupts and waits in one step, so no wakeup is lost. An
+	// interrupt can wake a task before the sleep starts, so check the list.
+	mask := interrupt.Disable()
 	schedulerLock.Unlock()
-	sleepTicks(d)
-	schedulerLock.Lock()
+	for !sleepWoken(core) && interruptWakes[core] == nil {
+		setTimerAlarm(target)
+		if ticks() >= target {
+			break
+		}
+		device.Asm("waiti 0")
+		interrupt.Disable()
+	}
+	interrupt.Restore(mask)
 
+	schedulerLock.Lock()
 	sleepingCore = 0xff
+}
+
+// Send the level triggered TIMG0 alarm only to the given core, so the other
+// core cannot clear it first. See INT_MUX_DISABLED_INTNO in ESP-IDF intr_alloc.c.
+func routeTimerAlarm(core uint32) {
+	const disabled = 6
+	if core == 0 {
+		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(disabled)
+		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
+	} else {
+		esp.INTERRUPT_CORE0.SetTG_T0_INT_MAP(disabled)
+		esp.INTERRUPT_CORE1.SetTG_T0_INT_MAP(timerAlarmCPUInterrupt)
+	}
 }
 
 // Interrupt an ongoing call to sleepTicksMulticore on another core.
