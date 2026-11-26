@@ -1,4 +1,4 @@
-//go:build scheduler.cores && (gc.conservative || gc.precise || gc.boehm)
+//go:build scheduler.cores && (gc.conservative || gc.precise || gc.boehm || gc.custom)
 
 package runtime
 
