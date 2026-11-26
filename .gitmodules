@@ -44,3 +44,18 @@
 [submodule "lib/py32-svd"]
 	path = lib/py32-svd
 	url = https://github.com/tinygo-org/py32-svd.git
+[submodule "lib/esp32-wifi-lib"]
+	path = src/device/esp/radio/blobs/esp32-wifi-lib
+	url = https://github.com/espressif/esp32-wifi-lib.git
+	shallow = true
+[submodule "lib/esp-phy-lib"]
+	path = src/device/esp/radio/blobs/esp-phy-lib
+	url = https://github.com/espressif/esp-phy-lib.git
+	shallow = true
+[submodule "lib/esp-coex-lib"]
+	path = src/device/esp/radio/blobs/esp-coex-lib
+	url = https://github.com/espressif/esp-coex-lib.git
+	shallow = true
+[submodule "src/device/esp/radio/blobs/esp32c3-bt-lib"]
+	path = src/device/esp/radio/blobs/esp32c3-bt-lib
+	url = https://github.com/espressif/esp32c3-bt-lib.git
