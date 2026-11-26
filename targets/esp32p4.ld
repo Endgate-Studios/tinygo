@@ -16,5 +16,6 @@ PROVIDE(Cache_Enable_L1_CORE1_ICache = 0x4fc004e4);
 PROVIDE(esp_rom_spi_cmd_config = 0x4fc00108);
 PROVIDE(esp_rom_spi_cmd_start = 0x4fc0010c);
 PROVIDE(esp_rom_spi_set_op_mode = 0x4fc00110);
+PROVIDE(esp_rom_software_reset_system = 0x4fc00094);
 
 INCLUDE "targets/esp32p4-sections.ld"
