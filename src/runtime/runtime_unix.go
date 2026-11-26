@@ -214,17 +214,17 @@ func syscall_runtime_envs() []string {
 	}
 
 	// Create a string slice of all environment variables.
-	// This requires just a single heap allocation.
+	// This requires just a single heap allocation, or none with -gc=none.
 	env = environ
-	envs := make([]string, 0, numEnvs)
-	for *env != nil {
+	envs := makeEnvs(numEnvs)
+	for i := range envs {
 		ptr := *env
 		length := strlen(ptr)
 		s := _string{
 			ptr:    (*byte)(ptr),
 			length: length,
 		}
-		envs = append(envs, *(*string)(unsafe.Pointer(&s)))
+		envs[i] = *(*string)(unsafe.Pointer(&s))
 		env = (*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(env), unsafe.Sizeof(environ)))
 	}
 
