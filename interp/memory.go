@@ -161,7 +161,9 @@ func (mv *memoryView) markExternal(llvmValue llvm.Value, mark uint8) error {
 							calledValue := inst.CalledValue()
 							if !calledValue.IsAFunction().IsNil() {
 								functionName := calledValue.Name()
-								if functionName == "llvm.dbg.value" || strings.HasPrefix(functionName, "llvm.lifetime.") {
+								// Debug info (llvm.dbg.value, .declare, .assign, ...)
+								// and lifetime markers don't touch memory.
+								if strings.HasPrefix(functionName, "llvm.dbg.") || strings.HasPrefix(functionName, "llvm.lifetime.") {
 									continue
 								}
 							}
@@ -210,9 +212,9 @@ func (mv *memoryView) markExternal(llvmValue llvm.Value, mark uint8) error {
 	} else {
 		llvmType := llvmValue.Type()
 		switch llvmType.TypeKind() {
-		case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind:
+		case llvm.IntegerTypeKind, llvm.FloatTypeKind, llvm.DoubleTypeKind, llvm.MetadataTypeKind:
 			// Nothing to do here. Integers and floats aren't pointers so don't
-			// need any marking.
+			// need any marking, and metadata (debug info) names no objects.
 		case llvm.StructTypeKind:
 			numElements := llvmType.StructElementTypesCount()
 			for i := range numElements {
@@ -232,7 +234,7 @@ func (mv *memoryView) markExternal(llvmValue llvm.Value, mark uint8) error {
 				}
 			}
 		default:
-			return errors.New("interp: unknown type kind in markExternalValue")
+			return fmt.Errorf("interp: unknown type kind %v in markExternalValue: %s", llvmType.TypeKind(), llvmValue.String())
 		}
 	}
 	return nil
