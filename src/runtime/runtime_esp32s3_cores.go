@@ -182,10 +182,14 @@ func startSecondaryCores() {
 
 	esp.RTC_CNTL.SetOPTIONS0_SW_STALL_APPCPU_C0(0)
 	esp.RTC_CNTL.SetSW_CPU_STALL_SW_STALL_APPCPU_C1(0)
-	esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN(1)
-	esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RUNSTALL(0)
-	esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(1)
-	esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(0)
+
+	// OpenOCD may have started core 1 already. A reset would remove its breakpoints.
+	if esp.SYSTEM.GetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN() == 0 {
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_CLKGATE_EN(1)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RUNSTALL(0)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(1)
+		esp.SYSTEM.SetCORE_1_CONTROL_0_CONTROL_CORE_1_RESETING(0)
+	}
 	ets_set_appcpu_boot_addr(uintptr(unsafe.Pointer(&call_start_cpu1)))
 
 	// The GC can pause core 1 only after it has enabled its interrupt.
@@ -205,6 +209,8 @@ var call_start_cpu1 [0]byte
 //export tinygo_runCore1
 func runCore1() {
 	interruptInit()
+	ets_set_appcpu_boot_addr(0)
+
 	interruptEnableLocal(1 << crossCoreCPUInterrupt)
 	core1Started.Store(1)
 
