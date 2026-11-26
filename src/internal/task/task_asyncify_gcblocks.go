@@ -1,4 +1,4 @@
-//go:build scheduler.asyncify && (gc.conservative || gc.precise)
+//go:build scheduler.asyncify && (gc.conservative || gc.precise || gc.custom)
 
 package task
 

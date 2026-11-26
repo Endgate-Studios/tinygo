@@ -233,6 +233,9 @@ func LoadTarget(options *Options) (*TargetSpec, error) {
 
 	if spec.Scheduler == "asyncify" {
 		spec.ExtraFiles = append(spec.ExtraFiles, "src/internal/task/task_asyncify_wasm.S")
+		if strings.HasPrefix(spec.Triple, "wasm64") {
+			spec.ExtraFiles = append(spec.ExtraFiles, "targets/task_asyncify_wasm64.c")
+		}
 	}
 
 	return spec, nil

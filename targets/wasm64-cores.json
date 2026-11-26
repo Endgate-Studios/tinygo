@@ -1,0 +1,12 @@
+{
+	"inherits":      ["wasm-cores"],
+	"llvm-target":   "wasm64-unknown-unknown",
+	"build-tags":    ["tinygo.wasm64"],
+	"libc":          "wasmbuiltins",
+	"extra-files": [
+		"targets/task_asyncify_wasm64.c"
+	],
+	"ldflags": [
+		"-mwasm64"
+	]
+}

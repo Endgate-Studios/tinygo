@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"time"
 
-	wasm "github.com/aykevl/go-wasm"
 	"github.com/blakesmith/ar"
 )
 
@@ -90,32 +89,15 @@ func makeArchive(arfile *os.File, objs []string) error {
 					fileIndex int
 				}{symbol.Name, i})
 			}
-		} else if dbg, err := wasm.Parse(objfile); err == nil {
-			for _, s := range dbg.Sections {
-				switch section := s.(type) {
-				case *wasm.SectionLinking:
-					for _, symbol := range section.Symbols {
-						if symbol.Flags&wasm.LinkingSymbolFlagUndefined != 0 {
-							// Don't list undefined functions.
-							continue
-						}
-						if symbol.Flags&wasm.LinkingSymbolFlagBindingLocal != 0 {
-							// Don't include local symbols.
-							continue
-						}
-						if symbol.Kind != wasm.LinkingSymbolKindFunction && symbol.Kind != wasm.LinkingSymbolKindData {
-							// Link functions and data symbols.
-							// Some data symbols need to be included, such as
-							// __log_data.
-							continue
-						}
-						// Include in the archive.
-						symbolTable = append(symbolTable, struct {
-							name      string
-							fileIndex int
-						}{symbol.Name, i})
-					}
-				}
+		} else if names, werr := wasmLinkSymbols(io.NewSectionReader(objfile, 0, 1<<62)); werr != errNotWasm {
+			if werr != nil {
+				return fmt.Errorf("failed to read wasm object %s: %w", objpath, werr)
+			}
+			for _, name := range names {
+				symbolTable = append(symbolTable, struct {
+					name      string
+					fileIndex int
+				}{name, i})
 			}
 		} else {
 			return fmt.Errorf("failed to open file %s as WASM, ELF or PE/COFF: %w", objpath, err)

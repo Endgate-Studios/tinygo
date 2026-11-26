@@ -42,7 +42,7 @@ var (
 	deadlockedTasks    task.Queue
 )
 
-// finalizerIdleGC runs pressure GC at safe points and enables asyncify stack cleanup.
+// finalizerIdleGC runs pressure GC at safe points.
 // The first finalizer installs it so unused code can be removed.
 var finalizerIdleGC func() bool
 
@@ -74,15 +74,7 @@ func exitGoroutine() {
 // It is not used when the scheduler is disabled.
 func wasmExportExit() {
 	schedulerExit = true
-	if finalizerIdleGC != nil {
-		task.MarkFinishing()
-	}
-	task.DetachStack()
-
-	task.Pause()
-
-	// TODO: we could cache the allocated stack so we don't have to keep
-	// allocating a new stack on every //go:wasmexport call.
+	task.ExportExit()
 }
 
 func goexit() {

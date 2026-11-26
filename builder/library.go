@@ -186,6 +186,11 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 		args = append(args, "-march="+riscvMarch(config, "rv64gc"))
 	case "mips":
 		args = append(args, "-fno-pic")
+	case "wasm32", "wasm64":
+		if config.WasmAtomics() {
+			// Shared memory links only objects built with atomics.
+			args = append(args, "-matomics", "-mbulk-memory")
+		}
 	}
 	if config.Target.SoftFloat {
 		// Use softfloat instead of floating point instructions. This is

@@ -1469,6 +1469,71 @@ func TestWasmExport(t *testing.T) {
 	}
 }
 
+// Test that a //go:wasmexport call's goroutine ends with the call: it is no
+// longer counted and its stack is freed, so many calls run in a small heap.
+func TestWasmExportStacks(t *testing.T) {
+	t.Parallel()
+
+	for _, gc := range []string{"", "custom"} {
+		t.Run("gc="+gc, func(t *testing.T) {
+			t.Parallel()
+
+			options := optionsFromTarget("wasip1", sema)
+			options.BuildMode = "c-shared"
+			options.GC = gc
+			config, err := builder.NewConfig(&options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := builder.Build("./testdata/wasmexport-stacks", ".wasm", t.TempDir(), config)
+			if err != nil {
+				t.Fatal("failed to build binary:", err)
+			}
+			data, err := os.ReadFile(result.Binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := context.Background()
+			r := wazero.NewRuntime(ctx)
+			defer r.Close(ctx)
+			wasi_snapshot_preview1.MustInstantiate(ctx, r)
+			output := &bytes.Buffer{}
+			mod, err := r.InstantiateWithConfig(ctx, data, wazero.NewModuleConfig().
+				WithStdout(output).WithStderr(output).WithStartFunctions())
+			if err != nil {
+				t.Fatal("could not instantiate wasm module:", err)
+			}
+			call := func(name string) []uint64 {
+				results, err := mod.ExportedFunction(name).Call(ctx)
+				if err != nil {
+					t.Fatalf("%s: %v\n%s", name, err, output)
+				}
+				return results
+			}
+
+			call("_initialize")
+			before := call("goroutines")[0]
+			// 64kB stacks: 3000 that stayed would need 192MB.
+			for i := 0; i < 3000; i++ {
+				call("ping")
+			}
+			if after := call("goroutines")[0]; after != before {
+				t.Errorf("goroutines after 3000 calls: %d, before: %d", after, before)
+			}
+		})
+	}
+}
+
+// Test that gcshim on wasm doesn't take stale stack words or uintptr globals
+// for pointers into a big buffer.
+func TestGCShimFalseRoots(t *testing.T) {
+	t.Parallel()
+	options := optionsFromTarget("wasm", sema)
+	options.GC = "custom"
+	runTest("gcshim-falseroots/", options, t, nil, nil)
+}
+
 // Test js.FuncOf (for syscall/js).
 // This test might be extended in the future to cover more cases in syscall/js.
 func TestWasmFuncOf(t *testing.T) {

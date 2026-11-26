@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wasm runner</title>
+<script>
+// Each console line goes to the server at once (synchronously, so lines
+// keep their order across the page and the workers).
+let lastOutput = Date.now();
+function post(path, body) {
+	if (path === "/log") lastOutput = Date.now();
+	const x = new XMLHttpRequest();
+	x.open("POST", path, false);
+	x.send(body);
+}
+for (const k of ["log", "error", "warn"]) {
+	const orig = console[k];
+	console[k] = (...a) => { post("/log", a.join(" ")); orig(...a); };
+}
+addEventListener("error", (e) => post("/log", "page error: " + e.message));
+addEventListener("unhandledrejection", (e) => post("/log", "page error: " + e.reason));
+</script>
+<script src="/wasm_exec.js"></script>
+<script src="/wasm_exec_cores.js"></script>
+<script>
+(async () => {
+	const cores = Number(new URLSearchParams(location.search).get("cores"));
+	let code = 1;
+	try {
+		if (!crossOriginIsolated) throw new Error("page is not cross-origin isolated");
+		const bytes = await (await fetch("/test.wasm")).arrayBuffer();
+		if (cores > 0) {
+			globalThis.WASMCORES_CORES = cores;
+			code = await new GoCores("/worker.js").start(bytes);
+		} else {
+			const go = new Go();
+			const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+			// On js, TinyGo keeps running after main returns (callbacks may
+			// still come), so a program with no wakeup pending and no output
+			// for a second has ended.
+			const idle = new Promise((resolve) => {
+				const t = setInterval(() => {
+					if (go._scheduledWakeup === undefined && Date.now() - lastOutput > 1000) {
+						clearInterval(t);
+						resolve("idle");
+					}
+				}, 100);
+			});
+			code = await Promise.race([go.run(instance), idle]);
+			if (code === "idle") {
+				post("/done?code=0&idle=1", "");
+				return;
+			}
+		}
+	} catch (e) {
+		console.error("runner:", e && e.stack || e);
+	}
+	post("/done?code=" + code, "");
+})();
+</script>

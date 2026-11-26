@@ -220,13 +220,14 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		GOOS:            config.GOOS(),
 		GOARCH:          config.GOARCH(),
 		BuildMode:       config.BuildMode(),
+		SharedLibrary:   config.SharedLibrary(),
 		CodeModel:       config.CodeModel(),
 		RelocationModel: config.RelocationModel(),
 		SizeLevel:       sizeLevel,
 		TinyGoVersion:   goenv.Version(),
 		TrimPath:        config.TrimPath(),
 
-		Scheduler:          config.Scheduler(),
+		Scheduler:          config.CompilerScheduler(),
 		AutomaticStackSize: config.AutomaticStackSize(),
 		DefaultStackSize:   config.StackSize(),
 		MaxStackAlloc:      config.MaxStackAlloc(),
@@ -1073,13 +1074,16 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			}
 
 			// Run wasm-opt for wasm binaries
-			if arch, _, _ := strings.Cut(config.Triple(), "-"); arch == "wasm32" {
+			if arch, _, _ := strings.Cut(config.Triple(), "-"); arch == "wasm32" || arch == "wasm64" {
 				optLevel, _, _ := config.OptLevel()
 				opt := "-" + optLevel
 
 				var args []string
+				if arch == "wasm64" {
+					args = append(args, "--enable-memory64")
+				}
 
-				if config.Scheduler() == "asyncify" {
+				if config.CompilerScheduler() == "asyncify" {
 					args = append(args, "--asyncify")
 				}
 

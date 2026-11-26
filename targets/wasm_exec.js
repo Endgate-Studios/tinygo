@@ -106,6 +106,16 @@
 				return new DataView(this._inst.exports.memory.buffer);
 			}
 
+			// Pointer width: 8 on wasm64 (memory64), where pointers and Go's int
+			// and uint are i64 (BigInt here), else 4.
+			const ptrSize = () => this._ptrSize ??= (this._inst.exports.tinygo_pointer_size ? Number(this._inst.exports.tinygo_pointer_size()) : 4);
+			// A pointer or length argument as a number.
+			const u = (x) => typeof x === "bigint" ? Number(x) : x >>> 0;
+			// A Go int or uint result.
+			const goInt = (n) => ptrSize() === 8 ? BigInt(n) : n;
+			const loadUint = (addr) => ptrSize() === 8 ? Number(mem().getBigUint64(addr, true)) : mem().getUint32(addr, true);
+			const storeUint = (addr, v) => ptrSize() === 8 ? mem().setBigUint64(addr, BigInt(v), true) : mem().setUint32(addr, v, true);
+
 			const unboxValue = (v_ref) => {
 				reinterpretBuf.setBigInt64(0, v_ref, true);
 				const f = reinterpretBuf.getFloat64(0, true);
@@ -194,8 +204,24 @@
 				return a;
 			}
 
+			// Browsers fill no view of a shared memory (wasm-cores), and at
+			// most 64 KiB at a time: fill a plain buffer, then copy it in.
+			const fillRandom = (ptr, len) => {
+				const dst = loadSlice(ptr, len);
+				for (let off = 0; off < len; off += 65536) {
+					const chunk = new Uint8Array(Math.min(65536, len - off));
+					crypto.getRandomValues(chunk);
+					dst.set(chunk, off);
+				}
+			};
+
 			const loadString = (ptr, len) => {
-				return decoder.decode(new DataView(this._inst.exports.memory.buffer, ptr, len));
+				const buf = this._inst.exports.memory.buffer;
+				// Browsers decode no view of a shared memory: decode a copy.
+				if (typeof SharedArrayBuffer !== "undefined" && buf instanceof SharedArrayBuffer) {
+					return decoder.decode(new Uint8Array(buf, ptr, len).slice());
+				}
+				return decoder.decode(new DataView(buf, ptr, len));
 			}
 
 			const timeOrigin = Date.now() - performance.now();
@@ -204,16 +230,16 @@
 			this.importObject = {
 				wasi_snapshot_preview1: {
 					// https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md
-					fd_write: function(fd, iovs_ptr, iovs_len, nwritten_ptr) {
-						iovs_ptr >>>= 0;
-						iovs_len >>>= 0;
-						nwritten_ptr >>>= 0;
+					fd_write: (fd, iovs_ptr, iovs_len, nwritten_ptr) => {
+						iovs_ptr = u(iovs_ptr);
+						iovs_len = u(iovs_len);
+						nwritten_ptr = u(nwritten_ptr);
 						let nwritten = 0;
 						if (fd == 1) {
 							for (let iovs_i = 0; iovs_i < iovs_len; iovs_i++) {
-								let iov_ptr = iovs_ptr + iovs_i * 8; // assuming wasm32
-								let ptr = mem().getUint32(iov_ptr + 0, true);
-								let len = mem().getUint32(iov_ptr + 4, true);
+								let iov_ptr = iovs_ptr + iovs_i * 2 * ptrSize(); // {buf, bufLen}
+								let ptr = loadUint(iov_ptr);
+								let len = loadUint(iov_ptr + ptrSize());
 								nwritten += len;
 								for (let i = 0; i < len; i++) {
 									let c = mem().getUint8(ptr + i);
@@ -232,8 +258,8 @@
 						} else {
 							console.error('invalid file descriptor:', fd);
 						}
-						mem().setUint32(nwritten_ptr, nwritten, true);
-						return 0;
+						storeUint(nwritten_ptr, nwritten);
+						return goInt(0);
 					},
 					fd_read: () => wasi_ENOSYS,
 					fd_close: () => wasi_ENOSYS,
@@ -249,9 +275,9 @@
 						throw wasmExit;
 					},
 					random_get: (bufPtr, bufLen) => {
-						bufPtr >>>= 0;
-						bufLen >>>= 0;
-						crypto.getRandomValues(loadSlice(bufPtr, bufLen));
+						bufPtr = u(bufPtr);
+						bufLen = u(bufLen);
+						fillRandom(bufPtr, bufLen);
 						return 0;
 					},
 				},
@@ -263,9 +289,9 @@
 
 					// func getRandomData(r []byte)
 					"runtime.getRandomData": (slice_ptr, slice_len, slice_cap) => {
-						slice_ptr >>>= 0;
-						slice_len >>>= 0;
-						crypto.getRandomValues(loadSlice(slice_ptr, slice_len, slice_cap));
+						slice_ptr = u(slice_ptr);
+						slice_len = u(slice_len);
+						fillRandom(slice_ptr, slice_len);
 					},
 
 					// func sleepTicks(timeout int64)
@@ -314,16 +340,16 @@
 
 					// func stringVal(value string) ref
 					"syscall/js.stringVal": (value_ptr, value_len) => {
-						value_ptr >>>= 0;
-						value_len >>>= 0;
+						value_ptr = u(value_ptr);
+						value_len = u(value_len);
 						const s = loadString(value_ptr, value_len);
 						return boxValue(s);
 					},
 
 					// func valueGet(v ref, p string) ref
 					"syscall/js.valueGet": (v_ref, p_ptr, p_len) => {
-						p_ptr >>>= 0;
-						p_len >>>= 0;
+						p_ptr = u(p_ptr);
+						p_len = u(p_len);
 						let prop = loadString(p_ptr, p_len);
 						let v = unboxValue(v_ref);
 						let result = Reflect.get(v, prop);
@@ -332,8 +358,8 @@
 
 					// func valueSet(v ref, p string, x ref)
 					"syscall/js.valueSet": (v_ref, p_ptr, p_len, x_ref) => {
-						p_ptr >>>= 0;
-						p_len >>>= 0;
+						p_ptr = u(p_ptr);
+						p_len = u(p_len);
 						const v = unboxValue(v_ref);
 						const p = loadString(p_ptr, p_len);
 						const x = unboxValue(x_ref);
@@ -342,8 +368,8 @@
 
 					// func valueDelete(v ref, p string)
 					"syscall/js.valueDelete": (v_ref, p_ptr, p_len) => {
-						p_ptr >>>= 0;
-						p_len >>>= 0;
+						p_ptr = u(p_ptr);
+						p_len = u(p_len);
 						const v = unboxValue(v_ref);
 						const p = loadString(p_ptr, p_len);
 						Reflect.deleteProperty(v, p);
@@ -351,21 +377,21 @@
 
 					// func valueIndex(v ref, i int) ref
 					"syscall/js.valueIndex": (v_ref, i) => {
-						return boxValue(Reflect.get(unboxValue(v_ref), i));
+						return boxValue(Reflect.get(unboxValue(v_ref), u(i)));
 					},
 
 					// valueSetIndex(v ref, i int, x ref)
 					"syscall/js.valueSetIndex": (v_ref, i, x_ref) => {
-						Reflect.set(unboxValue(v_ref), i, unboxValue(x_ref));
+						Reflect.set(unboxValue(v_ref), u(i), unboxValue(x_ref));
 					},
 
 					// func valueCall(v ref, m string, args []ref) (ref, bool)
 					"syscall/js.valueCall": (ret_addr, v_ref, m_ptr, m_len, args_ptr, args_len, args_cap) => {
-						ret_addr >>>= 0;
-						m_ptr >>>= 0;
-						m_len >>>= 0;
-						args_ptr >>>= 0;
-						args_len >>>= 0;
+						ret_addr = u(ret_addr);
+						m_ptr = u(m_ptr);
+						m_len = u(m_len);
+						args_ptr = u(args_ptr);
+						args_len = u(args_len);
 						const v = unboxValue(v_ref);
 						const name = loadString(m_ptr, m_len);
 						const args = loadSliceOfValues(args_ptr, args_len, args_cap);
@@ -381,9 +407,9 @@
 
 					// func valueInvoke(v ref, args []ref) (ref, bool)
 					"syscall/js.valueInvoke": (ret_addr, v_ref, args_ptr, args_len, args_cap) => {
-						ret_addr >>>= 0;
-						args_ptr >>>= 0;
-						args_len >>>= 0;
+						ret_addr = u(ret_addr);
+						args_ptr = u(args_ptr);
+						args_len = u(args_len);
 						try {
 							const v = unboxValue(v_ref);
 							const args = loadSliceOfValues(args_ptr, args_len, args_cap);
@@ -397,9 +423,9 @@
 
 					// func valueNew(v ref, args []ref) (ref, bool)
 					"syscall/js.valueNew": (ret_addr, v_ref, args_ptr, args_len, args_cap) => {
-						ret_addr >>>= 0;
-						args_ptr >>>= 0;
-						args_len >>>= 0;
+						ret_addr = u(ret_addr);
+						args_ptr = u(args_ptr);
+						args_len = u(args_len);
 						const v = unboxValue(v_ref);
 						const args = loadSliceOfValues(args_ptr, args_len, args_cap);
 						try {
@@ -413,22 +439,22 @@
 
 					// func valueLength(v ref) int
 					"syscall/js.valueLength": (v_ref) => {
-						return unboxValue(v_ref).length;
+						return goInt(unboxValue(v_ref).length);
 					},
 
 					// valuePrepareString(v ref) (ref, int)
 					"syscall/js.valuePrepareString": (ret_addr, v_ref) => {
-						ret_addr >>>= 0;
+						ret_addr = u(ret_addr);
 						const s = String(unboxValue(v_ref));
 						const str = encoder.encode(s);
 						storeValue(ret_addr, str);
-						mem().setInt32(ret_addr + 8, str.length, true);
+						storeUint(ret_addr + 8, str.length);
 					},
 
 					// valueLoadString(v ref, b []byte)
 					"syscall/js.valueLoadString": (v_ref, slice_ptr, slice_len, slice_cap) => {
-						slice_ptr >>>= 0;
-						slice_len >>>= 0;
+						slice_ptr = u(slice_ptr);
+						slice_len = u(slice_len);
 						const str = unboxValue(v_ref);
 						loadSlice(slice_ptr, slice_len, slice_cap).set(str);
 					},
@@ -440,11 +466,11 @@
 
 					// func copyBytesToGo(dst []byte, src ref) (int, bool)
 					"syscall/js.copyBytesToGo": (ret_addr, dest_addr, dest_len, dest_cap, src_ref) => {
-						ret_addr >>>= 0;
-						dest_addr >>>= 0;
-						dest_len >>>= 0;
+						ret_addr = u(ret_addr);
+						dest_addr = u(dest_addr);
+						dest_len = u(dest_len);
 						let num_bytes_copied_addr = ret_addr;
-						let returned_status_addr = ret_addr + 4; // Address of returned boolean status variable
+						let returned_status_addr = ret_addr + ptrSize(); // Address of returned boolean status variable
 
 						const dst = loadSlice(dest_addr, dest_len);
 						const src = unboxValue(src_ref);
@@ -454,7 +480,7 @@
 						}
 						const toCopy = src.subarray(0, dst.length);
 						dst.set(toCopy);
-						mem().setUint32(num_bytes_copied_addr, toCopy.length, true);
+						storeUint(num_bytes_copied_addr, toCopy.length);
 						mem().setUint8(returned_status_addr, 1); // Return "ok" status
 					},
 
@@ -462,11 +488,11 @@
 					// Originally copied from upstream Go project, then modified:
 					//   https://github.com/golang/go/blob/3f995c3f3b43033013013e6c7ccc93a9b1411ca9/misc/wasm/wasm_exec.js#L404-L416
 					"syscall/js.copyBytesToJS": (ret_addr, dst_ref, src_addr, src_len, src_cap) => {
-						ret_addr >>>= 0;
-						src_addr >>>= 0;
-						src_len >>>= 0;
+						ret_addr = u(ret_addr);
+						src_addr = u(src_addr);
+						src_len = u(src_len);
 						let num_bytes_copied_addr = ret_addr;
-						let returned_status_addr = ret_addr + 4; // Address of returned boolean status variable
+						let returned_status_addr = ret_addr + ptrSize(); // Address of returned boolean status variable
 
 						const dst = unboxValue(dst_ref);
 						const src = loadSlice(src_addr, src_len);
@@ -476,7 +502,7 @@
 						}
 						const toCopy = src.subarray(0, dst.length);
 						dst.set(toCopy);
-						mem().setUint32(num_bytes_copied_addr, toCopy.length, true);
+						storeUint(num_bytes_copied_addr, toCopy.length);
 						mem().setUint8(returned_status_addr, 1); // Return "ok" status
 					},
 				}

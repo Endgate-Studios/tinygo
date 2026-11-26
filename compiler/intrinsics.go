@@ -212,7 +212,8 @@ func (b *builder) defineMathOp() bool {
 			llvmName = "sin"
 		}
 	}
-	if strings.HasSuffix(b.Triple, "-wasi") || llvmutil.Version() < 19 {
+	// wasm64 links no libm either (wasi-libc's musl is wasm32 only).
+	if strings.HasSuffix(b.Triple, "-wasi") || strings.HasPrefix(b.Triple, "wasm64") || llvmutil.Version() < 19 {
 		// We don't have a real libc for wasip2. Until that is fixed, we need to
 		// limit math intrinsics on WASI to a subset supported natively in
 		// WebAssembly.

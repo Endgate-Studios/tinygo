@@ -1,4 +1,4 @@
-//go:build (gc.conservative || gc.custom || gc.precise || gc.boehm) && tinygo.wasm
+//go:build (gc.conservative || gc.custom || gc.precise || gc.boehm) && tinygo.wasm && !scheduler.cores
 
 package runtime
 
@@ -11,14 +11,6 @@ import (
 func gcMarkReachable() {
 	markStack()
 	markGlobals()
-}
-
-//go:extern runtime.stackChainStart
-var stackChainStart *stackChainObject
-
-type stackChainObject struct {
-	parent   *stackChainObject
-	numSlots uintptr
 }
 
 // markStack marks all root pointers found on the stack.
@@ -52,17 +44,6 @@ func markStack() {
 	}
 	markRoots(sysSP, stackTop)
 	markTaskStacks()
-}
-
-// trackPointer is a stub function call inserted by the compiler during IR
-// construction. Calls to it are later replaced with regular stack bookkeeping
-// code.
-func trackPointer(ptr, alloca unsafe.Pointer)
-
-// swapStackChain swaps the stack chain.
-// This is called from internal/task when switching goroutines.
-func swapStackChain(dst **stackChainObject) {
-	*dst, stackChainStart = stackChainStart, *dst
 }
 
 func gcResumeWorld() {

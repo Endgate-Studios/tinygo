@@ -1,4 +1,4 @@
-//go:build scheduler.asyncify
+//go:build scheduler.asyncify || (scheduler.cores && tinygo.wasm)
 
 package task
 
@@ -8,18 +8,17 @@ import "unsafe"
 var stackTasks *Task
 
 func linkStack(t *Task) {
+	lockStacks()
 	t.state.nextStack = stackTasks
 	if stackTasks != nil {
 		stackTasks.state.prevStack = t
 	}
 	stackTasks = t
+	unlockStacks()
 }
 
-// DetachStack takes the current task off the stack list. A //go:wasmexport call
-// does this before its last pause, since it never resumes or exits.
-func DetachStack() { unlinkStack(currentTask) }
-
 func unlinkStack(t *Task) {
+	lockStacks()
 	if t.state.prevStack != nil {
 		t.state.prevStack.state.nextStack = t.state.nextStack
 	} else if stackTasks == t {
@@ -29,6 +28,7 @@ func unlinkStack(t *Task) {
 		t.state.nextStack.state.prevStack = t.state.prevStack
 	}
 	t.state.nextStack, t.state.prevStack = nil, nil
+	unlockStacks()
 }
 
 // liveStackRanges calls mark with the parts of each stack that hold data: the
@@ -36,7 +36,7 @@ func unlinkStack(t *Task) {
 // them keeps stale words from deeper calls, which must not be treated as roots.
 func liveStackRanges(mark func(start, end uintptr)) {
 	if t := currentTask; t != nil && t.state.prevStack == nil && stackTasks != t {
-		// It left the list on exit or detach but still runs until its final pause.
+		// It left the list on exit but still runs until its final pause.
 		mark(getCurrentStackPointer(), uintptr(t.state.top))
 	}
 	for t := stackTasks; t != nil; t = t.state.nextStack {

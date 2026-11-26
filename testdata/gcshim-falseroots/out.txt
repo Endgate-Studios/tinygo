@@ -1,0 +1,2 @@
+stale stack word: freed
+uintptr global: freed

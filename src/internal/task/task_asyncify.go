@@ -1,4 +1,4 @@
-//go:build scheduler.asyncify
+//go:build scheduler.asyncify || (scheduler.cores && tinygo.wasm)
 
 package task
 
@@ -25,9 +25,6 @@ type state struct {
 	stackBase uintptr
 	launched  bool
 
-	// finishing marks a goroutine that paused after it completed.
-	// Resume uses this per task flag to clear the stack.
-	finishing      bool
 	panicCapturing bool
 	panicOrigin    stackState
 	panicReplay    uintptr
@@ -103,41 +100,9 @@ func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	s.top = unsafe.Add(stack, stackSize)
 }
 
-//go:linkname memzero runtime.memzero
-func memzero(ptr unsafe.Pointer, size uintptr)
-
-// MarkFinishing marks the current goroutine for stack cleanup after it returns to the scheduler.
-func MarkFinishing() {
-	currentTask.state.finishing = true
-}
-
-// clearStack removes stale pointers from a finished asyncify stack.
-// The GC can then collect the stack and referenced objects.
-func (t *Task) clearStack() {
-	base := unsafe.Pointer(t.state.canaryPtr)
-	memzero(base, uintptr(t.state.top)-uintptr(base))
-}
-
-// currentTask is the current running task, or nil if currently in the scheduler.
-var currentTask *Task
-
-// Panic unwinding is synchronous: it either reaches a defer frame or aborts
-// without switching tasks. A single transient header is therefore sufficient.
-var panicStackState stackState
-
 // Current returns the current active task.
 func Current() *Task {
 	return currentTask
-}
-
-// Pause suspends the current task and returns to the scheduler.
-// This function may only be called when running on a goroutine stack, not when running on the system stack.
-func Pause() {
-	if *currentTask.state.canaryPtr != stackCanary {
-		runtimeFatal("stack overflow")
-	}
-
-	currentTask.state.unwind()
 }
 
 // PanicUnwind starts an Asyncify unwind without pausing the task. A defer
@@ -204,12 +169,13 @@ func (*stackState) unwind()
 // Resume the task until it pauses or completes.
 // This may only be called from the scheduler.
 func (t *Task) Resume() {
+	freePendingStack()
 	// The current task must be saved and restored because this can nest on WASM with JS.
 	prevTask := currentTask
 	if prevTask == nil {
-		// Save the system stack pointer.
-		saveStackPointer()
+		enterFromSystemStack()
 	}
+	pinToCore(t)
 	t.gcData.swap()
 	currentTask = t
 	t.state.running = true
@@ -221,31 +187,20 @@ func (t *Task) Resume() {
 	}
 	t.state.running = false
 	currentTask = prevTask
+	if prevTask == nil {
+		backOnSystemStack()
+	}
 	t.gcData.swap()
 	if uintptr(t.state.asyncifysp) > uintptr(t.state.csp) {
 		runtimeFatal("stack overflow")
 	}
 	if t.Exited {
-		runtime_freeTaskStack(t.state.stackBase)
+		freeStackLater(t.state.stackBase)
 		t.state = state{}
 		t.gcData = gcData{}
 		t.DeferFrame = nil
-	} else if t.state.finishing {
-		// The task is complete. Clear stale stack pointers and release its argument bundle.
-		t.state.finishing = false
-		t.clearStack()
-		t.state.args = nil
 	}
 }
 
-//go:linkname saveStackPointer runtime.saveStackPointer
-func saveStackPointer()
-
 //export tinygo_rewind
 func (*state) rewind()
-
-// OnSystemStack returns whether the caller is running on the system stack.
-func OnSystemStack() bool {
-	// If there is not an active goroutine, then this must be running on the system stack.
-	return Current() == nil
-}

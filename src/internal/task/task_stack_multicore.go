@@ -1,4 +1,4 @@
-//go:build scheduler.cores
+//go:build scheduler.cores && !tinygo.wasm
 
 package task
 

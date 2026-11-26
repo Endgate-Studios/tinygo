@@ -46,6 +46,7 @@ type Config struct {
 	GOOS            string
 	GOARCH          string
 	BuildMode       string
+	SharedLibrary   bool // a native -buildmode=c-shared library (Linux .so, Windows DLL), not a wasm module
 	CodeModel       string
 	RelocationModel string
 	SizeLevel       int
@@ -1226,13 +1227,13 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 		b.llvmFn.SetUnnamedAddr(true)
 	}
-	if b.info.exported && b.BuildMode == "c-shared" && b.GOOS == "linux" && b.info.linkName != "tinygo_init" && b.fn.Pkg != nil {
+	if b.info.exported && b.SharedLibrary && b.info.linkName != "tinygo_init" && b.fn.Pkg != nil {
 		// A shared library exports only the functions of the program and tinygo_init.
 		if path := b.fn.Pkg.Pkg.Path(); path == "runtime" || strings.HasPrefix(path, "internal/") {
 			b.llvmFn.SetVisibility(llvm.HiddenVisibility)
 		}
 	}
-	if b.info.exported && b.BuildMode == "c-shared" && b.GOOS == "windows" && b.fn.Pkg != nil {
+	if b.info.exported && b.SharedLibrary && b.GOOS == "windows" && b.fn.Pkg != nil {
 		// A DLL exports the functions of the program and tinygo_init. The
 		// export directive goes into the object (.drectve), where the linker
 		// reads it; the linker exports nothing else.

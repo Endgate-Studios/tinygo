@@ -17,7 +17,7 @@ func wasmEntryCommand() {
 	heapStart = uintptr(unsafe.Pointer(&heapStartSymbol))
 	heapEnd = uintptr(wasm_memory_size(0) * wasmPageSize)
 	run()
-	if mainExited {
+	if hasMainExited() {
 		// To make sure wasm_exec.js knows that we've exited, exit explicitly.
 		mainReturnExit()
 	}
@@ -67,7 +67,7 @@ func wasmExportCheckRun() {
 	switch {
 	case !initializeCalled:
 		runtimePanic(errWasmBeforeInit)
-	case mainExited:
+	case hasMainExited():
 		runtimePanic(errWasmAfterMain)
 	}
 }

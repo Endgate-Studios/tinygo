@@ -1,0 +1,9 @@
+{
+	"inherits":      ["wasm"],
+	"llvm-target":   "wasm64-unknown-unknown",
+	"build-tags":    ["tinygo.wasm64"],
+	"libc":          "wasmbuiltins",
+	"ldflags": [
+		"-mwasm64"
+	]
+}

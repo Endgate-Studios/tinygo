@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"go/types"
 	"strconv"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 	"tinygo.org/x/go-llvm"
@@ -228,6 +229,8 @@ func (b *builder) createAsyncifySuspendInvoke(fnType llvm.Type, fn llvm.Value, a
 		targetType = llvm.FunctionType(b.ctx.VoidType(), paramTypes, false)
 		resultGlobal = llvm.AddGlobal(b.mod, fnType.ReturnType(), wrapperName+".result")
 		resultGlobal.SetLinkage(llvm.InternalLinkage)
+		// One per core on wasm-cores, where several run this wrapper at once.
+		resultGlobal.SetThreadLocal(b.wasmAtomics())
 		resultGlobal.SetInitializer(llvm.ConstNull(fnType.ReturnType()))
 	}
 	targetWrapper := llvm.AddFunction(b.mod, wrapperName+".target", targetType)
@@ -264,8 +267,8 @@ func (b *builder) createAsyncifySuspendInvoke(fnType llvm.Type, fn llvm.Value, a
 	if fnType.ReturnType().TypeKind() == llvm.VoidTypeKind {
 		result = builder.CreateCall(targetType, targetWrapper, catchArgs, "")
 	} else {
-		// Asyncify runs one task at a time, and the target stores its result only
-		// after it finishes, so nested calls consume their results first.
+		// The target stores its result only after it finishes, so nested calls
+		// consume their results first. On wasm-cores the result is per core.
 		builder.CreateCall(targetType, targetWrapper, catchArgs, "")
 		result = builder.CreateLoad(fnType.ReturnType(), resultGlobal, "")
 		result.SetVolatile(true)
@@ -325,12 +328,14 @@ func (b *builder) createAsyncifyPanicReplay(catcherType llvm.Type) llvm.Value {
 	if rewinding.IsNil() {
 		rewinding = llvm.AddGlobal(b.mod, b.ctx.Int8Type(), "tinygo_rewinding")
 		rewinding.SetLinkage(llvm.ExternalLinkage)
+		rewinding.SetThreadLocal(b.wasmAtomics())
 	}
 	builder.CreateStore(llvm.ConstInt(b.ctx.Int8Type(), 1, false), rewinding)
 	panicRewinding := b.mod.NamedGlobal("tinygo_panic_rewinding")
 	if panicRewinding.IsNil() {
 		panicRewinding = llvm.AddGlobal(b.mod, b.ctx.Int8Type(), "tinygo_panic_rewinding")
 		panicRewinding.SetLinkage(llvm.ExternalLinkage)
+		panicRewinding.SetThreadLocal(b.wasmAtomics())
 	}
 	builder.CreateStore(llvm.ConstInt(b.ctx.Int8Type(), 1, false), panicRewinding)
 
@@ -864,4 +869,10 @@ func (b *builder) collapseFormalParamInternal(t llvm.Type, fields []llvm.Value) 
 	default:
 		return fields[0], fields[1:]
 	}
+}
+
+// wasmAtomics reports a wasm target with atomics (wasm-cores), whose
+// per-core state is thread-local.
+func (c *compilerContext) wasmAtomics() bool {
+	return strings.HasPrefix(c.Triple, "wasm") && strings.Contains(","+c.Features+",", ",+atomics,")
 }

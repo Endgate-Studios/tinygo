@@ -31,6 +31,20 @@ func Exit() {
 	exit(false, nil)
 }
 
+// ExportExit ends a //go:wasmexport call's goroutine once its result is stored.
+// The call returns from wasm then, so there's no deadlock to look for.
+func ExportExit() {
+	t := Current()
+	if hasReleasableStack {
+		t.Exited = true
+		unlinkStack(t)
+	}
+	exitSynctest(t)
+	atomic.AddUint32(&liveTasks, ^uint32(0))
+	Pause()
+	runtimeFatal("unreachable")
+}
+
 func CoroExit(next *Task) {
 	exit(false, next)
 }

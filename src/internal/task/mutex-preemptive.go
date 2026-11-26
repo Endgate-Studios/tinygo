@@ -41,6 +41,12 @@ func (m *Mutex) Lock() {
 	// (Unlock will wake one waiter when it finds the futex is set to 2 when
 	// unlocking).
 	for m.futex.Swap(2) != 0 {
+		if cannotPause() {
+			// No goroutine to pause (the scheduler freeing a stack):
+			// spin, holding it marked as waited on.
+			spinLoopWait()
+			continue
+		}
 		// Wait until we get resumed in Unlock.
 		m.futex.Wait(2)
 	}

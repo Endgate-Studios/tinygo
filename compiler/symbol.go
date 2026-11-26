@@ -263,7 +263,7 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 	// External/exported functions may not retain pointer values.
 	// https://golang.org/cmd/cgo/#hdr-Passing_pointers
 	if info.exported {
-		if c.archFamily() == "wasm32" && len(fn.Blocks) == 0 {
+		if strings.HasPrefix(c.Triple, "wasm") && len(fn.Blocks) == 0 {
 			// We need to add the wasm-import-module and the wasm-import-name
 			// attributes.
 			if info.wasmModule != "" {
@@ -355,7 +355,7 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 		info.wasmName = "_start"
 		info.exported = true
 	}
-	sharedLibrary := c.BuildMode == "c-shared" && (c.GOOS == "linux" || c.GOOS == "windows")
+	sharedLibrary := c.SharedLibrary
 	if info.linkName == "runtime.libraryEntry" && sharedLibrary {
 		info.linkName = "tinygo_init"
 		info.exported = true
@@ -528,7 +528,7 @@ func (c *compilerContext) parsePragmas(info *functionInfo, f *ssa.Function) {
 				c.addError(f.Pos(), fmt.Sprintf("//go:wasmexport does not allow main.main to be exported with -buildmode=%s", c.BuildMode))
 				continue
 			}
-			if c.archFamily() != "wasm32" {
+			if !strings.HasPrefix(c.Triple, "wasm") {
 				c.addError(f.Pos(), "//go:wasmexport is only supported on wasm")
 			}
 			c.checkWasmImportExport(f, comment.Text)
@@ -814,6 +814,9 @@ type globalInfo struct {
 	extern   bool   // go:extern
 	align    int    // go:align
 	section  string // go:section
+	// threadLocal is go:threadlocal: one copy per thread (a core on
+	// wasm-cores, where each has its own __tls_base).
+	threadLocal bool
 }
 
 // fileForFunc returns the *ast.File that contains the declaration of f, or
@@ -908,6 +911,10 @@ func (c *compilerContext) getGlobal(g *ssa.Global) llvm.Value {
 		llvmType := c.getLLVMType(typ)
 		llvmGlobal = llvm.AddGlobal(c.mod, llvmType, info.linkName)
 
+		if info.threadLocal {
+			llvmGlobal.SetThreadLocal(true)
+		}
+
 		// Set alignment from the //go:align comment.
 		alignment := max(info.align, c.targetData.ABITypeAlignment(llvmType))
 		if alignment <= 0 || alignment&(alignment-1) != 0 {
@@ -985,6 +992,8 @@ func (info *globalInfo) parsePragmas(doc *ast.CommentGroup, c *compilerContext, 
 				continue
 			}
 			info.align = align
+		case "//go:threadlocal":
+			info.threadLocal = true
 		case "//go:section":
 			if len(parts) != 2 {
 				c.addPragmaError(comment, fmt.Sprintf("expected one parameter to //go:section, not %d", len(parts)-1))

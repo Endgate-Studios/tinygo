@@ -41,21 +41,6 @@ const (
 	wasmPageSize = 64 * 1024
 )
 
-// wasm_memory_size invokes the "memory.size" instruction, which returns the
-// current size to the memory at the given index (always wasmMemoryIndex), in
-// pages.
-//
-//export llvm.wasm.memory.size.i32
-func wasm_memory_size(index int32) int32
-
-// wasm_memory_grow invokes the "memory.grow" instruction, which attempts to
-// increase the size of the memory at the given index (always wasmMemoryIndex),
-// by the delta (in pages). This returns the previous size on success of -1 on
-// failure.
-//
-//export llvm.wasm.memory.grow.i32
-func wasm_memory_grow(index int32, delta int32) int32
-
 var (
 	// heapStart is the current memory offset which starts the heap. The heap
 	// extends from this offset until heapEnd (exclusive).
@@ -79,14 +64,6 @@ func align(ptr uintptr) uintptr {
 
 //export tinygo_getCurrentStackPointer
 func getCurrentStackPointer() uintptr
-
-// savedStackPointer is used to save the system stack pointer while in a goroutine.
-var savedStackPointer uintptr
-
-// saveStackPointer is called by internal/task.state.Resume() to save the stack pointer before entering a goroutine from the system stack.
-func saveStackPointer() {
-	savedStackPointer = getCurrentStackPointer()
-}
 
 // growHeap tries to grow the heap size. It returns true if it succeeds, false
 // otherwise.

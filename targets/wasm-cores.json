@@ -1,0 +1,24 @@
+{
+	"inherits":   ["wasm"],
+	"features":   "+atomics,+bulk-memory,+bulk-memory-opt,+call-indirect-overlong,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+	"build-tags": ["tinygo.wasm.cores"],
+	"scheduler":  "cores",
+	"extra-files": [
+		"src/internal/task/task_asyncify_wasm.S",
+		"src/runtime/asm_tinygowasm_cores.S"
+	],
+	"cflags": [
+		"-matomics"
+	],
+	"ldflags": [
+		"--shared-memory",
+		"--import-memory",
+		"--max-memory=1073741824",
+		
+		"--export-memory",
+		"--export=__stack_pointer",
+		"--export=__wasm_init_tls",
+		"--export=__tls_size",
+		"--export=__tls_align"
+	]
+}

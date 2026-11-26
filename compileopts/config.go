@@ -69,9 +69,10 @@ func (c *Config) BuildMode() string {
 
 // SharedLibrary reports whether the build is a native shared library
 // (-buildmode=c-shared): a Linux .so or a Windows DLL, which uses the libc of
-// the host process.
+// the host process. wasm-unknown says GOOS linux too, but its c-shared is a
+// wasm module.
 func (c *Config) SharedLibrary() bool {
-	return c.BuildMode() == "c-shared" && (c.GOOS() == "linux" || c.GOOS() == "windows")
+	return c.BuildMode() == "c-shared" && (c.GOOS() == "linux" || c.GOOS() == "windows") && !strings.HasPrefix(c.Triple(), "wasm")
 }
 
 // sharedELF reports whether the build is a shared library in ELF, which needs
@@ -105,6 +106,21 @@ func (c *Config) CSourcePath(filename string) string {
 // Features returns a list of features this CPU supports. For example, for a
 // RISC-V processor, that could be "+a,+c,+m". For many targets, an empty list
 // will be returned.
+// CompilerScheduler is the scheduler goroutines are compiled for: cores on
+// wasm switches its goroutines with asyncify, as wasm has no stack switching.
+func (c *Config) CompilerScheduler() string {
+	if c.Scheduler() == "cores" && strings.HasPrefix(c.Triple(), "wasm") {
+		return "asyncify"
+	}
+	return c.Scheduler()
+}
+
+// WasmAtomics reports whether this is a wasm target with atomics, whose
+// memory is shared between threads.
+func (c *Config) WasmAtomics() bool {
+	return strings.HasPrefix(c.Triple(), "wasm") && strings.Contains(","+c.Features()+",", ",+atomics,")
+}
+
 func (c *Config) Features() string {
 	var features string
 	if c.Target.Features == "" {
@@ -262,7 +278,7 @@ func (c *Config) PanicUnwind() string {
 		// deferred calls, but calls need no code to propagate an unwind.
 		return "none"
 	}
-	if c.Scheduler() == "asyncify" {
+	if c.CompilerScheduler() == "asyncify" {
 		return "asyncify"
 	}
 	if requested == "explicit" {
@@ -270,7 +286,7 @@ func (c *Config) PanicUnwind() string {
 	}
 	arch, _, _ := strings.Cut(c.Triple(), "-")
 	switch arch {
-	case "wasm32":
+	case "wasm32", "wasm64":
 		return "none"
 	default:
 		return "setjmp"
@@ -282,7 +298,7 @@ func (c *Config) PanicUnwind() string {
 func (c *Config) SupportsExplicitUnwind() bool {
 	arch, _, _ := strings.Cut(c.Triple(), "-")
 	switch arch {
-	case "wasm32", "riscv64", "xtensa":
+	case "wasm32", "wasm64", "riscv64", "xtensa":
 		return true
 	default:
 		return false
@@ -370,6 +386,9 @@ func (c *Config) LibraryPath(name string) string {
 	if c.Target.SoftFloat {
 		archname += "-softfloat"
 	}
+	if c.WasmAtomics() {
+		archname += "-atomics"
+	}
 	if name == "bdwgc" {
 		// Boehm GC is compiled against a particular libc.
 		archname += "-" + c.Target.Libc
@@ -400,7 +419,7 @@ func (c *Config) LibraryPath(name string) string {
 // .exe, .wasm, or no extension (depending on the target).
 func (c *Config) DefaultBinaryExtension() string {
 	parts := strings.Split(c.Triple(), "-")
-	if parts[0] == "wasm32" {
+	if parts[0] == "wasm32" || parts[0] == "wasm64" {
 		// WebAssembly files always have the .wasm file extension.
 		return ".wasm"
 	}
