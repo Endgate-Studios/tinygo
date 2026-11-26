@@ -16,8 +16,8 @@ import (
 
 const NumberOfUSBEndpoints = 8
 
-// Physical endpoints in use. TinyGo classes only use endpoints 0 to 3.
-const otgNumEndpoints = 4
+// Physical endpoints in use: TinyGo's classes use 0 to 3, and raw HID 4.
+const otgNumEndpoints = 5
 
 const cpuInterruptFromUSB = 8
 
@@ -151,6 +151,7 @@ const (
 	tx1FIFOWords = 16
 	tx2FIFOWords = 48
 	tx3FIFOWords = 48
+	tx4FIFOWords = 16
 )
 
 var (
@@ -245,6 +246,8 @@ func (dev *USBDevice) Configure(config UARTConfig) {
 	esp.USB0.DIEPTXF2.Set(tx2FIFOWords<<16 | start)
 	start += tx2FIFOWords
 	esp.USB0.DIEPTXF3.Set(tx3FIFOWords<<16 | start)
+	start += tx3FIFOWords
+	esp.USB0.DIEPTXF4.Set(tx4FIFOWords<<16 | start)
 	flushRxFIFO()
 	flushTxFIFO(0x10)
 
