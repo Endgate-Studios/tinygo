@@ -1,0 +1,127 @@
+package arena
+
+import (
+	"unsafe"
+)
+
+// RegionStats is a snapshot of Region counters.
+type RegionStats struct {
+	Allocs   uint64
+	Resets   uint64
+	Failures uint64
+	Cap      uintptr // total bytes
+	Used     uintptr // bytes given since the last Reset, with padding
+	Peak     uintptr // highest Used seen
+}
+
+// Region is a bump allocator for scratch memory. Reset releases all allocations at once.
+// Region is not safe for concurrent use. Give each goroutine its own Region.
+type Region struct {
+	stats          RegionStats // first, for 8-byte alignment
+	base, off, end uintptr
+	regionOptions
+}
+
+// RegionOption configures a Region.
+type RegionOption func(*regionOptions) error
+
+type regionOptions struct {
+	poison bool
+}
+
+// WithRegionPoison fills memory with 0xDE on Reset to make use after Reset visible.
+func WithRegionPoison(on bool) RegionOption {
+	return func(o *regionOptions) error {
+		o.poison = on
+		return nil
+	}
+}
+
+// NewRegion makes a Region at the start of mem and allocates from the rest, so it
+// needs no allocator and works with -gc=none. It writes to mem, so mem must be usable
+// when NewRegion runs. A Region holds no pointers, and the result keeps mem alive.
+func NewRegion(mem []byte, opts ...RegionOption) (*Region, error) {
+	if len(mem) == 0 {
+		return nil, ErrEmptyRegion
+	}
+	start := uintptr(unsafe.Pointer(unsafe.SliceData(mem)))
+	end := start + uintptr(len(mem))
+	head := alignUp(start, unsafe.Alignof(Region{}))
+	if head > end || end-head < unsafe.Sizeof(Region{}) {
+		return nil, ErrArenaTooSmall
+	}
+	base := head + unsafe.Sizeof(Region{})
+	r := (*Region)(unsafe.Pointer(head))
+	*r = Region{base: base, off: base, end: end, regionOptions: regionOptions{poison: debugPoison}}
+	for _, opt := range opts {
+		if err := opt(&r.regionOptions); err != nil {
+			return nil, err
+		}
+	}
+	r.stats.Cap = end - base
+	return r, nil
+}
+
+// Live is the part of the region in use, [start, end). With it, a Region is a
+// gcshim.Root: gcshim.AddRoot(r) has the collector scan what r holds, so the
+// region may hold the only pointer to a heap object. Without that, the
+// collector may not read the region's memory at all.
+func (r *Region) Live() (start, end uintptr) { return r.base, r.off }
+
+// Alloc returns size zeroed bytes aligned to align, or nil if the region is full.
+// An align of 0 selects DefaultAlign.
+func (r *Region) Alloc(size, align uintptr) unsafe.Pointer {
+	if align == 0 {
+		align = DefaultAlign
+	}
+	if align&(align-1) != 0 {
+		r.stats.Failures++
+		return nil
+	}
+	p := alignUp(r.off, align)
+	if p < r.off || p > r.end || size > r.end-p {
+		r.stats.Failures++
+		return nil
+	}
+	r.off = p + size
+	clearBytes(p, size)
+	r.stats.Allocs++
+	r.stats.Used = r.off - r.base
+	if r.stats.Used > r.stats.Peak {
+		r.stats.Peak = r.stats.Used
+	}
+	return unsafe.Pointer(p)
+}
+
+// Reset releases all allocations. Do not use pointers into the region after Reset.
+func (r *Region) Reset() {
+	if r.poison {
+		fillBytes(r.base, r.off-r.base, poisonByte)
+	}
+	r.off = r.base
+	r.stats.Used = 0
+	r.stats.Resets++
+}
+
+// Mark returns the current fill level, for a later Rewind.
+func (r *Region) Mark() uintptr {
+	return r.off - r.base
+}
+
+// Rewind releases all allocations made after Mark returned m. It ignores m
+// if m is past the current fill level.
+func (r *Region) Rewind(m uintptr) {
+	if m > r.off-r.base {
+		return
+	}
+	if r.poison {
+		fillBytes(r.base+m, r.off-r.base-m, poisonByte)
+	}
+	r.off = r.base + m
+	r.stats.Used = m
+}
+
+// Stats returns a snapshot of the counters.
+func (r *Region) Stats() RegionStats {
+	return r.stats
+}
