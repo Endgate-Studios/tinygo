@@ -56,6 +56,10 @@ const (
 	lastCPUInt  = 30
 )
 
+// Peripheral lines with priority level 1. Other levels go to stub vectors.
+// See ESP-IDF components/esp_hw_support/port/esp32s3/esp_cpu_intr.c.
+const level1CPUInts = 1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5 | 1<<8 | 1<<9 | 1<<10 | 1<<12 | 1<<13 | 1<<17 | 1<<18
+
 // cpuIntUsed tracks which CPU interrupt lines have been allocated.
 var cpuIntUsed [32]bool
 
@@ -74,7 +78,7 @@ var inInterrupt [2]bool
 //	esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInt)
 //	interrupt.New(cpuInt, handler).Enable()
 func (i Interrupt) Enable() error {
-	if i.num < firstCPUInt || i.num > lastCPUInt {
+	if i.num < firstCPUInt || i.num > lastCPUInt || level1CPUInts&(1<<uint(i.num)) == 0 {
 		return errInterruptRange
 	}
 
@@ -217,7 +221,7 @@ func currentCPU() uint32
 //go:linkname enableOnCore0 runtime.enableInterruptOnCore0
 func enableOnCore0(num uint32)
 
-var errInterruptRange = constError("interrupt for ESP32-S3 must be in range 1 through 30")
+var errInterruptRange = constError("interrupt for ESP32-S3 must be level 1: 1-5, 8, 9, 10, 12, 13, 17 or 18")
 
 type constError string
 
