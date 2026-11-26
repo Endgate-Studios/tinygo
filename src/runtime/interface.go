@@ -68,7 +68,8 @@ func reflectValueEqual(x, y reflectlite.Value) bool {
 	case reflectlite.Complex64, reflectlite.Complex128:
 		return x.Complex() == y.Complex()
 	case reflectlite.String:
-		return x.String() == y.String()
+		// Use RawString because the fallback of String allocates.
+		return x.RawString() == y.RawString()
 	case reflectlite.Chan, reflectlite.Ptr, reflectlite.UnsafePointer:
 		return x.UnsafePointer() == y.UnsafePointer()
 	case reflectlite.Array:
