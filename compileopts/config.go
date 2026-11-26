@@ -30,7 +30,7 @@ const (
 // builder.Library struct but that's hard to do since we want to know the
 // library path in advance in several places).
 var libVersions = map[string]int{
-	"musl":         3,
+	"musl":         4,
 	"bdwgc":        4,
 	"picolibc":     2,
 	"wasmbuiltins": 1,
@@ -65,6 +65,12 @@ func (c *Config) BuildMode() string {
 		return c.Target.BuildMode
 	}
 	return "default"
+}
+
+// SharedLibrary reports whether the build is a Linux shared library
+// (-buildmode=c-shared) that uses the libc of the host process.
+func (c *Config) SharedLibrary() bool {
+	return c.BuildMode() == "c-shared" && c.GOOS() == "linux"
 }
 
 // TrimPath reports whether local file system paths must be removed from the
