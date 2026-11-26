@@ -6,7 +6,6 @@ import (
 	"device"
 	"device/esp"
 	"internal/task"
-	"math/bits"
 	"runtime/interrupt"
 	"runtime/volatile"
 	"sync/atomic"
@@ -89,6 +88,7 @@ func crossCoreHandler(interrupt.Interrupt) {
 
 	// The source is level triggered, so clear it before reading the flags.
 	signalCore(core, 0)
+	device.Asm("memw")
 	if core == 0 {
 		if mask := core0EnableRequest.Load(); mask != 0 {
 			interruptEnableLocal(mask)
@@ -236,22 +236,28 @@ func schedulerUnlockAndWait() {
 
 	// waiti lowers PS.INTLEVEL and waits in one step, so a wake sent after the
 	// unlock is not lost. See the Xtensa ISA Reference Manual, WAITI.
+	// An interrupt can wake a task before that, so check the list too.
 	state := interrupt.Disable()
 	schedulerLock.Unlock()
-	for schedulerWakePending[core].Swap(0) == 0 {
+	for schedulerWakePending[core].Swap(0) == 0 && interruptWakes[core] == nil {
 		device.Asm("waiti 0")
 		interrupt.Disable()
 	}
 	interrupt.Restore(state)
 	schedulerLock.Lock()
+	waitingCores &^= 1 << core
 }
 
 // Wake another core, if one is waiting or sleeping. Must be called with the
 // scheduler lock held.
 func schedulerWake() {
-	if core := bits.TrailingZeros8(waitingCores); core < numCPU {
-		schedulerWakeCore(uint32(core))
-	} else if hasSleepingCore() {
+	for core := uint32(0); core < numCPU; core++ {
+		if waitingCores&(1<<core) != 0 {
+			schedulerWakeCore(core)
+			return
+		}
+	}
+	if hasSleepingCore() {
 		interruptSleepTicksMulticore(0)
 	}
 }
@@ -298,7 +304,16 @@ func sleepTicksMulticore(d timeUnit) {
 func interruptSleepTicksMulticore(wakeup timeUnit) {
 	if hasSleepingCore() {
 		sleepWake[sleepingCore].Store(1)
+		signalCore(uint32(sleepingCore), 1)
 	}
+}
+
+// interruptSleepFromInterrupt stops the wait or sleep of this core after an
+// interrupt woke a task, so that the scheduler takes it.
+func interruptSleepFromInterrupt() {
+	core := currentCPU()
+	sleepWake[core].Store(1)
+	schedulerWakePending[core].Store(1)
 }
 
 //go:inline

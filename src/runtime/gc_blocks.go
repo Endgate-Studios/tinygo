@@ -624,12 +624,13 @@ func runGC() (freeBytes uintptr) {
 			// Push the task onto our temporary queue.
 			markedTaskQueue.Push(t)
 		}
+		wakes := gcMarkInterruptWakes()
 
 		finishMark()
 
 		// Restore the runqueue.
 		i := interrupt.Disable()
-		if !runqueue.Empty() {
+		if !runqueue.Empty() || interruptWakesChanged(wakes) {
 			// Something new came in while finishing the mark.
 			interrupt.Restore(i)
 			goto runqueueScan

@@ -44,7 +44,8 @@ func timerQueueRemove(t *timer) *timerNode {
 		if (*q).timer == t {
 			scheduleLog("removed timer")
 			n := *q
-			*q = (*q).next
+			*q = n.next
+			n.next = nil
 			return n
 		}
 	}

@@ -85,6 +85,12 @@ func sleepTicksMulticore(d timeUnit) {
 	sleepingCore = 0xff
 }
 
+// interruptSleepFromInterrupt ends the wait of schedulerUnlockAndWait after an
+// interrupt woke a task. The interrupt itself ends sleepTicksMulticore.
+func interruptSleepFromInterrupt() {
+	volatile.StoreUint32(&schedulerWakePending[currentCPU()], 1)
+}
+
 // Interrupt an ongoing call to sleepTicksMulticore on another core.
 func interruptSleepTicksMulticore(wakeup timeUnit) {
 	arm.Asm("sev")
@@ -104,6 +110,10 @@ func schedulerUnlockAndWait() {
 	core := currentCPU()
 	waitingCores |= 1 << core
 	schedulerWakePending[core] = 0
+	if hasInterruptWakes(core) {
+		// An interrupt woke a task before the flag was cleared.
+		schedulerWakePending[core] = 1
+	}
 	schedulerLock.Unlock()
 
 	// The sev in Unlock also sets the local event register, so one wfe returns at once.

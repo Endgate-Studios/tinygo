@@ -18,4 +18,9 @@ func (lock *runtimeSpinLock) Unlock() {
 }
 
 type timerLock = runtimeSpinLock
+
+// chanLock is a spin lock: an interrupt and the scheduler take channel locks
+// to wake a task, and neither can pause. Holders keep interrupts disabled and
+// never pause, so a holder on the other core lets go soon.
+type chanLock = runtimeSpinLock
 type synctestLock = runtimeSpinLock

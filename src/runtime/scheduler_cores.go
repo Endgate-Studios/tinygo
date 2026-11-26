@@ -6,6 +6,7 @@ import (
 	"internal/task"
 	"runtime/interrupt"
 	"sync/atomic"
+	"unsafe"
 )
 
 const hasScheduler = true
@@ -42,15 +43,49 @@ func goexit() {
 	task.Goexit()
 }
 
+// Tasks that an interrupt woke on each core. The scheduler lock does not
+// disable interrupts, so an interrupt cannot take it: the interrupted code on
+// the same core can hold it. Only the interrupts of a core add to its list.
+var interruptWakes [numCPU]*task.Task
+
 // Mark the given task as ready to resume.
 // This is allowed even if the task isn't paused yet, but will pause soon.
 func scheduleTask(t *task.Task) {
+	if interrupt.In() {
+		core := currentCPU()
+		t.Next = interruptWakes[core]
+		interruptWakes[core] = t
+		interruptSleepFromInterrupt()
+		return
+	}
 	synctestTaskWake(t)
 	scheduleTaskNoWake(t)
 }
 
 func scheduleTaskNoWake(t *task.Task) {
 	schedulerLock.Lock()
+	scheduleTaskLocked(t)
+	schedulerLock.Unlock()
+}
+
+// takeInterruptWakes schedules the tasks that interrupts on this core woke.
+// Must be called with the scheduler lock held.
+func takeInterruptWakes(core uint32) {
+	mask := interrupt.Disable()
+	t := interruptWakes[core]
+	interruptWakes[core] = nil
+	interrupt.Restore(mask)
+	for t != nil {
+		next := t.Next
+		t.Next = nil
+		synctestTaskWake(t)
+		scheduleTaskLocked(t)
+		t = next
+	}
+}
+
+// Must be called with the scheduler lock held.
+func scheduleTaskLocked(t *task.Task) {
 	switch t.RunState {
 	case task.RunStatePaused:
 		// Paused, state is saved on the stack.
@@ -68,7 +103,6 @@ func scheduleTaskNoWake(t *task.Task) {
 			runtimeFatal("scheduler: unknown run state")
 		}
 	}
-	schedulerLock.Unlock()
 }
 
 func addSleepTask(t *task.Task, wakeup timeUnit) {
@@ -152,8 +186,9 @@ func addTimer(tn *timerNode) {
 }
 
 // reAddTimer finishes firing a timer. It re-adds periodic timers unless they
-// were stopped or reset while the callback was running.
-func reAddTimer(tn *timerNode) {
+// were stopped or reset while the callback was running. It reports whether the
+// node is in the queue again.
+func reAddTimer(tn *timerNode) bool {
 	schedulerLock.Lock()
 
 	// Remove the timer from the firing list before re-adding it to the queue,
@@ -166,16 +201,17 @@ func reAddTimer(tn *timerNode) {
 		// re-add it: a stopped ticker must stay stopped, and a reset ticker has
 		// already been re-added by resetTimer.
 		schedulerLock.Unlock()
-		return
+		return false
 	}
 	if tn.timer.period == 0 {
 		schedulerLock.Unlock()
-		return
+		return false
 	}
 	tn.timer.when += tn.timer.period
 	timerQueueAdd(tn)
 	interruptSleepTicksMulticore(tn.whenTicks())
 	schedulerLock.Unlock()
+	return true
 }
 
 func removeTimer(t *timer) *timerNode {
@@ -245,7 +281,9 @@ func run() {
 }
 
 func scheduler(_ bool) {
+	core := currentCPU()
 	for mainExited.Load() == 0 {
+		takeInterruptWakes(core)
 		var now timeUnit
 		if sleepQueue != nil || timerQueue != nil {
 			now = ticks()
@@ -256,7 +294,7 @@ func scheduler(_ bool) {
 				sleepQueue = sleepQueue.Next
 				sleepingTask.Next = nil
 
-				if !sleepingTask.CanRunOn(currentCPU()) {
+				if !sleepingTask.CanRunOn(core) {
 					// Assigned to another core, so hand it over.
 					runqueue.Push(sleepingTask)
 					schedulerWakeTask(sleepingTask)
@@ -296,7 +334,7 @@ func scheduler(_ bool) {
 		}
 
 		// Check for ready-to-run tasks.
-		if runnable := runqueue.PopCore(currentCPU()); runnable != nil {
+		if runnable := runqueue.PopCore(core); runnable != nil {
 			// Resume it now.
 			schedulerHandOffClock()
 			setCurrentTask(runnable)
@@ -443,4 +481,29 @@ func printunlock() {
 	if !interrupt.In() {
 		printLock.Unlock()
 	}
+}
+
+// gcMarkInterruptWakes marks each task that interrupts woke. An interrupt can
+// set the Next field of a task that the GC scanned already, so mark them all.
+func gcMarkInterruptWakes() (heads [numCPU]*task.Task) {
+	mask := interrupt.Disable()
+	heads = interruptWakes
+	for _, t := range heads {
+		for ; t != nil; t = t.Next {
+			markRoot(uintptr(unsafe.Pointer(&interruptWakes)), uintptr(unsafe.Pointer(t)))
+		}
+	}
+	interrupt.Restore(mask)
+	return heads
+}
+
+// hasInterruptWakes reports whether interrupts on the given core woke tasks.
+func hasInterruptWakes(core uint32) bool {
+	return interruptWakes[core] != nil
+}
+
+// interruptWakesChanged reports whether an interrupt added a task after
+// gcMarkInterruptWakes. Interrupts add at the head. Interrupts must be disabled.
+func interruptWakesChanged(heads [numCPU]*task.Task) bool {
+	return interruptWakes != heads
 }
