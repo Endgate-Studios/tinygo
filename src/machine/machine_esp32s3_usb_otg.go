@@ -650,6 +650,11 @@ func FlushSerial() {}
 func EnterBootloader() {
 	interrupt.Disable()
 
+	// A watchdog the firmware started would otherwise restart the chip in the middle of flashing.
+	esp.RTC_CNTL.WDTWPROTECT.Set(0x50D83AA1)
+	esp.RTC_CNTL.WDTCONFIG0.Set(0)
+	esp.RTC_CNTL.WDTWPROTECT.Set(0)
+
 	// Drop off the bus first so the host enumerates USB Serial/JTAG anew.
 	esp.USB0.DCTL.SetBits(dctlSDIS)
 	usbDelayMs(500)

@@ -156,6 +156,72 @@ func (f flashBlockDevice) writeAt(p []byte, off int64) (n int, err error) {
 	return len(padded), nil
 }
 
+// RawFlash is the chip's flash by its address on the chip, wherever that is: for what's outside the data
+// area, such as another firmware slot. It's up to the caller not to write what's running.
+var RawFlash rawFlash
+
+type rawFlash struct{}
+
+const rawFlashChunk = 1024
+
+// rawFlashBuf is what the ROM reads to and writes from. It's in internal RAM, where a goroutine's stack
+// mightn't be, as the cache that reaches the rest isn't on while the ROM's at it. One at a time, then.
+var rawFlashBuf [rawFlashChunk / 4]uint32
+
+// ReadAt reads from an address on the chip.
+func (rawFlash) ReadAt(p []byte, addr uint32) error {
+	buf := &rawFlashBuf
+	bytes := unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), rawFlashChunk)
+	for len(p) > 0 {
+		n := min(len(p), rawFlashChunk)
+		state, multicore := flashSafeEnter()
+		setFlashSize()
+		res := C.esp_rom_spiflash_read(C.uint32_t(addr), (*C.uint32_t)(unsafe.Pointer(&buf[0])), C.uint32_t((n+3)&^3))
+		flashSafeExit(state, multicore)
+		if res != 0 {
+			return errFlashCannotReadPastEOF
+		}
+		copy(p, bytes[:n])
+		p, addr = p[n:], addr+uint32(n)
+	}
+	return nil
+}
+
+// WriteAt writes whole words to an address on the chip, already erased.
+func (rawFlash) WriteAt(p []byte, addr uint32) error {
+	buf := &rawFlashBuf
+	bytes := unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), rawFlashChunk)
+	if len(p)%4 != 0 || addr%4 != 0 {
+		return errFlashInvalidWriteLength
+	}
+	for len(p) > 0 {
+		n := min(len(p), rawFlashChunk)
+		copy(bytes, p[:n])
+		state, multicore := flashSafeEnter()
+		setFlashSize()
+		C.esp_rom_spiflash_unlock()
+		res := C.esp_rom_spiflash_write(C.uint32_t(addr), (*C.uint32_t)(unsafe.Pointer(&buf[0])), C.uint32_t(n))
+		flashSafeExit(state, multicore)
+		if res != 0 {
+			return errFlashCannotWriteData
+		}
+		p, addr = p[n:], addr+uint32(n)
+	}
+	return nil
+}
+
+// EraseSector erases the 4 KB sector at an address on the chip.
+func (rawFlash) EraseSector(addr uint32) error {
+	state, multicore := flashSafeEnter()
+	defer flashSafeExit(state, multicore)
+	setFlashSize()
+	C.esp_rom_spiflash_unlock()
+	if C.esp_rom_spiflash_erase_sector(C.uint32_t(addr/4096)) != 0 {
+		return errFlashCannotErasePage
+	}
+	return nil
+}
+
 func (f flashBlockDevice) eraseBlocks(start, length int64) error {
 	address := writeAddress(start * f.EraseBlockSize())
 	if readAddress((start+length)*f.EraseBlockSize()) > flashEnd() {
