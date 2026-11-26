@@ -196,6 +196,9 @@ func main() {
 		clearbss()
 	}
 
+	// Initialize PSRAM if numa_psram_* build tag is enabled.
+	initPSRAM()
+
 	// Initialize main system timer used for time.Now.
 	initTimer()
 
@@ -215,6 +218,10 @@ func main() {
 func init() {
 	// Initialize UART.
 	machine.InitSerial()
+
+	// Report a PSRAM bring-up failure now that there is somewhere to report it.
+	// initPSRAM runs long before this and cannot print anything.
+	checkPSRAMInit()
 }
 
 func abort() {
