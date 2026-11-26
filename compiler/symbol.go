@@ -355,7 +355,7 @@ func (c *compilerContext) getFunctionInfo(f *ssa.Function) functionInfo {
 		info.wasmName = "_start"
 		info.exported = true
 	}
-	sharedLibrary := c.BuildMode == "c-shared" && c.GOOS == "linux"
+	sharedLibrary := c.BuildMode == "c-shared" && (c.GOOS == "linux" || c.GOOS == "windows")
 	if info.linkName == "runtime.libraryEntry" && sharedLibrary {
 		info.linkName = "tinygo_init"
 		info.exported = true

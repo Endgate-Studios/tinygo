@@ -479,8 +479,10 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			// https://groups.google.com/g/Golang-nuts/c/Jd9tlNc6jUE/m/Zo-7zIP_m3MJ?pli=1
 			spec.LDFlags = append(spec.LDFlags,
 				"-m", "i386pep",
-				"--image-base", "0x400000",
 			)
+			if options.BuildMode != "c-shared" {
+				spec.LDFlags = append(spec.LDFlags, "--image-base", "0x400000")
+			}
 			spec.RTLib = "compiler-rt"
 		case "arm64":
 			spec.LDFlags = append(spec.LDFlags,
@@ -492,8 +494,12 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"-Bdynamic",
 			"--gc-sections",
 			"--no-insert-timestamp",
-			"--no-dynamicbase",
 		)
+		if options.BuildMode != "c-shared" {
+			// A DLL keeps its relocations: the host loads it at whatever
+			// address is free, never at a fixed one.
+			spec.LDFlags = append(spec.LDFlags, "--no-dynamicbase")
+		}
 		spec.ExtraFiles = append(spec.ExtraFiles,
 			"src/runtime/runtime_windows.c")
 	case "wasm", "wasip1", "wasip2":

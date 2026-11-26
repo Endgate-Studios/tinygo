@@ -1232,6 +1232,15 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 			b.llvmFn.SetVisibility(llvm.HiddenVisibility)
 		}
 	}
+	if b.info.exported && b.BuildMode == "c-shared" && b.GOOS == "windows" && b.fn.Pkg != nil {
+		// A DLL exports the functions of the program and tinygo_init. The
+		// export directive goes into the object (.drectve), where the linker
+		// reads it; the linker exports nothing else.
+		if path := b.fn.Pkg.Pkg.Path(); b.info.linkName == "tinygo_init" || (path != "runtime" && !strings.HasPrefix(path, "internal/")) {
+			b.mod.AddNamedMetadataOperand("llvm.linker.options",
+				b.ctx.MDNode([]llvm.Metadata{b.ctx.MDString("/EXPORT:" + b.info.linkName)}))
+		}
+	}
 	if b.info.section != "" {
 		b.llvmFn.SetSection(b.info.section)
 	}

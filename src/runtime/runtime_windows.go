@@ -48,6 +48,27 @@ func __getmainargs(argc *int32, argv, env **unsafe.Pointer, doWildcard int, star
 
 var performanceFrequency int64
 
+// libraryEntry is tinygo_init, the entry point of -buildmode=c-shared: the
+// host calls it once, after loading the DLL and outside the loader lock. It
+// does not register the exception handler, which would also catch the
+// host's crashes.
+func libraryEntry() {
+	if libraryInitialized {
+		return
+	}
+	libraryInitialized = true
+	preinit()
+	if GOARCH == "386" {
+		_QueryPerformanceFrequency(&performanceFrequency)
+	}
+	stackTop = getCurrentStackPointer()
+	initRand()
+	initHeap()
+	initAll()
+}
+
+var libraryInitialized bool
+
 //export mainCRTStartup
 func mainCRTStartup() int {
 	preinit()

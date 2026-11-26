@@ -202,7 +202,7 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 	if l.needsLibc {
 		args = append(args, config.LibcCFlags()...)
 	}
-	if config.SharedLibrary() {
+	if config.SharedLibrary() && config.GOOS() != "windows" {
 		args = append(args, "-fPIC")
 	}
 

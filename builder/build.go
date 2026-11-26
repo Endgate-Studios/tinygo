@@ -818,16 +818,22 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			// The host calls the library on its own threads and stacks.
 			// A scheduler or a GC that scans the stack cannot work there.
 			if config.Scheduler() != "none" {
-				return result, fmt.Errorf("buildmode c-shared on linux only supports scheduler=none")
+				return result, fmt.Errorf("buildmode c-shared on %s only supports scheduler=none", config.GOOS())
 			}
 			if gc := config.GC(); gc != "none" && gc != "leaking" {
-				return result, fmt.Errorf("buildmode c-shared on linux only supports gc=none and gc=leaking")
+				return result, fmt.Errorf("buildmode c-shared on %s only supports gc=none and gc=leaking", config.GOOS())
+			}
+			if config.GOOS() == "windows" {
+				// A DLL. It exports only what the compiler's /EXPORT directives
+				// name, and its entry point is DllMainCRTStartup.
+				ldflags = append(ldflags, "--shared", "--exclude-all-symbols")
+				break
 			}
 			// Bind references to definitions in the library and hide compiler-rt,
 			// so the host and the library do not replace each other's symbols.
 			ldflags = append(ldflags, "-shared", "-Bsymbolic", "--exclude-libs=ALL")
 		default:
-			return result, fmt.Errorf("buildmode c-shared is only supported on wasm and linux at the moment")
+			return result, fmt.Errorf("buildmode c-shared is only supported on wasm, linux and windows at the moment")
 		}
 	}
 
@@ -1016,7 +1022,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			if config.Options.PrintCommands != nil {
 				config.Options.PrintCommands(config.Target.Linker, ldflags...)
 			}
-			if config.SharedLibrary() {
+			if config.SharedLibrary() && config.GOOS() != "windows" {
+				// A DLL links like a program: COFF has no undefined symbols
+				// left for the host to fill in.
 				err = linkSharedLibrary(config.Target.Linker, ldflags...)
 			} else {
 				var linkEnv []string

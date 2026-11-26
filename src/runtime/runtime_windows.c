@@ -27,3 +27,14 @@ static LONG WINAPI tinygo_exception_handler(EXCEPTION_POINTERS *info) {
 void tinygo_init_exception_handler(void) {
 	AddVectoredExceptionHandler(1, tinygo_exception_handler);
 }
+
+// DllMainCRTStartup is the entry point of a DLL (-buildmode=c-shared). It does
+// nothing: running Go code under the loader lock could deadlock, so the host
+// starts the runtime with tinygo_init after LoadLibrary returns. A program
+// never references it, so the linker drops it there.
+BOOL WINAPI DllMainCRTStartup(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+	(void)instance;
+	(void)reason;
+	(void)reserved;
+	return TRUE;
+}

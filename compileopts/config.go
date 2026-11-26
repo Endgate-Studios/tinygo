@@ -67,10 +67,19 @@ func (c *Config) BuildMode() string {
 	return "default"
 }
 
-// SharedLibrary reports whether the build is a Linux shared library
-// (-buildmode=c-shared) that uses the libc of the host process.
+// SharedLibrary reports whether the build is a native shared library
+// (-buildmode=c-shared): a Linux .so or a Windows DLL, which uses the libc of
+// the host process.
 func (c *Config) SharedLibrary() bool {
-	return c.BuildMode() == "c-shared" && c.GOOS() == "linux"
+	return c.BuildMode() == "c-shared" && (c.GOOS() == "linux" || c.GOOS() == "windows")
+}
+
+// sharedELF reports whether the build is a shared library in ELF, which needs
+// position-independent code and hidden C symbols. A Windows DLL needs neither:
+// x86-64 and arm64 code is PC-relative there, and COFF exports only what it is
+// told to.
+func (c *Config) sharedELF() bool {
+	return c.SharedLibrary() && c.GOOS() != "windows"
 }
 
 // TrimPath reports whether local file system paths must be removed from the
@@ -375,7 +384,7 @@ func (c *Config) LibraryPath(name string) string {
 	if c.LibcNeedsMalloc() {
 		options += "+malloc"
 	}
-	if c.SharedLibrary() {
+	if c.sharedELF() {
 		options += "+pic"
 	}
 	if c.TrimPath() {
@@ -428,7 +437,7 @@ func (c *Config) CFlags(libclang bool) []string {
 		)
 	}
 	cflags = append(cflags, c.LibcCFlags()...)
-	if c.SharedLibrary() {
+	if c.sharedELF() {
 		// Hidden C symbols are not exported, so the linker can remove the unused ones.
 		cflags = append(cflags, "-fPIC", "-fvisibility=hidden")
 	}
