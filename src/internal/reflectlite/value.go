@@ -2420,3 +2420,121 @@ func NewAt(typ Type, p unsafe.Pointer) Value {
 		flags:    valueFlagExported,
 	}
 }
+
+// Call calls the func v holds; with callSlice, its last argument is the
+// variadic slice itself. reflect.Value.Call and CallSlice use it.
+func Call(v Value, in []Value, callSlice bool) []Value {
+	op := "Call"
+	if callSlice {
+		op = "CallSlice"
+	}
+	if v.Kind() != Func {
+		panic(&ValueError{Method: "reflect.Value." + op, Kind: v.Kind()})
+	}
+	if v.isRO() {
+		panic("reflect: " + op + " using value obtained using unexported field")
+	}
+	fn := (*funcHeader)(v.value)
+	if fn.Code == nil {
+		panic("reflect: call of nil function")
+	}
+	ft := v.typecode.funcType(op)
+	numIn := int(ft.numIn)
+	variadic := ft.numOut&funcVariadic != 0
+	switch {
+	case callSlice && !variadic:
+		panic("reflect: CallSlice of non-variadic function")
+	case callSlice && len(in) != numIn, !variadic && len(in) != numIn:
+		panic("reflect: " + op + " with wrong argument count")
+	case variadic && !callSlice && len(in) < numIn-1:
+		panic("reflect: Call with too few input arguments")
+	}
+	for _, x := range in {
+		if x.Kind() == Invalid {
+			panic("reflect: " + op + " using zero Value argument")
+		}
+	}
+	if variadic && !callSlice {
+		extra := in[numIn-1:]
+		slice := MakeSlice(ft.param(numIn-1), len(extra), len(extra))
+		for i, x := range extra {
+			slice.Index(i).Set(x)
+		}
+		in = append(in[:numIn-1:numIn-1], slice)
+	}
+
+	args, argAt := callFrame(ft, 0, numIn)
+	for i, x := range in {
+		slot := Value{typecode: ft.param(i), value: argAt[i], flags: valueFlagExported | valueFlagIndirect}
+		if !x.typecode.AssignableTo(slot.typecode) {
+			panic("reflect: " + op + " using " + x.typecode.String() + " as type " + slot.typecode.String())
+		}
+		slot.Set(x)
+	}
+	results, resultAt := callFrame(ft, numIn, ft.outs())
+
+	call := *(*func(fn, context, args, results unsafe.Pointer))(unsafe.Pointer(&funcHeader{Code: ft.call}))
+	call(fn.Code, fn.Context, args, results)
+
+	out := make([]Value, len(resultAt))
+	for i, at := range resultAt {
+		t := ft.param(numIn + i)
+		if size := t.Size(); size <= unsafe.Sizeof(uintptr(0)) {
+			out[i] = Value{typecode: t, value: unsafe.Pointer(loadValue(at, size)), flags: valueFlagExported}
+		} else {
+			out[i] = Value{typecode: t, value: at, flags: valueFlagExported}
+		}
+	}
+	return out
+}
+
+// callFrame allocates n of ft's params, from first, laid out as a struct, as
+// the compiler's call stub reads and writes them.
+func callFrame(ft *funcType, first, n int) (unsafe.Pointer, []unsafe.Pointer) {
+	offsets := make([]uintptr, n)
+	var size uintptr
+	for i := range offsets {
+		t := ft.param(first + i)
+		align := uintptr(t.Align())
+		size = (size + align - 1) &^ (align - 1)
+		offsets[i] = size
+		size += t.Size()
+	}
+	frame := alloc(size, gclayout.Conservative.AsPtr())
+	at := make([]unsafe.Pointer, n)
+	for i, off := range offsets {
+		at[i] = unsafe.Add(frame, off)
+	}
+	return frame, at
+}
+
+// ValueMethod returns v's i'th exported method bound to v, as a func value.
+func ValueMethod(v Value, i int) Value {
+	if v.Kind() == Interface {
+		panic("unimplemented: (reflect.Value).Method on an interface value")
+	}
+	methods := v.typecode.exportedMethods()
+	if uint(i) >= uint(len(methods)) {
+		panic("reflect: Method index out of range")
+	}
+	m := &methods[i]
+	if m.bound == nil {
+		panic("unimplemented: reflect on a //export method")
+	}
+	// The receiver as an interface holds it, copied as a method value copies.
+	word := v.value
+	size := v.typecode.Size()
+	if size <= unsafe.Sizeof(uintptr(0)) {
+		if v.isIndirect() {
+			word = loadSmallValue(v.value, size)
+		}
+	} else {
+		word = alloc(size, v.typecode.gcLayout())
+		memcpy(word, v.value, size)
+	}
+	return Value{
+		typecode: m.mtyp,
+		value:    unsafe.Pointer(&funcHeader{Context: word, Code: m.bound}),
+		flags:    valueFlagExported | v.flags.ro(),
+	}
+}

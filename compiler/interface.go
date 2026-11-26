@@ -244,6 +244,12 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			types.NewVar(token.NoPos, nil, "methods", types.NewArray(types.Typ[types.UnsafePointer], int64(len(methods)))),
 		}, nil)
 		methodSetValue := c.getMethodSetValue(methods)
+		// A concrete type's method set ends in its exported methods' table.
+		concreteMethodSetType := types.NewStruct([]*types.Var{
+			types.NewVar(token.NoPos, nil, "length", types.Typ[types.Uintptr]),
+			types.NewVar(token.NoPos, nil, "methods", types.NewArray(types.Typ[types.UnsafePointer], int64(len(methods)))),
+			types.NewVar(token.NoPos, nil, "exported", types.Typ[types.UnsafePointer]),
+		}, nil)
 		switch typ := typ.(type) {
 		case *types.Basic:
 			typeFieldTypes = append(typeFieldTypes,
@@ -263,7 +269,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			)
 			if len(methods) > 0 {
 				typeFieldTypes = append(typeFieldTypes,
-					types.NewVar(token.NoPos, nil, "methods", methodSetType),
+					types.NewVar(token.NoPos, nil, "methods", concreteMethodSetType),
 				)
 			}
 			typeFieldTypes = append(typeFieldTypes,
@@ -288,7 +294,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			)
 			if len(methods) > 0 {
 				typeFieldTypes = append(typeFieldTypes,
-					types.NewVar(token.NoPos, nil, "methods", methodSetType),
+					types.NewVar(token.NoPos, nil, "methods", concreteMethodSetType),
 				)
 			}
 		case *types.Array:
@@ -320,7 +326,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			)
 			if len(methods) > 0 {
 				typeFieldTypes = append(typeFieldTypes,
-					types.NewVar(token.NoPos, nil, "methods", methodSetType),
+					types.NewVar(token.NoPos, nil, "methods", concreteMethodSetType),
 				)
 			}
 		case *types.Interface:
@@ -331,8 +337,11 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 		case *types.Signature:
 			typeFieldTypes = append(typeFieldTypes,
 				types.NewVar(token.NoPos, nil, "ptrTo", types.Typ[types.UnsafePointer]),
+				types.NewVar(token.NoPos, nil, "numIn", types.Typ[types.Uint16]),
+				types.NewVar(token.NoPos, nil, "numOut", types.Typ[types.Uint16]),
+				types.NewVar(token.NoPos, nil, "call", types.Typ[types.UnsafePointer]),
+				types.NewVar(token.NoPos, nil, "params", types.NewArray(types.Typ[types.UnsafePointer], int64(typ.Params().Len()+typ.Results().Len()))),
 			)
-			// TODO: signature params and return values
 		}
 		if hasMethodSet {
 			// This method set is appended at the start of the struct. It is
@@ -387,7 +396,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				pkgPathPtr,                                               // pkgpath pointer
 			}
 			if len(methods) > 0 {
-				typeFields = append(typeFields, methodSetValue) // methods
+				typeFields = append(typeFields, c.getMethodSetValue(methods, c.getReflectMethodTable(typ))) // methods
 			}
 			typeFields = append(typeFields, c.ctx.ConstString(pkgname+"."+name+"\x00", false)) // name
 			metabyte |= 1 << 5                                                                 // "named" flag
@@ -426,7 +435,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				c.getTypeCode(typ.Elem()),
 			}
 			if len(methods) > 0 {
-				typeFields = append(typeFields, methodSetValue)
+				typeFields = append(typeFields, c.getMethodSetValue(methods, c.getReflectMethodTable(typ)))
 			}
 		case *types.Array:
 			typeFields = []llvm.Value{
@@ -518,7 +527,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			}
 			typeFields = append(typeFields, llvm.ConstArray(structFieldType, fields))
 			if len(methods) > 0 {
-				typeFields = append(typeFields, methodSetValue)
+				typeFields = append(typeFields, c.getMethodSetValue(methods, c.getReflectMethodTable(typ)))
 			}
 		case *types.Interface:
 			typeFields = []llvm.Value{
@@ -526,8 +535,24 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				methodSetValue,
 			}
 		case *types.Signature:
-			typeFields = []llvm.Value{c.getTypeCode(types.NewPointer(typ))}
-			// TODO: params, return values, etc
+			numOut := uint64(typ.Results().Len())
+			if typ.Variadic() {
+				numOut |= 1 << 15 // reflectlite's funcVariadic
+			}
+			var params []llvm.Value
+			for i := 0; i < typ.Params().Len(); i++ {
+				params = append(params, c.getTypeCode(typ.Params().At(i).Type()))
+			}
+			for i := 0; i < typ.Results().Len(); i++ {
+				params = append(params, c.getTypeCode(typ.Results().At(i).Type()))
+			}
+			typeFields = []llvm.Value{
+				c.getTypeCode(types.NewPointer(typ)),
+				llvm.ConstInt(c.ctx.Int16Type(), uint64(typ.Params().Len()), false),
+				llvm.ConstInt(c.ctx.Int16Type(), numOut, false),
+				c.getReflectCallStub(typ, globalName+"$call"),
+				llvm.ConstArray(c.dataPtrType, params),
+			}
 		}
 		// Prepend the common RawType field.
 		typeFields = append([]llvm.Value{
@@ -1210,7 +1235,7 @@ func (c *compilerContext) getMethodsString(itf *types.Interface) string {
 
 // getMethodSetValue creates the method set struct value for a list of methods.
 // The struct contains a length and a sorted array of method signature pointers.
-func (c *compilerContext) getMethodSetValue(methods []*types.Func) llvm.Value {
+func (c *compilerContext) getMethodSetValue(methods []*types.Func, extra ...llvm.Value) llvm.Value {
 	// Create a sorted list of method signature global names.
 	type methodRef struct {
 		name  string
@@ -1256,10 +1281,10 @@ func (c *compilerContext) getMethodSetValue(methods []*types.Func) llvm.Value {
 		values = append(values, ref.value)
 	}
 
-	return c.ctx.ConstStruct([]llvm.Value{
+	return c.ctx.ConstStruct(append([]llvm.Value{
 		llvm.ConstInt(c.uintptrType, uint64(len(values)), false),
 		llvm.ConstArray(c.dataPtrType, values),
-	}, false)
+	}, extra...), false)
 }
 
 // getInvokeFunction returns the thunk to call the given interface method. The
@@ -1443,4 +1468,52 @@ func (c *compilerContext) getInterfaceInvokeWrapper(fn *ssa.Function, llvmFnType
 	}
 
 	return wrapper
+}
+
+// getReflectCallStub returns the function reflect.Value.Call uses to call a
+// func of this signature, as func(fn, context, args, results unsafe.Pointer).
+// args and results hold the parameters and results laid out as structs.
+func (c *compilerContext) getReflectCallStub(sig *types.Signature, name string) llvm.Value {
+	if stub := c.mod.NamedFunction(name); !stub.IsNil() {
+		return stub
+	}
+	ptr := c.dataPtrType
+	stub := llvm.AddFunction(c.mod, name, llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{ptr, ptr, ptr, ptr, ptr}, false))
+	c.addStandardAttributes(stub)
+	stub.SetLinkage(llvm.LinkOnceODRLinkage)
+	stub.SetUnnamedAddr(true)
+
+	b := &builder{compilerContext: c, Builder: c.ctx.NewBuilder()}
+	defer b.Dispose()
+	b.SetInsertPointAtEnd(c.ctx.AddBasicBlock(stub, "entry"))
+	fn, context, args, results := stub.Param(0), stub.Param(1), stub.Param(2), stub.Param(3)
+
+	abi := c.getFunctionABI(sig, false)
+	var argTypes []llvm.Type
+	for i := 0; i < sig.Params().Len(); i++ {
+		argTypes = append(argTypes, c.getLLVMType(sig.Params().At(i).Type()))
+	}
+	argsType := c.ctx.StructType(argTypes, false)
+	var params []llvm.Value
+	if abi.indirectResult {
+		params = append(params, results) // the result is written in place
+	}
+	for i, t := range argTypes {
+		field := b.CreateInBoundsGEP(argsType, args, []llvm.Value{
+			llvm.ConstInt(c.ctx.Int32Type(), 0, false),
+			llvm.ConstInt(c.ctx.Int32Type(), uint64(i), false),
+		}, "")
+		if abi.params[i].indirect {
+			params = append(params, field)
+		} else {
+			params = append(params, b.CreateLoad(t, field, ""))
+		}
+	}
+	params = append(params, context)
+	result := b.createCall(c.getLLVMFunctionType(sig), fn, params, "")
+	if !abi.indirectResult && sig.Results().Len() != 0 {
+		b.CreateStore(result, results)
+	}
+	b.CreateRetVoid()
+	return stub
 }

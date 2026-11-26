@@ -207,11 +207,20 @@ func MakeChan(typ Type, buffer int) Value {
 }
 
 func (v Value) Call(in []Value) []Value {
-	panic("unimplemented: (reflect.Value).Call()")
+	return fromLiteValues(reflectlite.Call(v.Value, toLiteValues(in), false))
 }
 
 func (v Value) CallSlice(in []Value) []Value {
-	panic("unimplemented: (reflect.Value).CallSlice()")
+	return fromLiteValues(reflectlite.Call(v.Value, toLiteValues(in), true))
+}
+
+// A Value is a reflectlite.Value and nothing else, so the slices convert.
+func toLiteValues(in []Value) []reflectlite.Value {
+	return unsafe.Slice((*reflectlite.Value)(unsafe.Pointer(unsafe.SliceData(in))), len(in))
+}
+
+func fromLiteValues(out []reflectlite.Value) []Value {
+	return unsafe.Slice((*Value)(unsafe.Pointer(unsafe.SliceData(out))), len(out))
 }
 
 func (v Value) Equal(u Value) bool {
@@ -219,11 +228,18 @@ func (v Value) Equal(u Value) bool {
 }
 
 func (v Value) Method(i int) Value {
-	panic("unimplemented: (reflect.Value).Method()")
+	return Value{reflectlite.ValueMethod(v.Value, i)}
 }
 
 func (v Value) MethodByName(name string) Value {
-	panic("unimplemented: (reflect.Value).MethodByName()")
+	if v.Kind() == Interface {
+		return v.Elem().MethodByName(name)
+	}
+	i := reflectlite.TypeMethodIndex(toRawType(v.Type()), name)
+	if i < 0 {
+		return Value{}
+	}
+	return v.Method(i)
 }
 
 func (v Value) Recv() (x Value, ok bool) {

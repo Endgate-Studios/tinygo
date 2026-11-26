@@ -399,6 +399,8 @@ func (t *RawType) String() string {
 	case Interface:
 		// TODO(dgryski): Needs actual method set info
 		return "interface {}"
+	case Func:
+		return t.funcString()
 	default:
 		return t.Kind().String()
 	}
@@ -1057,8 +1059,9 @@ func (t *RawType) name() string {
 	ptr := unsafe.Add(unsafe.Pointer(ntype), unsafe.Sizeof(*ntype))
 	if ntype.numMethod&numMethodHasMethodSet != 0 {
 		ms := (*methodSet)(ptr)
-		// Skip past the length field and the method pointer entries.
-		ptr = unsafe.Add(ptr, unsafe.Sizeof(uintptr(0))+uintptr(ms.length)*unsafe.Sizeof(unsafe.Pointer(nil)))
+		// Skip past the length field, the method pointer entries and the
+		// exported methods' table.
+		ptr = unsafe.Add(ptr, unsafe.Sizeof(uintptr(0))+uintptr(ms.length+1)*unsafe.Sizeof(unsafe.Pointer(nil)))
 	}
 	return readStringZ(ptr)
 }
@@ -1389,4 +1392,177 @@ func uvarint32(buf []byte) (uint32, int) {
 func TypeFor[T any]() Type {
 	// This function was copied from the Go 1.22 source tree.
 	return TypeOf((*T)(nil)).Elem()
+}
+
+// funcType is the type descriptor for func types: the in types, then the out
+// types, follow it.
+type funcType struct {
+	RawType
+	ptrTo  *RawType
+	numIn  uint16
+	numOut uint16 // with funcVariadic when the last in type is ...T
+	call   unsafe.Pointer
+	params [0]*RawType
+}
+
+const funcVariadic = 1 << 15
+
+func (t *RawType) funcType(method string) *funcType {
+	if t.Kind() != Func {
+		panic("reflect: " + method + " of non-func type " + t.String())
+	}
+	return (*funcType)(unsafe.Pointer(t.underlying()))
+}
+
+func (t *funcType) param(i int) *RawType {
+	return *(**RawType)(unsafe.Add(unsafe.Pointer(&t.params), uintptr(i)*unsafe.Sizeof(t.ptrTo)))
+}
+
+func (t *funcType) outs() int {
+	return int(t.numOut &^ funcVariadic)
+}
+
+func (t *RawType) NumIn() int {
+	return int(t.funcType("NumIn").numIn)
+}
+
+func (t *RawType) NumOut() int {
+	return t.funcType("NumOut").outs()
+}
+
+func (t *RawType) IsVariadic() bool {
+	return t.funcType("IsVariadic").numOut&funcVariadic != 0
+}
+
+func (t *RawType) In(i int) Type {
+	ft := t.funcType("In")
+	if uint(i) >= uint(ft.numIn) {
+		panic("reflect: Function index out of range")
+	}
+	return ft.param(i)
+}
+
+func (t *RawType) Out(i int) Type {
+	ft := t.funcType("Out")
+	if uint(i) >= uint(ft.outs()) {
+		panic("reflect: Function index out of range")
+	}
+	return ft.param(int(ft.numIn) + i)
+}
+
+// reflectMethod is an exported method in a concrete type's descriptor. Both
+// funcs use the closure calling convention.
+type reflectMethod struct {
+	name  *byte          // NUL-terminated
+	mtyp  *RawType       // without the receiver
+	ftyp  *RawType       // with the receiver first
+	bound unsafe.Pointer // the method value: the receiver's interface word is its context
+	expr  unsafe.Pointer // the method expression
+}
+
+// concreteMethodSet returns the method set of a named, pointer or struct
+// type, or nil. The exported methods' table follows its entries.
+func (t *RawType) concreteMethodSet() *methodSet {
+	if t.ptrtag() != 0 {
+		return nil
+	}
+	switch {
+	case t.isNamed():
+		ct := (*namedType)(unsafe.Pointer(t))
+		if ct.numMethod&numMethodHasMethodSet != 0 {
+			return (*methodSet)(unsafe.Add(unsafe.Pointer(ct), unsafe.Sizeof(*ct)))
+		}
+	case t.Kind() == Pointer:
+		ct := (*ptrType)(unsafe.Pointer(t))
+		if ct.numMethod&numMethodHasMethodSet != 0 {
+			return &ct.methods
+		}
+	case t.Kind() == Struct:
+		ct := (*structType)(unsafe.Pointer(t))
+		if ct.numMethod&numMethodHasMethodSet != 0 {
+			return (*methodSet)(unsafe.Add(unsafe.Pointer(&ct.fields[0]), uintptr(ct.numField)*unsafe.Sizeof(structField{})))
+		}
+	}
+	return nil
+}
+
+// exportedMethods returns t's exported methods, sorted by name.
+func (t *RawType) exportedMethods() []reflectMethod {
+	if t.Kind() == Interface {
+		panic("unimplemented: method lookup on an interface type")
+	}
+	ms := t.concreteMethodSet()
+	if ms == nil {
+		return nil
+	}
+	table := *(**reflectMethod)(unsafe.Add(unsafe.Pointer(&ms.methods), ms.length*unsafe.Sizeof(unsafe.Pointer(nil))))
+	return unsafe.Slice(table, t.NumMethod())
+}
+
+// TypeMethod returns t's i'th exported method: its name, its type with the
+// receiver first, and its func.
+func TypeMethod(t *RawType, i int) (name string, ftyp *RawType, fn Value) {
+	methods := t.exportedMethods()
+	if uint(i) >= uint(len(methods)) {
+		panic("reflect: Method index out of range")
+	}
+	m := &methods[i]
+	if m.expr == nil {
+		panic("unimplemented: reflect on a //export method")
+	}
+	return readStringZ(unsafe.Pointer(m.name)), m.ftyp, Value{
+		typecode: m.ftyp,
+		value:    unsafe.Pointer(&funcHeader{Code: m.expr}),
+		flags:    valueFlagExported,
+	}
+}
+
+// TypeMethodIndex returns the index of t's exported method name, or -1.
+func TypeMethodIndex(t *RawType, name string) int {
+	methods := t.exportedMethods()
+	i, j := 0, len(methods)
+	for i < j {
+		h := int(uint(i+j) >> 1)
+		if readStringZ(unsafe.Pointer(methods[h].name)) < name {
+			i = h + 1
+		} else {
+			j = h
+		}
+	}
+	if i < len(methods) && readStringZ(unsafe.Pointer(methods[i].name)) == name {
+		return i
+	}
+	return -1
+}
+
+// funcString is an unnamed func type as Go writes it: func(int, ...string) (int, error).
+func (t *RawType) funcString() string {
+	ft := t.funcType("String")
+	s := "func("
+	for i := 0; i < int(ft.numIn); i++ {
+		if i > 0 {
+			s += ", "
+		}
+		in := ft.param(i).String()
+		if i == int(ft.numIn)-1 && ft.numOut&funcVariadic != 0 {
+			in = "..." + in[len("[]"):]
+		}
+		s += in
+	}
+	s += ")"
+	switch outs := ft.outs(); outs {
+	case 0:
+	case 1:
+		s += " " + ft.param(int(ft.numIn)).String()
+	default:
+		s += " ("
+		for i := 0; i < outs; i++ {
+			if i > 0 {
+				s += ", "
+			}
+			s += ft.param(int(ft.numIn) + i).String()
+		}
+		s += ")"
+	}
+	return s
 }
