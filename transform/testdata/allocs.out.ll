@@ -85,6 +85,19 @@ define void @testZeroSizedAlloc() {
   ret void
 }
 
+define void @testAddressCaptureCall() {
+  %stackalloc = alloca [4 x i8], align 4
+  store [4 x i8] zeroinitializer, ptr %stackalloc, align 4
+  %val = call ptr @addressOnlyIntPtr(ptr %stackalloc)
+  ret void
+}
+
+define void @testProvenanceCaptureCall() {
+  %alloc = call align 4 ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
+  %val = call ptr @provenanceIntPtr(ptr %alloc)
+  ret void
+}
+
 define { ptr, ptr } @testEscapingReturnedAggregate() {
   %alloc = call align 4 ptr @runtime.alloc(i32 4, ptr inttoptr (i32 3 to ptr))
   %result = call { i32, { ptr, ptr } } @wrapInAggregate(ptr %alloc)
@@ -111,3 +124,7 @@ declare ptr @escapeIntPtr(ptr)
 declare ptr @noescapeIntPtr(ptr nocapture)
 
 declare ptr @escapeIntPtrSometimes(ptr nocapture, ptr)
+
+declare ptr @addressOnlyIntPtr(ptr captures(address_is_null))
+
+declare ptr @provenanceIntPtr(ptr captures(address, read_provenance))

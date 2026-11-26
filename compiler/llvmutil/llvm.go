@@ -318,9 +318,11 @@ func IsNoCapture(attr llvm.Attribute) bool {
 		return false
 	}
 	if Version() >= 21 {
-		// captures(none) is encoded as the value 0; any other value permits
-		// some form of capture.
-		return attr.GetEnumValue() == 0
+		// Only the provenance bits let the pointer escape. Other uses are in bits 4
+		// to 7 and the return in bits 0 to 3 (CaptureInfo in llvm/Support/ModRef.h).
+		const provenance = 1<<2 | 1<<3 // ReadProvenance | Provenance
+		v := attr.GetEnumValue()
+		return v&(provenance<<4|provenance) == 0
 	}
 	return true
 }
