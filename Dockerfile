@@ -4,6 +4,9 @@
 # Or use the image that CI published:
 #   docker build --build-arg LLVM_IMAGE=ghcr.io/tinygo-org/llvm-22:<tag> .
 ARG LLVM_IMAGE=tinygo-llvm-build
+# The Go of the final image. Its GOROOT is what TinyGo builds against, so it must
+# match src/syscall/goroot (loader/goroot.go filesToOverride).
+ARG GO_IMAGE=golang:1.27
 
 # tinygo-compiler-build stage builds the compiler itself
 FROM ${LLVM_IMAGE} AS tinygo-compiler-build
@@ -18,7 +21,7 @@ RUN cd /tinygo/ && \
 
 # tinygo-compiler copies the compiler build over to a base Go container (without
 # all the build tools etc).
-FROM golang:1.27 AS tinygo-compiler
+FROM ${GO_IMAGE} AS tinygo-compiler
 
 # Copy tinygo build.
 COPY --from=tinygo-compiler-build /tinygo/build/release/tinygo /tinygo
