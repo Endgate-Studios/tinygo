@@ -115,33 +115,30 @@ func initTimerInterrupt() {
 	timerAlarmInterrupt.Enable()
 }
 
-// sleepTicks spins until the given number of ticks have elapsed, using the
-// TIMG0 alarm interrupt to avoid busy-waiting for the entire duration.
+// setTimerAlarm arms the TIMG0 alarm interrupt for the given tick count.
+func setTimerAlarm(target timeUnit) {
+	esp.TIMG0.T0ALARMLO.Set(uint32(target))
+	esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
+
+	// Enable the alarm (auto-clears when alarm fires).
+	esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_TCONFIG_ALARM_EN)
+
+	// Re-enable the timer interrupt (handler disables INT_ENA).
+	esp.TIMG0.INT_CLR_TIMERS.Set(1)
+	esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
+}
+
+// sleepTicks waits until the given number of ticks have elapsed, or until an
+// interrupt comes, because it can wake a goroutine. An interrupt since the
+// last sleep also ends the sleep, so no wakeup is lost.
 func sleepTicks(d timeUnit) {
 	machine.FlushSerial()
 	core := currentCPU()
 	target := ticks() + d
-	for ticks() < target {
-		// Set the alarm to fire at the target tick count.
-		interruptPending[core].Set(0)
-
-		esp.TIMG0.T0ALARMLO.Set(uint32(target))
-		esp.TIMG0.T0ALARMHI.Set(uint32(target >> 32))
-
-		// Enable the alarm (auto-clears when alarm fires).
-		esp.TIMG0.T0CONFIG.SetBits(esp.TIMG_TCONFIG_ALARM_EN)
-
-		// Re-enable the timer interrupt (handler disables INT_ENA).
-		esp.TIMG0.INT_CLR_TIMERS.Set(1)
-		esp.TIMG0.INT_ENA_TIMERS.SetBits(1)
-
-		// Wait for any interrupt (timer alarm or other) or timeout.
-		for interruptPending[core].Get() == 0 {
-			if ticks() >= target || sleepWoken(core) {
-				return
-			}
-		}
+	setTimerAlarm(target)
+	for interruptPending[core].Get() == 0 && ticks() < target && !sleepWoken(core) {
 	}
+	interruptPending[core].Set(0)
 }
 
 func exit(code int) {
