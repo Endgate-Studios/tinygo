@@ -4,6 +4,7 @@ _tinygo_startTask:
 #else // Linux etc
 .section .text.tinygo_startTask
 .global  tinygo_startTask
+.hidden  tinygo_startTask
 tinygo_startTask:
 #endif
     .cfi_startproc
@@ -41,6 +42,7 @@ tinygo_startTask:
 _tinygo_swapTask:
 #else // Linux etc
 .global tinygo_swapTask
+.hidden tinygo_swapTask
 .section .text.tinygo_swapTask
 tinygo_swapTask:
 #endif

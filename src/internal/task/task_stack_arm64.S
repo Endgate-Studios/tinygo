@@ -2,6 +2,10 @@
 .global  _tinygo_startTask
 _tinygo_startTask:
 #else
+#ifdef __ELF__
+.section .text.tinygo_startTask
+.hidden tinygo_startTask
+#endif
 .global  tinygo_startTask
 tinygo_startTask:
 #endif
@@ -40,6 +44,10 @@ tinygo_startTask:
 .global _tinygo_swapTask
 _tinygo_swapTask:
 #else
+#ifdef __ELF__
+.section .text.tinygo_swapTask
+.hidden tinygo_swapTask
+#endif
 .global tinygo_swapTask
 tinygo_swapTask:
 #endif

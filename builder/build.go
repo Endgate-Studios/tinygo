@@ -169,6 +169,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			return BuildResult{}, err
 		}
 		defer unlock()
+		if config.SharedLibrary() {
+			// Use the libc of the host process and only the musl headers.
+			// Two libcs in one process do not share thread-local storage.
+			break
+		}
 		libcDependencies = append(libcDependencies, dummyCompileJob(filepath.Join(filepath.Dir(libcJob.result), "crt1.o")))
 		libcDependencies = append(libcDependencies, libcJob)
 	case "picolibc":
@@ -806,10 +811,24 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	ldflags := append(config.LDFlags(), "-o", result.Executable)
 
 	if config.Options.BuildMode == "c-shared" {
-		if !strings.HasPrefix(config.Triple(), "wasm32-") {
-			return result, fmt.Errorf("buildmode c-shared is only supported on wasm at the moment")
+		switch {
+		case strings.HasPrefix(config.Triple(), "wasm32-"):
+			ldflags = append(ldflags, "--no-entry")
+		case config.SharedLibrary():
+			// The host calls the library on its own threads and stacks.
+			// A scheduler or a GC that scans the stack cannot work there.
+			if config.Scheduler() != "none" {
+				return result, fmt.Errorf("buildmode c-shared on linux only supports scheduler=none")
+			}
+			if gc := config.GC(); gc != "none" && gc != "leaking" {
+				return result, fmt.Errorf("buildmode c-shared on linux only supports gc=none and gc=leaking")
+			}
+			// Bind references to definitions in the library and hide compiler-rt,
+			// so the host and the library do not replace each other's symbols.
+			ldflags = append(ldflags, "-shared", "-Bsymbolic", "--exclude-libs=ALL")
+		default:
+			return result, fmt.Errorf("buildmode c-shared is only supported on wasm and linux at the moment")
 		}
-		ldflags = append(ldflags, "--no-entry")
 	}
 
 	if config.Options.BuildMode == "wasi-legacy" {
@@ -997,11 +1016,15 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			if config.Options.PrintCommands != nil {
 				config.Options.PrintCommands(config.Target.Linker, ldflags...)
 			}
-			var linkEnv []string
-			if config.TrimPath() && config.LinkerFlavor() == "darwin" {
-				linkEnv = append(linkEnv, "ZERO_AR_DATE=1")
+			if config.SharedLibrary() {
+				err = linkSharedLibrary(config.Target.Linker, ldflags...)
+			} else {
+				var linkEnv []string
+				if config.TrimPath() && config.LinkerFlavor() == "darwin" {
+					linkEnv = append(linkEnv, "ZERO_AR_DATE=1")
+				}
+				err = link(config.Target.Linker, ldflags, linkEnv...)
 			}
-			err = link(config.Target.Linker, ldflags, linkEnv...)
 			if err != nil {
 				return err
 			}

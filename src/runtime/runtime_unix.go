@@ -101,6 +101,24 @@ func main(argc int32, argv *unsafe.Pointer) int {
 	return 0
 }
 
+// libraryEntry is tinygo_init, the entry point of -buildmode=c-shared. It does
+// not install signal handlers, because they would also catch host crashes.
+func libraryEntry() {
+	if libraryInitialized {
+		return
+	}
+	libraryInitialized = true
+	if needsStaticHeap {
+		allocateHeap()
+	}
+	stackTop = getCurrentStackPointer()
+	initRand()
+	initHeap()
+	initAll()
+}
+
+var libraryInitialized bool
+
 var (
 	main_argc int32
 	main_argv *unsafe.Pointer

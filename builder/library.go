@@ -202,6 +202,9 @@ func (l *Library) load(config *compileopts.Config, tmpdir string) (job *compileJ
 	if l.needsLibc {
 		args = append(args, config.LibcCFlags()...)
 	}
+	if config.SharedLibrary() {
+		args = append(args, "-fPIC")
+	}
 
 	var once sync.Once
 

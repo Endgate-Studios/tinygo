@@ -375,6 +375,9 @@ func (c *Config) LibraryPath(name string) string {
 	if c.LibcNeedsMalloc() {
 		options += "+malloc"
 	}
+	if c.SharedLibrary() {
+		options += "+pic"
+	}
 	if c.TrimPath() {
 		options += "+trimpath-v1"
 	}
@@ -425,6 +428,10 @@ func (c *Config) CFlags(libclang bool) []string {
 		)
 	}
 	cflags = append(cflags, c.LibcCFlags()...)
+	if c.SharedLibrary() {
+		// Hidden C symbols are not exported, so the linker can remove the unused ones.
+		cflags = append(cflags, "-fPIC", "-fvisibility=hidden")
+	}
 	if c.GC() == "boehm" {
 		cflags = append(cflags,
 			"-I"+filepath.Join(goenv.Get("TINYGOROOT"), "lib", "bdwgc", "include"),
@@ -715,6 +722,9 @@ func (c *Config) CodeModel() string {
 func (c *Config) RelocationModel() string {
 	if c.Target.RelocationModel != "" {
 		return c.Target.RelocationModel
+	}
+	if c.SharedLibrary() {
+		return "pic"
 	}
 
 	return "static"
