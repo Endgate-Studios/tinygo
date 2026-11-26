@@ -357,6 +357,7 @@ const (
 // the change parameter is ignored and can be set to any value (such as 0).
 // If the pin is already configured with a callback, you must first unset
 // this pins interrupt before you can set a new callback.
+// The callbacks run on the core that sets the first pin interrupt.
 func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) (err error) {
 	if p >= maxPin {
 		return ErrInvalidInputPin
@@ -400,6 +401,9 @@ var (
 )
 
 func setupPinInterrupt() error {
+	// Route the source to core 0, as runtime/interrupt does every peripheral:
+	// interrupt.Enable on core 1 enables the line on core 0, so a source
+	// routed to core 1 would never fire.
 	esp.INTERRUPT_CORE0.SetGPIO_INTERRUPT_PRO_MAP(cpuInterruptFromPin)
 	return interrupt.New(cpuInterruptFromPin, func(interrupt.Interrupt) {
 		// Read and immediately clear interrupt status bits.
