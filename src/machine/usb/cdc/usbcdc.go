@@ -35,6 +35,10 @@ type USBCDC struct {
 	// needZLP is set when the last packet was full size, so the transfer is not yet ended.
 	needZLP bool
 
+	// rxPaused is that the ring had no room for another packet, so the OUT endpoint wasn't armed
+	// again, and the host waits until a read makes room. What can't be taken isn't dropped.
+	rxPaused atomic.Bool
+
 	// txActive is the TX-pump ownership flag: 0 = idle, 1 = a pump owns the TX
 	// path. Claimed once (kickTx, CAS 0->1), held across every in-flight packet
 	// and the TX-complete IRQ, and released only when the ring drains. While it
@@ -64,7 +68,16 @@ func (usbcdc *USBCDC) Read(data []byte) (n int, err error) {
 	n += copy(data, data1)
 	n += copy(data[n:], data2)
 	usbcdc.rx.Discard(uint32(n))
+	usbcdc.resumeRx()
 	return n, nil
+}
+
+// resumeRx lets the host send again, if it's waiting and there's room now. It's on every read, even
+// of nothing, so a pause that came just after a read's look doesn't wait for more data to end it.
+func (usbcdc *USBCDC) resumeRx() {
+	if usbcdc.rxPaused.Load() && usbcdc.rx.Free() >= usb.EndpointPacketSize && usbcdc.rxPaused.CompareAndSwap(true, false) {
+		machine.AckUsbOutTransfer(cdcEndpointOut)
+	}
 }
 
 // ReadByte reads a single byte from the RX buffer.
@@ -75,8 +88,10 @@ func (usbcdc *USBCDC) ReadByte() (byte, error) {
 	if len(b) > 0 {
 		c := b[0]
 		usbcdc.rx.Discard(1)
+		usbcdc.resumeRx()
 		return c, nil
 	}
+	usbcdc.resumeRx()
 	return 0, ErrBufferEmpty
 }
 
@@ -121,6 +136,21 @@ func (usbcdc *USBCDC) Write(data []byte) (n int, err error) {
 		usbcdc.kickTx()
 	}
 	return n, nil
+}
+
+// TryWrite takes as much of data as there's room for without waiting, and says how much. With no host
+// holding the port open it takes it all, as Write does. It's for a loop that has other things to do
+// if the host stops reading.
+func (usbcdc *USBCDC) TryWrite(data []byte) int {
+	if usbLineInfo.lineState <= 0 {
+		return len(data)
+	}
+	n := min(len(data), int(usbcdc.tx.Free()))
+	if n > 0 {
+		usbcdc.tx.Put(data[:n])
+		usbcdc.kickTx()
+	}
+	return n
 }
 
 // kickTx claims the TX pump for a producer. This CAS is the only start-from-idle
@@ -203,9 +233,15 @@ func (usbcdc *USBCDC) RTS() bool {
 	return (usbLineInfo.lineState & usb_CDC_LINESTATE_RTS) > 0
 }
 
-func cdcCallbackRx(b []byte) {
-	free := USB.rx.Free()
-	USB.rx.Put(b[:min(len(b), int(free))])
+// cdcCallbackRx takes a packet. A packet's at most the endpoint's size, and it was only armed with that
+// much room, so all of it fits. It says whether there's room for the next.
+func cdcCallbackRx(b []byte) bool {
+	USB.rx.Put(b[:min(len(b), int(USB.rx.Free()))])
+	if USB.rx.Free() >= usb.EndpointPacketSize {
+		return true
+	}
+	USB.rxPaused.Store(true)
+	return false
 }
 
 var cdcSetupBuff [cdcLineInfoSize]byte
