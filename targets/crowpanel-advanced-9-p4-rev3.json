@@ -1,0 +1,12 @@
+{
+	"inherits": [
+		"esp32p4-rev3"
+	],
+	"build-tags": [
+		"crowpanel_advanced_9_p4"
+	],
+	"serial-port": [
+		"1a86:7522",
+		"1a86:7523"
+	]
+}

@@ -1,0 +1,7 @@
+{
+	"inherits": [
+		"esp32p4"
+	],
+	"inheritable-only": true,
+	"linkerscript": "targets/esp32p4-rev3.ld"
+}

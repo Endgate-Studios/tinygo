@@ -107,6 +107,17 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		}
 		segments = ramSegments
 
+	case "esp32p4":
+		var ramSegments []*espImageSegment
+		for _, seg := range segments {
+			if seg.addr >= 0x40000000 && seg.addr < 0x44000000 {
+				flashSegments = append(flashSegments, seg)
+			} else {
+				ramSegments = append(ramSegments, seg)
+			}
+		}
+		segments = ramSegments
+
 	case "esp32s3":
 		var ramSegments []*espImageSegment
 		for _, seg := range segments {
@@ -167,6 +178,47 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		}
 		if !patched {
 			return fmt.Errorf("ESP32: _drom_flash_addr (0x%x) not in any RAM segment", dromSymAddr)
+		}
+	}
+
+	// ESP32-P4 flash segments go at the next 64 KB page of flash after the RAM part, and the
+	// startup code maps that page. The image is at flash offset 0x2000 (main.go gets it from
+	// espflasher), and ESP-IDF esp_app_format.h has the sizes.
+	var esp32p4FlashOffset int
+	if chip == "esp32p4" && len(flashSegments) > 0 {
+		if makeImage {
+			return fmt.Errorf("ESP32-P4: a full flash image of a program in flash isn't supported")
+		}
+		const flashBase = 0x2000
+		const pageSize = 0x10000
+		ramImageSize := 24
+		for _, seg := range segments {
+			ramImageSize += 8 + len(seg.data)
+		}
+		ramImageSize += 16 - ramImageSize%16
+		ramImageSize += 32
+		flashAddr := (flashBase + ramImageSize + pageSize - 1) &^ (pageSize - 1)
+		esp32p4FlashOffset = flashAddr - flashBase
+
+		syms, err := inf.Symbols()
+		if err != nil {
+			return fmt.Errorf("ESP32-P4: failed to read symbols: %w", err)
+		}
+		patched := false
+		for _, sym := range syms {
+			if sym.Name != "_flash_map_addr" {
+				continue
+			}
+			for _, seg := range segments {
+				start := uint64(seg.addr)
+				if sym.Value >= start && sym.Value+4 <= start+uint64(len(seg.data)) {
+					binary.LittleEndian.PutUint32(seg.data[sym.Value-start:], uint32(flashAddr))
+					patched = true
+				}
+			}
+		}
+		if !patched {
+			return fmt.Errorf("ESP32-P4: _flash_map_addr is not in a RAM segment")
 		}
 	}
 
@@ -327,6 +379,7 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		"esp32c3": 0x0005,
 		"esp32c6": 0x000d,
 		"esp32h2": 0x0010,
+		"esp32p4": 0x0012,
 		"esp32s3": 0x0009,
 	}[chip]
 
@@ -339,12 +392,13 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 		"esp32c3": 0x1f, // 80MHz=0x0F, 2MB=0x10
 		"esp32c6": 0x10, // 80MHz=0x00, 2MB=0x10 (C6 uses different freq encoding)
 		"esp32h2": 0x1f, // 48MHz=0x0F, 2MB=0x10
+		"esp32p4": 0x1f, // 80MHz=0x0F, 2MB=0x10
 		"esp32s3": 0x1f, // 80MHz=0x0F, 2MB=0x10
 	}[chip]
 
 	// Image header.
 	switch chip {
-	case "esp32", "esp32c3", "esp32s3", "esp32c6", "esp32h2":
+	case "esp32", "esp32c3", "esp32s3", "esp32c6", "esp32h2", "esp32p4":
 		// Header format:
 		// https://github.com/espressif/esp-idf/blob/v4.3/components/bootloader_support/include/esp_app_format.h#L71
 		// Note: not adding a SHA256 hash as the binary is modified by
@@ -473,6 +527,18 @@ func makeESPFirmwareImage(infile, outfile, format string) error {
 			for _, seg := range iromSegs {
 				outf.Write(seg.data)
 			}
+		}
+	}
+
+	if chip == "esp32p4" && len(flashSegments) > 0 {
+		first := flashSegments[0].addr
+		for _, seg := range flashSegments {
+			offset := esp32p4FlashOffset + int(seg.addr-first)
+			if outf.Len() > offset {
+				return fmt.Errorf("ESP32-P4: RAM image overlaps the flash part")
+			}
+			outf.Write(make([]byte, offset-outf.Len()))
+			outf.Write(seg.data)
 		}
 	}
 
