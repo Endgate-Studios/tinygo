@@ -105,13 +105,17 @@ func (i2c *I2C) clearBus(config I2CConfig) {
 
 //go:inline
 func (i2c *I2C) initPins(config I2CConfig) {
+	// Internal pull-ups, as enable_internal_pullup in ESP-IDF i2c.c. configure() writes the whole
+	// IO MUX register, so set them after it.
 	config.SDA.configure(PinConfig{Mode: PinOutput}, i2c.funcSDA)
+	config.SDA.pullUp()
 	inFunc(i2c.funcSDA).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDA)<<esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos)
 	config.SDA.Set(true)
 	config.SDA.pinReg().SetBits(esp.GPIO_PIN_PAD_DRIVER)
 	i2c.Bus.SetCTR_SDA_FORCE_OUT(1)
 
 	config.SCL.configure(PinConfig{Mode: PinOutput}, i2c.funcSCL)
+	config.SCL.pullUp()
 	inFunc(i2c.funcSCL).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SCL)<<esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos)
 	config.SCL.Set(true)
 	// Configure the pad with the given IO mux configuration.
