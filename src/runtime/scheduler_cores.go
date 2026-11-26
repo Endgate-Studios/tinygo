@@ -135,8 +135,31 @@ func addSleepTask(t *task.Task, wakeup timeUnit) {
 
 func Gosched() {
 	schedulerLock.Lock()
-	runqueue.Push(task.Current())
+	t := task.Current()
+	runqueue.Push(t)
+	if core, assigned := t.AssignedCore(); assigned && core != currentCPU() {
+		schedulerWakeCore(core)
+	}
 	task.PauseLocked()
+}
+
+// procPin saves one interrupt state per core.
+const procPinSlots = numCPU
+
+func procPinSlot() uint32 {
+	return currentCPU()
+}
+
+func lockOSThread() {
+	schedulerLock.Lock()
+	task.Current().LockOSThread(currentCPU())
+	schedulerLock.Unlock()
+}
+
+func unlockOSThread() {
+	schedulerLock.Lock()
+	task.Current().UnlockOSThread()
+	schedulerLock.Unlock()
 }
 
 // NumCPU returns the number of CPU cores on this system.
@@ -147,8 +170,8 @@ func NumCPU() int {
 // Wake a core that may run the given task.
 // Must be called with the scheduler lock held.
 func schedulerWakeTask(t *task.Task) {
-	if t.Affinity.Core != 0 {
-		schedulerWakeCore(uint32(t.Affinity.Core - 1))
+	if core, assigned := t.AssignedCore(); assigned {
+		schedulerWakeCore(core)
 	} else {
 		schedulerWake()
 	}
